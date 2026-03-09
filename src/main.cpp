@@ -18,6 +18,7 @@
 #include "regression.hpp"
 #include "pff_format.hpp"
 #include "encoder.hpp"
+#include "numeric_parser.hpp"
 
 namespace fs = std::filesystem;
 
@@ -65,7 +66,9 @@ void print_usage(const char* prog_name) {
     std::cout << "  --threads N:     number of worker threads (default: all cores)\n";
     std::cout << "  --min-minor N:   min non-major non-indel count to keep a position (default: 1)\n";
     std::cout << "  --dlt:           use direct lookup table encoder\n";
-    std::cout << "  --datatype <type>: universal (default), protein, nucleotide\n";
+    std::cout << "  --datatype <type>: universal (default), protein, nucleotide, numeric\n";
+    std::cout << "                     numeric: list file points to whitespace-delimited tabular files\n";
+    std::cout << "                              (first col = sample name, remaining cols = float features)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -134,7 +137,8 @@ int main(int argc, char* argv[]) {
                         std::cerr << "Warning: --param '" << kv << "' has no '=', ignoring\n";
                 } else if (arg == "--datatype" && i + 1 < argc) {
                     datatype = argv[++i];
-                    if (datatype != "universal" && datatype != "protein" && datatype != "nucleotide")
+                    if (datatype != "universal" && datatype != "protein" &&
+                        datatype != "nucleotide" && datatype != "numeric")
                         throw std::runtime_error("Unknown datatype: " + datatype);
                 } else if (arg == "--nfolds" && i + 1 < argc) {
                     nfolds = std::stoi(argv[++i]);
@@ -191,7 +195,7 @@ int main(int argc, char* argv[]) {
             fs::create_directories(output_dir);
 
             std::unordered_set<char> allowed_chars;
-            if (datatype != "universal") {
+            if (datatype != "universal" && datatype != "numeric") {
                 fs::path ini = fs::path(argv[0]).parent_path() / "data_defs.ini";
                 if (!fs::exists(ini)) ini = fs::current_path() / "data_defs.ini";
                 if (!fs::exists(ini))
@@ -202,221 +206,473 @@ int main(int argc, char* argv[]) {
             }
 
             // --- Phase 1: Conversion ---
-            std::queue<fs::path> convert_queue;
-            int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0;
-            for (auto& fasta_path : all_fasta_paths) {
-                fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
-                fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
-                if (fs::exists(err_path)) { ++skipped_error; continue; }
-                if (fs::exists(pff_path)) {
-                    try {
-                        auto meta = fasta::read_pff_metadata(pff_path);
-                        if (meta.orientation == orientation && meta.datatype == datatype &&
-                            meta.source_path == fs::absolute(fasta_path).string())
-                            { ++skipped_done; continue; }
-                        ++skipped_mismatch;
-                    } catch (...) {}
-                }
-                convert_queue.push(fasta_path);
-            }
-
-            int total_to_convert = static_cast<int>(convert_queue.size());
-            std::cout << "\n--- Phase 1: Conversion ---\n";
-            std::cout << "  Cache directory:       " << cache_dir << "\n";
-            std::cout << "  To convert:            " << total_to_convert << "\n";
-            std::cout << "  Skipped (done):        " << skipped_done << "\n";
-            std::cout << "  Skipped (prior error): " << skipped_error << "\n";
-            std::cout << "  Re-converting (orientation mismatch): " << skipped_mismatch << "\n";
-            std::cout << "  Worker threads:        " << num_threads << "\n\n";
-
             int conv_converted = 0, conv_failed = 0;
             double conv_elapsed = 0.0;
-            if (total_to_convert > 0) {
-                std::mutex queue_mutex, print_mutex;
-                auto conv_start = std::chrono::steady_clock::now();
 
-                auto conv_worker = [&]() {
-                    while (true) {
-                        fs::path fasta_path;
-                        {
-                            std::lock_guard<std::mutex> lock(queue_mutex);
-                            if (convert_queue.empty()) break;
-                            fasta_path = convert_queue.front();
-                            convert_queue.pop();
-                        }
-                        fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
-                        fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
+            if (datatype == "numeric") {
+                // Numeric branch: FASTA paths are actually tabular files; cache as .pnf
+                std::queue<fs::path> convert_queue;
+                int skipped_done = 0, skipped_error = 0;
+                for (auto& tab_path : all_fasta_paths) {
+                    fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+                    fs::path err_path = cache_dir / (tab_path.stem().string() + ".err");
+                    if (fs::exists(err_path)) { ++skipped_error; continue; }
+                    if (fs::exists(pnf_path)) {
                         try {
-                            fasta::fasta_to_pff(fasta_path, pff_path, orientation, datatype, allowed_chars);
-                            std::lock_guard<std::mutex> lock(print_mutex);
-                            ++conv_converted;
-                            std::cout << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] OK: "
-                                      << fasta_path.filename() << "\n";
-                        } catch (const std::exception& e) {
-                            std::ofstream err_file(err_path);
-                            if (err_file) err_file << e.what() << "\n";
-                            std::lock_guard<std::mutex> lock(print_mutex);
-                            ++conv_failed;
-                            std::cerr << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] FAIL: "
-                                      << fasta_path.filename() << " -> " << e.what() << "\n";
-                        }
+                            auto meta = numeric::read_pnf_metadata(pnf_path);
+                            if (meta.source_path == fs::absolute(tab_path).string())
+                                { ++skipped_done; continue; }
+                        } catch (...) {}
                     }
-                };
-
-                unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_to_convert));
-                std::vector<std::thread> threads;
-                threads.reserve(tc);
-                for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(conv_worker);
-                for (auto& t : threads) t.join();
-
-                conv_elapsed = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - conv_start).count();
-                std::cout << "\nConversion done. Converted: " << conv_converted
-                          << ", Failed: " << conv_failed << "\n";
-            } else {
-                std::cout << "Nothing to convert.\n";
-            }
-
-            // --- Phase 2: Encoding ---
-            std::vector<fs::path> pff_paths;
-            for (auto& fasta_path : all_fasta_paths) {
-                fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
-                if (!fs::exists(pff_path)) {
-                    std::cerr << "Warning: no .pff for " << fasta_path.filename() << ", skipping\n";
-                    continue;
+                    convert_queue.push(tab_path);
                 }
-                pff_paths.push_back(pff_path);
-            }
-            int total_encode = static_cast<int>(pff_paths.size());
 
-            std::cout << "\n--- Phase 2: Encoding ---\n";
-            std::cout << "  Alignments to encode: " << total_encode << "\n";
-            std::cout << "  Min-minor threshold:  " << min_minor << "\n";
-            std::cout << "  Worker threads:       " << num_threads << "\n";
-            std::cout << "  Encoder:              " << (use_dlt ? "DLT" : "standard") << "\n\n";
+                int total_to_convert = static_cast<int>(convert_queue.size());
+                std::cout << "\n--- Phase 1: Conversion (numeric) ---\n";
+                std::cout << "  Cache directory:       " << cache_dir << "\n";
+                std::cout << "  To convert:            " << total_to_convert << "\n";
+                std::cout << "  Skipped (done):        " << skipped_done << "\n";
+                std::cout << "  Skipped (prior error): " << skipped_error << "\n";
+                std::cout << "  Worker threads:        " << num_threads << "\n\n";
 
-            uint32_t N = static_cast<uint32_t>(hyp_seq_names.size());
-            auto encode_start = std::chrono::steady_clock::now();
-            std::vector<encoder::AlignmentResult> results(total_encode);
-            {
-                std::mutex queue_mutex, print_mutex;
-                std::queue<int> work_queue;
-                for (int i = 0; i < total_encode; ++i) work_queue.push(i);
-                int done_count = 0;
+                if (total_to_convert > 0) {
+                    std::mutex queue_mutex, print_mutex;
+                    auto conv_start = std::chrono::steady_clock::now();
 
-                auto enc_worker = [&]() {
-                    while (true) {
-                        int idx;
-                        {
-                            std::lock_guard<std::mutex> lock(queue_mutex);
-                            if (work_queue.empty()) break;
-                            idx = work_queue.front();
-                            work_queue.pop();
-                        }
-                        try {
-                            results[idx] = use_dlt
-                                ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor)
-                                : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor);
+                    auto conv_worker = [&]() {
+                        while (true) {
+                            fs::path tab_path;
                             {
-                                std::lock_guard<std::mutex> lock(print_mutex);
-                                ++done_count;
-                                std::cout << "[" << done_count << "/" << total_encode << "] "
-                                          << pff_paths[idx].filename().string()
-                                          << " -> " << results[idx].columns.size() << " columns\n";
+                                std::lock_guard<std::mutex> lock(queue_mutex);
+                                if (convert_queue.empty()) break;
+                                tab_path = convert_queue.front();
+                                convert_queue.pop();
                             }
-                        } catch (const std::exception& e) {
-                            results[idx].failed    = true;
-                            results[idx].error_msg = e.what();
-                            results[idx].stem      = pff_paths[idx].stem().string();
-                            std::lock_guard<std::mutex> lock(print_mutex);
-                            ++done_count;
-                            std::cerr << "[" << done_count << "/" << total_encode << "] FAIL: "
-                                      << pff_paths[idx].filename().string()
-                                      << " -> " << e.what() << "\n";
+                            fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+                            fs::path err_path = cache_dir / (tab_path.stem().string() + ".err");
+                            try {
+                                numeric::tabular_to_pnf(tab_path, pnf_path);
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++conv_converted;
+                                std::cout << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] OK: "
+                                          << tab_path.filename() << "\n";
+                            } catch (const std::exception& e) {
+                                std::ofstream err_file(err_path);
+                                if (err_file) err_file << e.what() << "\n";
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++conv_failed;
+                                std::cerr << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] FAIL: "
+                                          << tab_path.filename() << " -> " << e.what() << "\n";
+                            }
                         }
-                    }
-                };
+                    };
 
-                unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_encode));
-                std::vector<std::thread> threads;
-                threads.reserve(tc);
-                for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
-                for (auto& t : threads) t.join();
+                    unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_to_convert));
+                    std::vector<std::thread> threads;
+                    threads.reserve(tc);
+                    for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(conv_worker);
+                    for (auto& t : threads) t.join();
+
+                    conv_elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - conv_start).count();
+                    std::cout << "\nConversion done. Converted: " << conv_converted
+                              << ", Failed: " << conv_failed << "\n";
+                } else {
+                    std::cout << "Nothing to convert.\n";
+                }
+            } else {
+                // FASTA branch
+                std::queue<fs::path> convert_queue;
+                int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0;
+                for (auto& fasta_path : all_fasta_paths) {
+                    fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+                    fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
+                    if (fs::exists(err_path)) { ++skipped_error; continue; }
+                    if (fs::exists(pff_path)) {
+                        try {
+                            auto meta = fasta::read_pff_metadata(pff_path);
+                            if (meta.orientation == orientation && meta.datatype == datatype &&
+                                meta.source_path == fs::absolute(fasta_path).string())
+                                { ++skipped_done; continue; }
+                            ++skipped_mismatch;
+                        } catch (...) {}
+                    }
+                    convert_queue.push(fasta_path);
+                }
+
+                int total_to_convert = static_cast<int>(convert_queue.size());
+                std::cout << "\n--- Phase 1: Conversion ---\n";
+                std::cout << "  Cache directory:       " << cache_dir << "\n";
+                std::cout << "  To convert:            " << total_to_convert << "\n";
+                std::cout << "  Skipped (done):        " << skipped_done << "\n";
+                std::cout << "  Skipped (prior error): " << skipped_error << "\n";
+                std::cout << "  Re-converting (orientation mismatch): " << skipped_mismatch << "\n";
+                std::cout << "  Worker threads:        " << num_threads << "\n\n";
+
+                if (total_to_convert > 0) {
+                    std::mutex queue_mutex, print_mutex;
+                    auto conv_start = std::chrono::steady_clock::now();
+
+                    auto conv_worker = [&]() {
+                        while (true) {
+                            fs::path fasta_path;
+                            {
+                                std::lock_guard<std::mutex> lock(queue_mutex);
+                                if (convert_queue.empty()) break;
+                                fasta_path = convert_queue.front();
+                                convert_queue.pop();
+                            }
+                            fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+                            fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
+                            try {
+                                fasta::fasta_to_pff(fasta_path, pff_path, orientation, datatype, allowed_chars);
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++conv_converted;
+                                std::cout << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] OK: "
+                                          << fasta_path.filename() << "\n";
+                            } catch (const std::exception& e) {
+                                std::ofstream err_file(err_path);
+                                if (err_file) err_file << e.what() << "\n";
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++conv_failed;
+                                std::cerr << "[" << conv_converted + conv_failed << "/" << total_to_convert << "] FAIL: "
+                                          << fasta_path.filename() << " -> " << e.what() << "\n";
+                            }
+                        }
+                    };
+
+                    unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_to_convert));
+                    std::vector<std::thread> threads;
+                    threads.reserve(tc);
+                    for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(conv_worker);
+                    for (auto& t : threads) t.join();
+
+                    conv_elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - conv_start).count();
+                    std::cout << "\nConversion done. Converted: " << conv_converted
+                              << ", Failed: " << conv_failed << "\n";
+                } else {
+                    std::cout << "Nothing to convert.\n";
+                }
             }
-            double encode_elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - encode_start).count();
+
+            // --- Phase 2: Encoding / Matrix Building ---
+            uint32_t N = static_cast<uint32_t>(hyp_seq_names.size());
+            uint64_t total_cols = 0;
+            int n_aligned = 0, failed_count = 0, total_processed = 0;
+            arma::fmat features;
+            arma::mat alg_table;
+            std::vector<std::string> all_missing;
+            double encode_elapsed = 0.0;
 
             auto write_start = std::chrono::steady_clock::now();
-            std::vector<std::string> all_missing;
-            for (int i = 0; i < total_encode; ++i)
-                for (auto& m : results[i].missing_sequences)
-                    all_missing.push_back(m);
 
-            uint64_t total_cols = 0;
-            int n_aligned = 0, failed_count = 0;
-            for (auto& r : results) {
-                if (r.failed) { ++failed_count; continue; }
-                total_cols += r.columns.size();
-                ++n_aligned;
-            }
-
-            arma::fmat features(N, total_cols, arma::fill::zeros);
-            {
-                uint64_t col_offset = 0;
-                for (auto& r : results) {
-                    if (r.failed) continue;
-                    for (size_t j = 0; j < r.columns.size(); ++j)
-                        for (uint32_t i = 0; i < N; ++i)
-                            features(i, col_offset + j) = static_cast<float>(r.columns[j][i]);
-                    col_offset += r.columns.size();
-                }
-            }
-            arma::frowvec responses(hyp_values.data(), N);
-
-            std::cout << "\nWriting alignment table...\n";
-            arma::mat alg_table(3, n_aligned, arma::fill::zeros);
-            {
-                uint64_t offset = 0;
-                int col = 0;
-                for (auto& r : results) {
-                    if (r.failed) continue;
-                    uint64_t ncols = r.columns.size();
-                    alg_table(0, col) = static_cast<double>(offset + 1); // 1-based start
-                    alg_table(1, col) = static_cast<double>(offset + ncols);
-                    alg_table(2, col) = std::sqrt(static_cast<double>(ncols));
-                    offset += ncols;
-                    ++col;
-                }
-                std::ofstream table(output_dir / "alignment_table.txt");
-                for (int row = 0; row < 3; ++row) {
-                    for (int c = 0; c < n_aligned; ++c) {
-                        if (c > 0) table << '\t';
-                        if (row < 2)
-                            table << static_cast<uint64_t>(alg_table(row, c));
-                        else
-                            table << std::fixed << std::setprecision(6) << alg_table(row, c);
+            if (datatype == "numeric") {
+                // Collect .pnf paths
+                std::vector<fs::path> pnf_paths;
+                for (auto& tab_path : all_fasta_paths) {
+                    fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+                    if (!fs::exists(pnf_path)) {
+                        std::cerr << "Warning: no .pnf for " << tab_path.filename() << ", skipping\n";
+                        continue;
                     }
-                    table << '\n';
+                    pnf_paths.push_back(pnf_path);
                 }
-            }
+                int total_files = static_cast<int>(pnf_paths.size());
+                total_processed = total_files;
 
-            if (!all_missing.empty()) {
-                std::ofstream missing_file(output_dir / "missing_sequences.txt");
-                for (auto& m : all_missing) missing_file << m << '\n';
-                std::cout << "Missing sequences: " << all_missing.size()
-                          << " -> " << (output_dir / "missing_sequences.txt").string() << "\n";
-            }
+                std::cout << "\n--- Phase 2: Numeric matrix assembly ---\n";
+                std::cout << "  Files to process: " << total_files << "\n";
+                std::cout << "  Worker threads:   " << num_threads << "\n\n";
 
-            // Write combined feature map (column index -> position/allele, in matrix column order)
-            {
-                std::ofstream combined_map(output_dir / "combined.map");
-                combined_map << "Position\tLabel\n"; // header: skipped by writeSparseMappedWeightsToStream
+                struct NumericResult {
+                    std::string stem;
+                    std::vector<std::string> feature_labels;
+                    std::vector<std::vector<float>> columns; // columns[j][i]: feat j, hyp-seq i
+                    std::vector<std::string> missing_sequences;
+                    bool failed = false;
+                    std::string error_msg;
+                };
+
+                auto encode_start = std::chrono::steady_clock::now();
+                std::vector<NumericResult> num_results(total_files);
+                {
+                    std::mutex queue_mutex, print_mutex;
+                    std::queue<int> work_queue;
+                    for (int i = 0; i < total_files; ++i) work_queue.push(i);
+                    int done_count = 0;
+
+                    auto enc_worker = [&]() {
+                        while (true) {
+                            int idx;
+                            {
+                                std::lock_guard<std::mutex> lock(queue_mutex);
+                                if (work_queue.empty()) break;
+                                idx = work_queue.front();
+                                work_queue.pop();
+                            }
+                            NumericResult& nr = num_results[idx];
+                            nr.stem = pnf_paths[idx].stem().string();
+                            try {
+                                auto meta = numeric::read_pnf_metadata(pnf_paths[idx]);
+                                auto data = numeric::read_pnf_data(pnf_paths[idx], meta);
+                                nr.feature_labels = meta.feature_labels;
+
+                                // Build seq_id -> row index map
+                                std::unordered_map<std::string, uint32_t> id_to_row;
+                                for (uint32_t s = 0; s < meta.num_sequences; ++s)
+                                    id_to_row[meta.seq_ids[s]] = s;
+
+                                // Build seq_mapping: hyp index -> pnf row (-1 if missing)
+                                std::vector<int> seq_mapping(N, -1);
+                                for (uint32_t i = 0; i < N; ++i) {
+                                    auto it = id_to_row.find(hyp_seq_names[i]);
+                                    if (it != id_to_row.end())
+                                        seq_mapping[i] = static_cast<int>(it->second);
+                                    else
+                                        nr.missing_sequences.push_back(hyp_seq_names[i]);
+                                }
+
+                                // Build columns[j][i]
+                                uint32_t F = meta.num_features;
+                                nr.columns.resize(F, std::vector<float>(N, 0.0f));
+                                for (uint32_t j = 0; j < F; ++j)
+                                    for (uint32_t i = 0; i < N; ++i)
+                                        if (seq_mapping[i] >= 0)
+                                            nr.columns[j][i] = data[static_cast<uint32_t>(seq_mapping[i])][j];
+
+                                {
+                                    std::lock_guard<std::mutex> lock(print_mutex);
+                                    ++done_count;
+                                    std::cout << "[" << done_count << "/" << total_files << "] "
+                                              << pnf_paths[idx].filename().string()
+                                              << " -> " << F << " features\n";
+                                }
+                            } catch (const std::exception& e) {
+                                nr.failed = true;
+                                nr.error_msg = e.what();
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++done_count;
+                                std::cerr << "[" << done_count << "/" << total_files << "] FAIL: "
+                                          << pnf_paths[idx].filename().string()
+                                          << " -> " << e.what() << "\n";
+                            }
+                        }
+                    };
+
+                    unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_files));
+                    std::vector<std::thread> threads;
+                    threads.reserve(tc);
+                    for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
+                    for (auto& t : threads) t.join();
+                }
+                encode_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - encode_start).count();
+
+                for (auto& nr : num_results) {
+                    for (auto& m : nr.missing_sequences) all_missing.push_back(m);
+                    if (nr.failed) { ++failed_count; continue; }
+                    total_cols += nr.columns.size();
+                    ++n_aligned;
+                }
+
+                features.zeros(N, total_cols);
+                {
+                    uint64_t col_offset = 0;
+                    for (auto& nr : num_results) {
+                        if (nr.failed) continue;
+                        for (size_t j = 0; j < nr.columns.size(); ++j)
+                            for (uint32_t i = 0; i < N; ++i)
+                                features(i, col_offset + j) = nr.columns[j][i];
+                        col_offset += nr.columns.size();
+                    }
+                }
+
+                // Write alignment table
+                std::cout << "\nWriting alignment table...\n";
+                alg_table.zeros(3, n_aligned);
+                {
+                    uint64_t offset = 0;
+                    int col = 0;
+                    for (auto& nr : num_results) {
+                        if (nr.failed) continue;
+                        uint64_t ncols = nr.columns.size();
+                        alg_table(0, col) = static_cast<double>(offset + 1);
+                        alg_table(1, col) = static_cast<double>(offset + ncols);
+                        alg_table(2, col) = std::sqrt(static_cast<double>(ncols));
+                        offset += ncols;
+                        ++col;
+                    }
+                    std::ofstream table(output_dir / "alignment_table.txt");
+                    for (int row = 0; row < 3; ++row) {
+                        for (int c = 0; c < n_aligned; ++c) {
+                            if (c > 0) table << '\t';
+                            if (row < 2)
+                                table << static_cast<uint64_t>(alg_table(row, c));
+                            else
+                                table << std::fixed << std::setprecision(6) << alg_table(row, c);
+                        }
+                        table << '\n';
+                    }
+                }
+
+                if (!all_missing.empty()) {
+                    std::ofstream missing_file(output_dir / "missing_sequences.txt");
+                    for (auto& m : all_missing) missing_file << m << '\n';
+                    std::cout << "Missing sequences: " << all_missing.size()
+                              << " -> " << (output_dir / "missing_sequences.txt").string() << "\n";
+                }
+
+                // Write combined.map: <stem>_<feature_name>
+                {
+                    std::ofstream combined_map(output_dir / "combined.map");
+                    combined_map << "Position\tLabel\n";
+                    uint64_t pos = 0;
+                    for (auto& nr : num_results) {
+                        if (nr.failed) continue;
+                        for (auto& feat_name : nr.feature_labels)
+                            combined_map << pos++ << '\t' << nr.stem << '_' << feat_name << '\n';
+                    }
+                }
+
+            } else {
+                // FASTA branch: encoding
+                std::vector<fs::path> pff_paths;
+                for (auto& fasta_path : all_fasta_paths) {
+                    fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+                    if (!fs::exists(pff_path)) {
+                        std::cerr << "Warning: no .pff for " << fasta_path.filename() << ", skipping\n";
+                        continue;
+                    }
+                    pff_paths.push_back(pff_path);
+                }
+                int total_encode = static_cast<int>(pff_paths.size());
+                total_processed = total_encode;
+
+                std::cout << "\n--- Phase 2: Encoding ---\n";
+                std::cout << "  Alignments to encode: " << total_encode << "\n";
+                std::cout << "  Min-minor threshold:  " << min_minor << "\n";
+                std::cout << "  Worker threads:       " << num_threads << "\n";
+                std::cout << "  Encoder:              " << (use_dlt ? "DLT" : "standard") << "\n\n";
+
+                auto encode_start = std::chrono::steady_clock::now();
+                std::vector<encoder::AlignmentResult> results(total_encode);
+                {
+                    std::mutex queue_mutex, print_mutex;
+                    std::queue<int> work_queue;
+                    for (int i = 0; i < total_encode; ++i) work_queue.push(i);
+                    int done_count = 0;
+
+                    auto enc_worker = [&]() {
+                        while (true) {
+                            int idx;
+                            {
+                                std::lock_guard<std::mutex> lock(queue_mutex);
+                                if (work_queue.empty()) break;
+                                idx = work_queue.front();
+                                work_queue.pop();
+                            }
+                            try {
+                                results[idx] = use_dlt
+                                    ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor)
+                                    : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor);
+                                {
+                                    std::lock_guard<std::mutex> lock(print_mutex);
+                                    ++done_count;
+                                    std::cout << "[" << done_count << "/" << total_encode << "] "
+                                              << pff_paths[idx].filename().string()
+                                              << " -> " << results[idx].columns.size() << " columns\n";
+                                }
+                            } catch (const std::exception& e) {
+                                results[idx].failed    = true;
+                                results[idx].error_msg = e.what();
+                                results[idx].stem      = pff_paths[idx].stem().string();
+                                std::lock_guard<std::mutex> lock(print_mutex);
+                                ++done_count;
+                                std::cerr << "[" << done_count << "/" << total_encode << "] FAIL: "
+                                          << pff_paths[idx].filename().string()
+                                          << " -> " << e.what() << "\n";
+                            }
+                        }
+                    };
+
+                    unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_encode));
+                    std::vector<std::thread> threads;
+                    threads.reserve(tc);
+                    for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
+                    for (auto& t : threads) t.join();
+                }
+                encode_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - encode_start).count();
+
+                for (int i = 0; i < total_encode; ++i)
+                    for (auto& m : results[i].missing_sequences)
+                        all_missing.push_back(m);
+
                 for (auto& r : results) {
-                    if (r.failed) continue;
-                    for (auto& [pos, allele] : r.map)
-                        combined_map << pos << '\t' << r.stem << '_' << pos << '_' << allele << '\n';
+                    if (r.failed) { ++failed_count; continue; }
+                    total_cols += r.columns.size();
+                    ++n_aligned;
+                }
+
+                features.zeros(N, total_cols);
+                {
+                    uint64_t col_offset = 0;
+                    for (auto& r : results) {
+                        if (r.failed) continue;
+                        for (size_t j = 0; j < r.columns.size(); ++j)
+                            for (uint32_t i = 0; i < N; ++i)
+                                features(i, col_offset + j) = static_cast<float>(r.columns[j][i]);
+                        col_offset += r.columns.size();
+                    }
+                }
+
+                std::cout << "\nWriting alignment table...\n";
+                alg_table.zeros(3, n_aligned);
+                {
+                    uint64_t offset = 0;
+                    int col = 0;
+                    for (auto& r : results) {
+                        if (r.failed) continue;
+                        uint64_t ncols = r.columns.size();
+                        alg_table(0, col) = static_cast<double>(offset + 1);
+                        alg_table(1, col) = static_cast<double>(offset + ncols);
+                        alg_table(2, col) = std::sqrt(static_cast<double>(ncols));
+                        offset += ncols;
+                        ++col;
+                    }
+                    std::ofstream table(output_dir / "alignment_table.txt");
+                    for (int row = 0; row < 3; ++row) {
+                        for (int c = 0; c < n_aligned; ++c) {
+                            if (c > 0) table << '\t';
+                            if (row < 2)
+                                table << static_cast<uint64_t>(alg_table(row, c));
+                            else
+                                table << std::fixed << std::setprecision(6) << alg_table(row, c);
+                        }
+                        table << '\n';
+                    }
+                }
+
+                if (!all_missing.empty()) {
+                    std::ofstream missing_file(output_dir / "missing_sequences.txt");
+                    for (auto& m : all_missing) missing_file << m << '\n';
+                    std::cout << "Missing sequences: " << all_missing.size()
+                              << " -> " << (output_dir / "missing_sequences.txt").string() << "\n";
+                }
+
+                {
+                    std::ofstream combined_map(output_dir / "combined.map");
+                    combined_map << "Position\tLabel\n";
+                    for (auto& r : results) {
+                        if (r.failed) continue;
+                        for (auto& [pos, allele] : r.map)
+                            combined_map << pos << '\t' << r.stem << '_' << pos << '_' << allele << '\n';
+                    }
                 }
             }
+
+            arma::frowvec responses(hyp_values.data(), N);
 
             double write_elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - write_start).count();
@@ -624,7 +880,7 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "\n--- Summary ---\n";
-            std::cout << "  Alignments encoded:   " << n_aligned << "/" << total_encode << "\n";
+            std::cout << "  Files processed:      " << n_aligned << "/" << total_processed << "\n";
             std::cout << "  Total columns:        " << total_cols << "\n";
             if (failed_count > 0)
                 std::cout << "  Failed:               " << failed_count << "\n";

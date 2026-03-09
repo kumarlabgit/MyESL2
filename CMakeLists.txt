@@ -24,6 +24,7 @@ set(SOURCES
     src/sg_lasso_leastr.cpp
     src/overlapping_sg_lasso_leastr.cpp
     src/overlapping_sg_lasso_logisticr.cpp
+    src/numeric_parser.cpp
 )
 
 # Create executable
