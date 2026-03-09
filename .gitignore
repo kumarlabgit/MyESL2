@@ -44,6 +44,10 @@ fungi_analysis.exe
 *.swo
 *~
 
+# Library binaries bundled with source
+*.dll
+*.lib
+
 # PFF cache and output directories
 bench_protein/
 pff_cache/

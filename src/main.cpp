@@ -12,6 +12,7 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <sstream>
 #include <armadillo>
 #include "fasta_parser.hpp"
 #include "regression.hpp"
@@ -50,7 +51,8 @@ void print_usage(const char* prog_name) {
     std::cout << "\nCommands:\n";
     std::cout << "  train      - Convert FASTA files to PFF, encode, then run regression\n";
     std::cout << "               --method <name>:         regression method (omit to skip regression)\n";
-    std::cout << "               --lambda <l1> <l2>:      regularization params (default: 0.1 0.1)\n";
+    std::cout << "               --lambda <l1> <l2>:      single lambda pair; writes lambda_list.txt (default: 0.1 0.1)\n";
+    std::cout << "               --lambda-file <path>:    file of lambda pairs (one 'l1 l2' per line); mutually exclusive with --lambda\n";
     std::cout << "               --param <key>=<value>:   slep option or method-specific param\n";
     std::cout << "                 intercept=false        disable intercept term\n";
     std::cout << "                 field=<path>           group-index CSV (overlapping methods)\n";
@@ -97,6 +99,8 @@ int main(int argc, char* argv[]) {
             std::array<double, 2> lambda = {0.1, 0.1};
             std::map<std::string, std::string> params;
             int nfolds = 0;
+            std::string lambda_file_path;
+            bool lambda_explicitly_set = false;
 
             for (int i = 5; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -118,6 +122,9 @@ int main(int argc, char* argv[]) {
                 } else if (arg == "--lambda" && i + 2 < argc) {
                     lambda[0] = std::stod(argv[++i]);
                     lambda[1] = std::stod(argv[++i]);
+                    lambda_explicitly_set = true;
+                } else if (arg == "--lambda-file" && i + 1 < argc) {
+                    lambda_file_path = argv[++i];
                 } else if (arg == "--param" && i + 1 < argc) {
                     std::string kv = argv[++i];
                     auto eq = kv.find('=');
@@ -137,6 +144,9 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
                 }
             }
+
+            if (!lambda_file_path.empty() && lambda_explicitly_set)
+                throw std::runtime_error("--lambda and --lambda-file are mutually exclusive");
 
             // Read hypothesis file
             std::vector<std::string> hyp_seq_names;
@@ -417,9 +427,42 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("--nfolds requires --method");
 
             if (!method.empty()) {
+                // Build lambda list from file or single --lambda pair
+                auto load_lambda_list = [](const fs::path& p) {
+                    std::vector<std::array<double, 2>> list;
+                    std::ifstream f(p);
+                    if (!f) throw std::runtime_error("Cannot open lambda file: " + p.string());
+                    std::string line;
+                    while (std::getline(f, line)) {
+                        if (line.empty() || line[0] == '#') continue;
+                        std::istringstream ss(line);
+                        double l1, l2;
+                        if (!(ss >> l1 >> l2))
+                            throw std::runtime_error("Bad lambda line: " + line);
+                        list.push_back({l1, l2});
+                    }
+                    if (list.empty())
+                        throw std::runtime_error("Lambda file contains no valid pairs");
+                    return list;
+                };
+
+                std::vector<std::array<double, 2>> lambdas;
+                if (!lambda_file_path.empty()) {
+                    lambdas = load_lambda_list(lambda_file_path);
+                } else {
+                    fs::path gen_path = output_dir / "lambda_list.txt";
+                    {
+                        std::ofstream f(gen_path);
+                        f << lambda[0] << " " << lambda[1] << "\n";
+                    }
+                    lambdas = load_lambda_list(gen_path);
+                }
+
                 std::cout << "\n--- Phase 3: Regression ---\n";
-                std::cout << "  Method: " << method << "\n";
-                std::cout << "  Lambda: [" << lambda[0] << ", " << lambda[1] << "]\n";
+                std::cout << "  Method:  " << method << "\n";
+                std::cout << "  Lambdas: " << lambdas.size() << " pair(s)\n";
+                if (nfolds > 0)
+                    std::cout << "  K-fold CV: " << nfolds << " folds\n";
                 if (!params.empty()) {
                     std::cout << "  Params:\n";
                     for (auto& [k, v] : params)
@@ -428,128 +471,153 @@ int main(int argc, char* argv[]) {
 
                 auto regr_start = std::chrono::steady_clock::now();
 
-                if (nfolds == 0) {
-                    // Standard single-model path
-                    auto regr = regression::createRegressionAnalysis(
-                        method, features, responses, alg_table.t(), params, lambda);
+                // Build shared read-only structures once
+                std::unordered_map<std::string, uint64_t> label_to_col;
+                {
+                    std::ifstream map_f(output_dir / "combined.map");
+                    std::string line;
+                    std::getline(map_f, line); // skip header
+                    uint64_t col = 0;
+                    while (std::getline(map_f, line)) {
+                        if (line.empty()) continue;
+                        auto tab = line.find('\t');
+                        if (tab == std::string::npos) continue;
+                        label_to_col[line.substr(tab + 1)] = col++;
+                    }
+                }
 
-                    std::ofstream weights_out(output_dir / "weights.txt");
-                    std::ifstream feature_map_in(output_dir / "combined.map");
-                    regr->writeSparseMappedWeightsToStream(weights_out, feature_map_in);
-
-                    std::cout << "  Weights written to: " << (output_dir / "weights.txt") << "\n";
-                } else {
-                    // K-fold cross-validation path
-                    std::cout << "  K-fold CV: " << nfolds << " folds\n";
-
-                    // Build fold assignments (round-robin)
-                    arma::rowvec xval_idxs(N);
+                arma::rowvec xval_idxs(N);
+                if (nfolds > 0)
                     for (uint32_t i = 0; i < N; ++i)
                         xval_idxs(i) = static_cast<double>(i % nfolds);
 
-                    // Build label_to_col from combined.map
-                    std::unordered_map<std::string, uint64_t> label_to_col;
-                    {
-                        std::ifstream map_f(output_dir / "combined.map");
-                        std::string line;
-                        std::getline(map_f, line); // skip header
-                        uint64_t col = 0;
-                        while (std::getline(map_f, line)) {
-                            if (line.empty()) continue;
-                            auto tab = line.find('\t');
-                            if (tab == std::string::npos) continue;
-                            label_to_col[line.substr(tab + 1)] = col++;
-                        }
-                    }
+                std::mutex queue_mutex, print_mutex;
+                std::queue<int> work_queue;
+                for (int i = 0; i < (int)lambdas.size(); ++i) work_queue.push(i);
 
-                    std::vector<double> cv_predictions(N, 0.0);
-
-                    for (int k = 0; k < nfolds; ++k) {
-                        auto regr = regression::createRegressionAnalysisXVal(
-                            method, features, responses, alg_table.t(), params, lambda,
-                            xval_idxs, k);
-
-                        fs::path fold_weights_path =
-                            output_dir / ("weights_fold_" + std::to_string(k) + ".txt");
+                auto lambda_worker = [&]() {
+                    while (true) {
+                        int idx;
                         {
-                            std::ofstream weights_out(fold_weights_path);
-                            std::ifstream feature_map_in(output_dir / "combined.map");
-                            regr->writeSparseMappedWeightsToStream(weights_out, feature_map_in);
+                            std::lock_guard<std::mutex> lk(queue_mutex);
+                            if (work_queue.empty()) break;
+                            idx = work_queue.front();
+                            work_queue.pop();
                         }
+                        auto& lam = lambdas[idx];
+                        fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+                        fs::create_directories(lam_dir);
 
-                        // Parse fold weights file
-                        double fold_intercept = 0.0;
-                        std::vector<std::pair<uint64_t, double>> fold_weights;
-                        {
-                            std::ifstream wf(fold_weights_path);
-                            std::string line;
-                            while (std::getline(wf, line)) {
-                                if (line.empty()) continue;
-                                auto tab = line.find('\t');
-                                if (tab == std::string::npos) continue;
-                                std::string label = line.substr(0, tab);
-                                double w = std::stod(line.substr(tab + 1));
-                                if (label == "Intercept") { fold_intercept = w; continue; }
-                                auto it = label_to_col.find(label);
-                                if (it != label_to_col.end())
-                                    fold_weights.emplace_back(it->second, w);
+                        if (nfolds == 0) {
+                            // Single model
+                            auto regr = regression::createRegressionAnalysis(
+                                method, features, responses, alg_table.t(), params, lam);
+                            std::ofstream wo(lam_dir / "weights.txt");
+                            std::ifstream mi(output_dir / "combined.map");
+                            regr->writeSparseMappedWeightsToStream(wo, mi);
+                            {
+                                std::lock_guard<std::mutex> lk(print_mutex);
+                                std::cout << "  [" << idx << "] lambda=[" << lam[0] << ","
+                                          << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
+                            }
+                        } else {
+                            // K-fold CV
+                            std::vector<double> cv_preds(N, 0.0);
+                            for (int k = 0; k < nfolds; ++k) {
+                                auto regr = regression::createRegressionAnalysisXVal(
+                                    method, features, responses, alg_table.t(), params, lam,
+                                    xval_idxs, k);
+                                fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
+                                {
+                                    std::ofstream wo(fw);
+                                    std::ifstream mi(output_dir / "combined.map");
+                                    regr->writeSparseMappedWeightsToStream(wo, mi);
+                                }
+
+                                // Parse fold weights
+                                double fold_intercept = 0.0;
+                                std::vector<std::pair<uint64_t, double>> fold_weights;
+                                {
+                                    std::ifstream wf(fw);
+                                    std::string line;
+                                    while (std::getline(wf, line)) {
+                                        if (line.empty()) continue;
+                                        auto tab = line.find('\t');
+                                        if (tab == std::string::npos) continue;
+                                        std::string label = line.substr(0, tab);
+                                        double w = std::stod(line.substr(tab + 1));
+                                        if (label == "Intercept") { fold_intercept = w; continue; }
+                                        auto it = label_to_col.find(label);
+                                        if (it != label_to_col.end())
+                                            fold_weights.emplace_back(it->second, w);
+                                    }
+                                }
+
+                                // Predict held-out
+                                int held_out = 0;
+                                for (uint32_t i = 0; i < N; ++i) {
+                                    if (xval_idxs(i) != static_cast<double>(k)) continue;
+                                    ++held_out;
+                                    double pred = fold_intercept;
+                                    for (auto& [col, w] : fold_weights)
+                                        pred += w * static_cast<double>(features(i, col));
+                                    cv_preds[i] = pred;
+                                }
+
+                                {
+                                    std::lock_guard<std::mutex> lk(print_mutex);
+                                    std::cout << "  [" << idx << "] fold " << k
+                                              << ": held-out=" << held_out
+                                              << ", non-zero weights=" << fold_weights.size() << "\n";
+                                }
+                            }
+
+                            // Write cv_predictions.txt
+                            {
+                                std::ofstream cv_out(lam_dir / "cv_predictions.txt");
+                                cv_out << std::fixed << std::setprecision(6);
+                                cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
+                                for (uint32_t i = 0; i < N; ++i)
+                                    cv_out << hyp_seq_names[i] << '\t'
+                                           << cv_preds[i] << '\t'
+                                           << hyp_values[i] << '\n';
+                            }
+
+                            // Classification metrics
+                            int tp = 0, tn = 0, fp = 0, fn = 0;
+                            for (uint32_t i = 0; i < N; ++i) {
+                                bool pred_pos = cv_preds[i] > 0.0;
+                                bool true_pos = hyp_values[i] > 0.0f;
+                                if      ( true_pos &&  pred_pos) ++tp;
+                                else if (!true_pos && !pred_pos) ++tn;
+                                else if (!true_pos &&  pred_pos) ++fp;
+                                else                              ++fn;
+                            }
+                            double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
+                            double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
+                            double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
+                            double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
+
+                            {
+                                std::lock_guard<std::mutex> lk(print_mutex);
+                                std::cout << std::fixed << std::setprecision(4);
+                                std::cout << "  [" << idx << "] lambda=[" << lam[0] << ","
+                                          << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
+                                std::cout << "    TP=" << tp << " TN=" << tn
+                                          << " FP=" << fp << " FN=" << fn << "\n";
+                                std::cout << "    TPR=" << tpr << " TNR=" << tnr
+                                          << " FPR=" << fpr << " FNR=" << fnr << "\n";
                             }
                         }
-
-                        // Predict held-out species
-                        int held_out = 0;
-                        for (uint32_t i = 0; i < N; ++i) {
-                            if (xval_idxs(i) != static_cast<double>(k)) continue;
-                            ++held_out;
-                            double pred = fold_intercept;
-                            for (auto& [col, w] : fold_weights)
-                                pred += w * static_cast<double>(features(i, col));
-                            cv_predictions[i] = pred;
-                        }
-
-                        std::cout << "  Fold " << k << ": held-out=" << held_out
-                                  << ", non-zero weights=" << fold_weights.size() << "\n";
                     }
+                };
 
-                    // Write cv_predictions.txt
-                    {
-                        std::ofstream cv_out(output_dir / "cv_predictions.txt");
-                        cv_out << std::fixed << std::setprecision(6);
-                        cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
-                        for (uint32_t i = 0; i < N; ++i)
-                            cv_out << hyp_seq_names[i] << '\t'
-                                   << cv_predictions[i] << '\t'
-                                   << hyp_values[i] << '\n';
-                    }
-                    std::cout << "  CV predictions written to: "
-                              << (output_dir / "cv_predictions.txt") << "\n";
-
-                    // Classification metrics (threshold = 0)
-                    {
-                        int tp = 0, tn = 0, fp = 0, fn = 0;
-                        for (uint32_t i = 0; i < N; ++i) {
-                            bool pred_pos = cv_predictions[i] > 0.0;
-                            bool true_pos = hyp_values[i] > 0.0f;
-                            if      ( true_pos &&  pred_pos) ++tp;
-                            else if (!true_pos && !pred_pos) ++tn;
-                            else if (!true_pos &&  pred_pos) ++fp;
-                            else                              ++fn;
-                        }
-                        double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
-                        double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
-                        double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
-                        double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
-
-                        std::cout << std::fixed << std::setprecision(4);
-                        std::cout << "\n--- CV Classification metrics (threshold = 0) ---\n";
-                        std::cout << "  TP=" << tp << "  TN=" << tn
-                                  << "  FP=" << fp << "  FN=" << fn << "\n";
-                        std::cout << "  True positive rate (sensitivity): " << tpr << "\n";
-                        std::cout << "  True negative rate (specificity): " << tnr << "\n";
-                        std::cout << "  False positive rate:              " << fpr << "\n";
-                        std::cout << "  False negative rate:              " << fnr << "\n";
-                    }
-                }
+                unsigned int tc = std::min(num_threads,
+                                           static_cast<unsigned int>(lambdas.size()));
+                std::vector<std::thread> threads;
+                threads.reserve(tc);
+                for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(lambda_worker);
+                for (auto& t : threads) t.join();
 
                 regr_elapsed = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - regr_start).count();
