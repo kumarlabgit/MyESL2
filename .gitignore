@@ -1,0 +1,56 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+
+# Compiled Object files
+*.o
+*.obj
+*.lo
+
+# Executables
+*.exe
+*.out
+*.app
+fungi_analysis
+fungi_analysis.exe
+
+# Debug files
+*.pdb
+*.ilk
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PFF cache and output directories
+bench_protein/
+pff_cache/
+out_*/
+output*/
+
+# Run artifacts
+*.pff
+build_log.txt
+regression_out.txt
