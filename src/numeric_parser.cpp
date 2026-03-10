@@ -36,37 +36,63 @@ void tabular_to_pnf(
 
     std::string line;
 
-    // Read header row
+    // Read first row
     if (!std::getline(in, line))
         throw std::runtime_error("Tabular file is empty: " + input.string());
-
-    // Remove trailing \r
     if (!line.empty() && line.back() == '\r') line.pop_back();
 
+    // Auto-detect header: try to parse the second token as a float.
+    // If it succeeds the first row is data; if it fails the first row is a header.
     std::vector<std::string> feature_labels;
+    std::string first_data_line; // non-empty only when the first row is data
+
     {
         std::istringstream ss(line);
-        std::string tok;
-        ss >> tok; // skip first column header (sample name label)
-        while (ss >> tok)
-            feature_labels.push_back(tok);
+        std::string first_tok, second_tok;
+        ss >> first_tok >> second_tok;
+        float probe;
+        std::istringstream probe_ss(second_tok);
+        if (second_tok.empty() || !(probe_ss >> probe)) {
+            // First row is a header: collect remaining tokens as feature labels
+            std::istringstream hdr(line);
+            std::string tok;
+            hdr >> tok; // skip sample-name column label
+            while (hdr >> tok)
+                feature_labels.push_back(tok);
+        } else {
+            // First row is data: generate synthetic labels and keep the line for parsing
+            first_data_line = line;
+        }
     }
-    if (feature_labels.empty())
-        throw std::runtime_error("No feature columns in header: " + input.string());
 
-    uint32_t num_features = static_cast<uint32_t>(feature_labels.size());
+    if (feature_labels.empty() && first_data_line.empty())
+        throw std::runtime_error("No feature columns in: " + input.string());
 
-    // Read data rows
+    uint32_t num_features = 0;
+
+    // Helper lambda: parse one data line into seq_ids / flat_data
     std::vector<std::string> seq_ids;
     std::vector<float> flat_data; // row-major
 
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
-
-        std::istringstream ss(line);
+    auto parse_data_line = [&](const std::string& l) {
+        std::istringstream ss(l);
         std::string seq_id;
-        if (!(ss >> seq_id)) continue;
+        if (!(ss >> seq_id)) return;
+
+        // On first data row, finalise num_features and (if no header) generate labels
+        if (num_features == 0) {
+            std::istringstream counter(l);
+            std::string skip; counter >> skip;
+            uint32_t cnt = 0; std::string tmp;
+            while (counter >> tmp) ++cnt;
+            num_features = cnt;
+            if (feature_labels.empty()) {
+                // No header: generate synthetic labels
+                feature_labels.reserve(num_features);
+                for (uint32_t k = 0; k < num_features; ++k)
+                    feature_labels.push_back("col_" + std::to_string(k));
+            }
+        }
 
         seq_ids.push_back(seq_id);
         for (uint32_t j = 0; j < num_features; ++j) {
@@ -77,6 +103,15 @@ void tabular_to_pnf(
                     " features but got fewer in " + input.string());
             flat_data.push_back(val);
         }
+    };
+
+    if (!first_data_line.empty())
+        parse_data_line(first_data_line);
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        parse_data_line(line);
     }
 
     if (seq_ids.empty())

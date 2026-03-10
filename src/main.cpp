@@ -367,6 +367,16 @@ int main(int argc, char* argv[]) {
 
             auto write_start = std::chrono::steady_clock::now();
 
+            auto fmt_bytes = [](uint64_t b) -> std::string {
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(2);
+                if      (b >= uint64_t(1) << 30) oss << b / double(uint64_t(1) << 30) << " GB";
+                else if (b >= uint64_t(1) << 20) oss << b / double(uint64_t(1) << 20) << " MB";
+                else if (b >= uint64_t(1) << 10) oss << b / double(uint64_t(1) << 10) << " KB";
+                else                              oss << b << " B";
+                return oss.str();
+            };
+
             if (datatype == "numeric") {
                 // Collect .pnf paths
                 std::vector<fs::path> pnf_paths;
@@ -396,6 +406,9 @@ int main(int argc, char* argv[]) {
 
                 auto encode_start = std::chrono::steady_clock::now();
                 std::vector<NumericResult> num_results(total_files);
+                uint64_t running_cols = 0;
+                uint64_t first_estimate = 0;
+                int next_pct = 1;
                 {
                     std::mutex queue_mutex, print_mutex;
                     std::queue<int> work_queue;
@@ -403,6 +416,18 @@ int main(int argc, char* argv[]) {
                     int done_count = 0;
 
                     auto enc_worker = [&]() {
+                        auto check_milestone = [&]() {
+                            while (next_pct <= 10 && running_cols > 0 &&
+                                   done_count * 10 >= next_pct * total_files) {
+                                uint64_t est_cols = running_cols * static_cast<uint64_t>(total_files)
+                                                    / static_cast<uint64_t>(done_count);
+                                uint64_t est_bytes = est_cols * static_cast<uint64_t>(N) * sizeof(float);
+                                if (next_pct == 1) first_estimate = est_bytes;
+                                std::cout << "  [" << (next_pct * 10) << "%] Estimated matrix size: "
+                                          << fmt_bytes(est_bytes) << "\n";
+                                ++next_pct;
+                            }
+                        };
                         while (true) {
                             int idx;
                             {
@@ -444,9 +469,11 @@ int main(int argc, char* argv[]) {
                                 {
                                     std::lock_guard<std::mutex> lock(print_mutex);
                                     ++done_count;
+                                    running_cols += F;
                                     std::cout << "[" << done_count << "/" << total_files << "] "
                                               << pnf_paths[idx].filename().string()
                                               << " -> " << F << " features\n";
+                                    check_milestone();
                                 }
                             } catch (const std::exception& e) {
                                 nr.failed = true;
@@ -456,6 +483,7 @@ int main(int argc, char* argv[]) {
                                 std::cerr << "[" << done_count << "/" << total_files << "] FAIL: "
                                           << pnf_paths[idx].filename().string()
                                           << " -> " << e.what() << "\n";
+                                check_milestone();
                             }
                         }
                     };
@@ -474,6 +502,13 @@ int main(int argc, char* argv[]) {
                     if (nr.failed) { ++failed_count; continue; }
                     total_cols += nr.columns.size();
                     ++n_aligned;
+                }
+                {
+                    uint64_t actual_bytes = total_cols * static_cast<uint64_t>(N) * sizeof(float);
+                    std::cout << "  Matrix size: " << fmt_bytes(actual_bytes) << " actual";
+                    if (first_estimate > 0)
+                        std::cout << " (estimated " << fmt_bytes(first_estimate) << " at 10%)";
+                    std::cout << "\n";
                 }
 
                 features.zeros(N, total_cols);
@@ -557,6 +592,9 @@ int main(int argc, char* argv[]) {
 
                 auto encode_start = std::chrono::steady_clock::now();
                 std::vector<encoder::AlignmentResult> results(total_encode);
+                uint64_t running_cols = 0;
+                uint64_t first_estimate = 0;
+                int next_pct = 1;
                 {
                     std::mutex queue_mutex, print_mutex;
                     std::queue<int> work_queue;
@@ -564,6 +602,18 @@ int main(int argc, char* argv[]) {
                     int done_count = 0;
 
                     auto enc_worker = [&]() {
+                        auto check_milestone = [&]() {
+                            while (next_pct <= 10 && running_cols > 0 &&
+                                   done_count * 10 >= next_pct * total_encode) {
+                                uint64_t est_cols = running_cols * static_cast<uint64_t>(total_encode)
+                                                    / static_cast<uint64_t>(done_count);
+                                uint64_t est_bytes = est_cols * static_cast<uint64_t>(N) * sizeof(float);
+                                if (next_pct == 1) first_estimate = est_bytes;
+                                std::cout << "  [" << (next_pct * 10) << "%] Estimated matrix size: "
+                                          << fmt_bytes(est_bytes) << "\n";
+                                ++next_pct;
+                            }
+                        };
                         while (true) {
                             int idx;
                             {
@@ -579,9 +629,11 @@ int main(int argc, char* argv[]) {
                                 {
                                     std::lock_guard<std::mutex> lock(print_mutex);
                                     ++done_count;
+                                    running_cols += results[idx].columns.size();
                                     std::cout << "[" << done_count << "/" << total_encode << "] "
                                               << pff_paths[idx].filename().string()
                                               << " -> " << results[idx].columns.size() << " columns\n";
+                                    check_milestone();
                                 }
                             } catch (const std::exception& e) {
                                 results[idx].failed    = true;
@@ -592,6 +644,7 @@ int main(int argc, char* argv[]) {
                                 std::cerr << "[" << done_count << "/" << total_encode << "] FAIL: "
                                           << pff_paths[idx].filename().string()
                                           << " -> " << e.what() << "\n";
+                                check_milestone();
                             }
                         }
                     };
@@ -613,6 +666,13 @@ int main(int argc, char* argv[]) {
                     if (r.failed) { ++failed_count; continue; }
                     total_cols += r.columns.size();
                     ++n_aligned;
+                }
+                {
+                    uint64_t actual_bytes = total_cols * static_cast<uint64_t>(N) * sizeof(float);
+                    std::cout << "  Matrix size: " << fmt_bytes(actual_bytes) << " actual";
+                    if (first_estimate > 0)
+                        std::cout << " (estimated " << fmt_bytes(first_estimate) << " at 10%)";
+                    std::cout << "\n";
                 }
 
                 features.zeros(N, total_cols);
