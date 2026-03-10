@@ -43,7 +43,7 @@ static std::unordered_set<char> load_datatype_chars(
 }
 
 void print_usage(const char* prog_name) {
-    std::cout << "Fungi Genomics Analysis Tool\n";
+    std::cout << "MyESL2 - My Evolutionary Sparse Learning 2\n";
     std::cout << "===========================\n\n";
     std::cout << "Usage:\n";
     std::cout << "  " << prog_name << " train <list.txt> <hypothesis.txt> <output_dir> [column|row] [--cache-dir DIR] [--min-minor N] [--threads N] [--dlt] [--datatype <type>] [--nfolds N]\n";
@@ -152,6 +152,9 @@ int main(int argc, char* argv[]) {
             if (!lambda_file_path.empty() && lambda_explicitly_set)
                 throw std::runtime_error("--lambda and --lambda-file are mutually exclusive");
 
+            if (nfolds > 0 && method.empty())
+                throw std::runtime_error("--nfolds requires --method");
+
             // Read hypothesis file
             std::vector<std::string> hyp_seq_names;
             std::vector<float> hyp_values;
@@ -162,13 +165,22 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
                 std::string line;
+                int line_num = 0;
                 while (std::getline(hyp_file, line)) {
+                    ++line_num;
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
                     if (line.empty()) continue;
-                    auto tab = line.find('\t');
-                    if (tab == std::string::npos) continue;
-                    double val = std::stod(line.substr(tab + 1));
+                    // Accept tab or space as delimiter
+                    auto delim = line.find('\t');
+                    if (delim == std::string::npos) delim = line.find(' ');
+                    if (delim == std::string::npos) {
+                        std::cerr << "Warning: hypothesis file line " << line_num
+                                  << " has no delimiter, skipping: \"" << line << "\"\n";
+                        continue;
+                    }
+                    double val = std::stod(line.substr(delim + 1));
                     if (val == 0.0) continue;
-                    hyp_seq_names.push_back(line.substr(0, tab));
+                    hyp_seq_names.push_back(line.substr(0, delim));
                     hyp_values.push_back(static_cast<float>(val));
                 }
             }
@@ -739,8 +751,6 @@ int main(int argc, char* argv[]) {
 
             // --- Phase 3: Regression ---
             double regr_elapsed = 0.0;
-            if (nfolds > 0 && method.empty())
-                throw std::runtime_error("--nfolds requires --method");
 
             if (!method.empty()) {
                 // Build lambda list from file or single --lambda pair
@@ -807,9 +817,12 @@ int main(int argc, char* argv[]) {
                     for (uint32_t i = 0; i < N; ++i)
                         xval_idxs(i) = static_cast<double>(i % nfolds);
 
-                std::mutex queue_mutex, print_mutex;
+                std::mutex queue_mutex;
                 std::queue<int> work_queue;
                 for (int i = 0; i < (int)lambdas.size(); ++i) work_queue.push(i);
+
+                // Per-lambda output accumulated during parallel phase, printed in order after join
+                std::vector<std::string> lambda_outputs(lambdas.size());
 
                 auto lambda_worker = [&]() {
                     while (true) {
@@ -824,6 +837,9 @@ int main(int argc, char* argv[]) {
                         fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
                         fs::create_directories(lam_dir);
 
+                        std::ostringstream out;
+                        out << std::fixed << std::setprecision(4);
+
                         if (nfolds == 0) {
                             // Single model
                             auto regr = regression::createRegressionAnalysis(
@@ -831,11 +847,8 @@ int main(int argc, char* argv[]) {
                             std::ofstream wo(lam_dir / "weights.txt");
                             std::ifstream mi(output_dir / "combined.map");
                             regr->writeSparseMappedWeightsToStream(wo, mi);
-                            {
-                                std::lock_guard<std::mutex> lk(print_mutex);
-                                std::cout << "  [" << idx << "] lambda=[" << lam[0] << ","
-                                          << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
-                            }
+                            out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                                << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
                         } else {
                             // K-fold CV
                             std::vector<double> cv_preds(N, 0.0);
@@ -880,12 +893,9 @@ int main(int argc, char* argv[]) {
                                     cv_preds[i] = pred;
                                 }
 
-                                {
-                                    std::lock_guard<std::mutex> lk(print_mutex);
-                                    std::cout << "  [" << idx << "] fold " << k
-                                              << ": held-out=" << held_out
-                                              << ", non-zero weights=" << fold_weights.size() << "\n";
-                                }
+                                out << "  [" << idx << "] fold " << k
+                                    << ": held-out=" << held_out
+                                    << ", non-zero weights=" << fold_weights.size() << "\n";
                             }
 
                             // Write cv_predictions.txt
@@ -914,17 +924,15 @@ int main(int argc, char* argv[]) {
                             double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
                             double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
 
-                            {
-                                std::lock_guard<std::mutex> lk(print_mutex);
-                                std::cout << std::fixed << std::setprecision(4);
-                                std::cout << "  [" << idx << "] lambda=[" << lam[0] << ","
-                                          << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
-                                std::cout << "    TP=" << tp << " TN=" << tn
-                                          << " FP=" << fp << " FN=" << fn << "\n";
-                                std::cout << "    TPR=" << tpr << " TNR=" << tnr
-                                          << " FPR=" << fpr << " FNR=" << fnr << "\n";
-                            }
+                            out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                                << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
+                            out << "    TP=" << tp << " TN=" << tn
+                                << " FP=" << fp << " FN=" << fn << "\n";
+                            out << "    TPR=" << tpr << " TNR=" << tnr
+                                << " FPR=" << fpr << " FNR=" << fnr << "\n";
                         }
+
+                        lambda_outputs[idx] = out.str();
                     }
                 };
 
@@ -934,6 +942,8 @@ int main(int argc, char* argv[]) {
                 threads.reserve(tc);
                 for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(lambda_worker);
                 for (auto& t : threads) t.join();
+
+                for (auto& s : lambda_outputs) std::cout << s;
 
                 regr_elapsed = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - regr_start).count();

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a fungi genomics project containing protein sequence alignment data for comparative analysis and classification. All development is done in C++ using the C++20 standard.
+MyESL2 (My Evolutionary Sparse Learning 2) is a C++20 tool for sparse regression-based classification on genomic data. It supports FASTA alignment inputs (nucleotide/protein) and tabular numeric inputs, and is designed for comparative genomic analysis across any set of organisms.
 
 ## Building the Project
 
@@ -32,19 +32,19 @@ cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
 cmake --build build --config Release
 ```
 
-The executable will be in `build\bin\fungi_analysis.exe`.
+The executable will be in `build\bin\myesl2.exe`.
 
 ### Running
 
 ```cmd
-.\build\bin\fungi_analysis.exe
+.\build\bin\myesl2.exe
 ```
 
 Or from the build directory:
 
 ```cmd
 cd build\bin
-fungi_analysis.exe
+myesl2.exe
 ```
 
 ## Project Structure
@@ -53,7 +53,7 @@ fungi_analysis.exe
 .
 ├── src/              Source files
 ├── include/          Header files
-├── Fungi_data/       Input data (FASTA alignments and labels)
+├── Fungi_data/       Example data (fungal FASTA alignments and labels)
 ├── build/            Build output (generated, in .gitignore)
 ├── CMakeLists.txt    CMake build configuration
 └── CLAUDE.md         This file
@@ -65,7 +65,7 @@ fungi_analysis.exe
 
 The main data directory containing:
 
-- **A_B_Hyp.txt**: Species labels file mapping 50 fungal species to binary classifications (-1 or 1). First 40 species are labeled -1, last 10 are labeled 1.
+- **A_B_Hyp.txt**: Species labels file mapping 50 fungal species (example dataset) to binary classifications (-1 or 1). First 40 species are labeled -1, last 10 are labeled 1.
 
 - **aln.txt**: List of paths to all ~960 BUSCO protein alignment files
 
@@ -73,17 +73,13 @@ The main data directory containing:
 
 - **aln/**: Directory containing ~960 BUSCO (Benchmarking Universal Single-Copy Orthologs) protein multiple sequence alignment files in FASTA format. Each file:
   - Named as `BUSCOfEOG[ID].domain.aa.aln.trimmed.fasta`
-  - Contains aligned protein sequences from multiple fungal species
+  - Contains aligned protein sequences from multiple species (fungal example dataset)
   - Sequences are conserved single-copy orthologs across the species
   - Pre-aligned and trimmed for quality
 
 ## Working with the Data
 
-The alignment files are protein sequences in FASTA format where each species has one sequence per file. Species names match those in A_B_Hyp.txt. This data is typically used for:
-- Phylogenetic analysis
-- Protein evolution studies
-- Machine learning classification tasks
-- Comparative genomics
+The example alignment files are protein sequences in FASTA format where each species has one sequence per file. Species names match those in A_B_Hyp.txt. MyESL2 supports any genomic dataset in this format (not limited to fungi).
 
 ## Code Architecture
 
@@ -108,17 +104,17 @@ The project implements a custom binary format for efficient access to aligned se
 
 Convert FASTA to column-major PFF (efficient for position-wise analysis):
 ```bash
-fungi_analysis convert input.fasta output.pff column
+myesl2 convert input.fasta output.pff column
 ```
 
 Convert to row-major PFF (efficient for sequence-wise analysis):
 ```bash
-fungi_analysis convert input.fasta output.pff row
+myesl2 convert input.fasta output.pff row
 ```
 
 Display PFF file information:
 ```bash
-fungi_analysis info output.pff
+myesl2 info output.pff
 ```
 
 ### Documentation

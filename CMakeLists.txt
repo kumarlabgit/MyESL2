@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FungiAnalysis VERSION 1.0.0 LANGUAGES CXX)
+project(MyESL2 VERSION 1.0.0 LANGUAGES CXX)
 
 # Set C++20 standard
 set(CMAKE_CXX_STANDARD 20)
@@ -28,25 +28,25 @@ set(SOURCES
 )
 
 # Create executable
-add_executable(fungi_analysis ${SOURCES})
+add_executable(myesl2 ${SOURCES})
 
 # Link OpenBLAS and LAPACK (libraries bundled in include/)
-target_link_libraries(fungi_analysis PRIVATE
+target_link_libraries(myesl2 PRIVATE
     ${PROJECT_SOURCE_DIR}/include/libopenblas.lib
     ${PROJECT_SOURCE_DIR}/include/liblapack.lib
 )
 
 # Copy DLLs next to the executable so they are found at runtime
-add_custom_command(TARGET fungi_analysis POST_BUILD
+add_custom_command(TARGET myesl2 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${PROJECT_SOURCE_DIR}/include/libopenblas.dll
         ${PROJECT_SOURCE_DIR}/include/liblapack.dll
-        $<TARGET_FILE_DIR:fungi_analysis>
+        $<TARGET_FILE_DIR:myesl2>
 )
 
 # Compiler warnings
 if(MSVC)
-    target_compile_options(fungi_analysis PRIVATE /W4)
+    target_compile_options(myesl2 PRIVATE /W4)
 else()
-    target_compile_options(fungi_analysis PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(myesl2 PRIVATE -Wall -Wextra -Wpedantic)
 endif()
