@@ -990,7 +990,8 @@ int main(int argc, char* argv[]) {
                     hyp_path = argv[++i];
                 } else if (arg == "--datatype" && i + 1 < argc) {
                     datatype = argv[++i];
-                    if (datatype != "universal" && datatype != "protein" && datatype != "nucleotide")
+                    if (datatype != "universal" && datatype != "protein" &&
+                        datatype != "nucleotide" && datatype != "numeric")
                         throw std::runtime_error("Unknown datatype: " + datatype);
                 } else if (arg == "--threads" && i + 1 < argc) {
                     num_threads = static_cast<unsigned int>(std::stoi(argv[++i]));
@@ -1000,200 +1001,331 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // --- Parse weights file ---
-            struct ModelEntry {
-                std::string stem;
-                uint32_t    pos;
-                char        allele;
-                double      weight;
-            };
-
-            std::vector<ModelEntry> model_entries;
             double intercept_val = 0.0;
-            {
-                std::ifstream wf(weights_path);
-                if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
-                std::string line;
-                while (std::getline(wf, line)) {
-                    if (line.empty()) continue;
-                    size_t tab = line.find('\t');
-                    if (tab == std::string::npos) continue;
-                    std::string label = line.substr(0, tab);
-                    double w = std::stod(line.substr(tab + 1));
-                    if (label == "Intercept") { intercept_val = w; continue; }
+            std::map<std::string, double> species_sums;
 
-                    // Parse "<stem>_<pos>_<allele>" from the right:
-                    // last '_' separates allele (1 char), second-last separates pos (digits)
-                    size_t us2 = label.rfind('_');
-                    if (us2 == std::string::npos || us2 + 1 >= label.size()) continue;
-                    char allele = label[us2 + 1];
-                    size_t us1 = label.rfind('_', us2 - 1);
-                    if (us1 == std::string::npos) continue;
-                    uint32_t pos = static_cast<uint32_t>(
-                        std::stoul(label.substr(us1 + 1, us2 - us1 - 1)));
-                    model_entries.push_back({label.substr(0, us1), pos, allele, w});
+            if (datatype == "numeric") {
+                // --- Parse raw weights (label → weight) ---
+                std::map<std::string, double> raw_weights;
+                {
+                    std::ifstream wf(weights_path);
+                    if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
+                    std::string line;
+                    while (std::getline(wf, line)) {
+                        if (line.empty()) continue;
+                        size_t tab = line.find('\t');
+                        if (tab == std::string::npos) continue;
+                        std::string label = line.substr(0, tab);
+                        double w = std::stod(line.substr(tab + 1));
+                        if (label == "Intercept") { intercept_val = w; continue; }
+                        raw_weights[label] = w;
+                    }
                 }
-            }
 
-            std::set<std::string> model_stems;
-            for (auto& e : model_entries) model_stems.insert(e.stem);
-            std::cout << "Model: " << model_entries.size() << " weight(s), "
-                      << "intercept=" << intercept_val << ", "
-                      << model_stems.size() << " alignment(s)\n";
-
-            // --- Load list.txt ---
-            std::vector<fs::path> all_fasta_paths;
-            {
-                std::ifstream list_file(list_path);
-                if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
-                fs::path list_dir = list_path.parent_path();
-                std::string line;
-                while (std::getline(list_file, line)) {
-                    if (line.empty()) continue;
-                    for (char& c : line) if (c == '\\') c = '/';
-                    all_fasta_paths.push_back(list_dir / line);
+                // --- Load list.txt ---
+                std::vector<fs::path> all_numeric_paths;
+                {
+                    std::ifstream list_file(list_path);
+                    if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                    fs::path list_dir = list_path.parent_path();
+                    std::string line;
+                    while (std::getline(list_file, line)) {
+                        if (line.empty()) continue;
+                        for (char& c : line) if (c == '\\') c = '/';
+                        all_numeric_paths.push_back(list_dir / line);
+                    }
                 }
-            }
+                std::map<std::string, fs::path> stem_to_numeric;
+                for (auto& p : all_numeric_paths)
+                    stem_to_numeric[p.stem().string()] = p;
 
-            std::map<std::string, fs::path> stem_to_fasta;
-            for (auto& p : all_fasta_paths)
-                stem_to_fasta[p.stem().string()] = p;
-
-            // --- Verify all model alignments are present in list ---
-            {
-                std::vector<std::string> missing;
-                for (auto& stem : model_stems)
-                    if (!stem_to_fasta.count(stem))
-                        missing.push_back(stem);
-                if (!missing.empty()) {
-                    std::string msg = std::to_string(missing.size()) +
-                        " alignment(s) referenced in the model are missing from the list:\n";
-                    for (auto& m : missing) msg += "  " + m + "\n";
-                    throw std::runtime_error(msg);
+                // --- Match weight labels to stems (longest-prefix first) ---
+                struct NumericEntry { std::string stem, feature; double weight; };
+                std::vector<NumericEntry> num_entries;
+                {
+                    std::vector<std::string> sorted_stems;
+                    for (auto& [s, _] : stem_to_numeric) sorted_stems.push_back(s);
+                    std::sort(sorted_stems.begin(), sorted_stems.end(),
+                        [](const std::string& a, const std::string& b){ return a.size() > b.size(); });
+                    for (auto& [label, w] : raw_weights) {
+                        for (auto& s : sorted_stems) {
+                            if (label.size() > s.size() + 1 &&
+                                label.compare(0, s.size(), s) == 0 &&
+                                label[s.size()] == '_') {
+                                num_entries.push_back({s, label.substr(s.size() + 1), w});
+                                break;
+                            }
+                        }
+                    }
                 }
-            }
-            std::cout << "All model alignments present in list.\n";
 
-            // --- Load allowed chars for datatype validation ---
-            std::unordered_set<char> allowed_chars;
-            if (datatype != "universal") {
-                fs::path ini = fs::path(argv[0]).parent_path() / "data_defs.ini";
-                if (!fs::exists(ini)) ini = fs::current_path() / "data_defs.ini";
-                if (!fs::exists(ini)) throw std::runtime_error("data_defs.ini not found");
-                allowed_chars = load_datatype_chars(ini, datatype);
-                if (allowed_chars.empty())
-                    throw std::runtime_error("No chars defined for '" + datatype + "' in data_defs.ini");
-            }
+                std::set<std::string> model_stems;
+                for (auto& e : num_entries) model_stems.insert(e.stem);
+                std::cout << "Model: " << num_entries.size() << " weight(s), "
+                          << "intercept=" << intercept_val << ", "
+                          << model_stems.size() << " file(s)\n";
 
-            // --- Convert model alignments to PFF as needed ---
-            fs::create_directories(cache_dir);
-            {
-                std::queue<fs::path> convert_queue;
+                // --- Verify all model files present in list ---
+                {
+                    std::vector<std::string> missing;
+                    for (auto& s : model_stems)
+                        if (!stem_to_numeric.count(s)) missing.push_back(s);
+                    if (!missing.empty()) {
+                        std::string msg = std::to_string(missing.size()) +
+                            " file(s) referenced in the model are missing from the list:\n";
+                        for (auto& m : missing) msg += "  " + m + "\n";
+                        throw std::runtime_error(msg);
+                    }
+                }
+                std::cout << "All model files present in list.\n";
+
+                // --- Phase 1: Convert to PNF as needed ---
+                fs::create_directories(cache_dir);
                 for (auto& stem : model_stems) {
-                    fs::path fasta_path = stem_to_fasta.at(stem);
-                    fs::path pff_path   = cache_dir / (stem + ".pff");
-                    fs::path err_path   = cache_dir / (stem + ".err");
+                    fs::path txt_path = stem_to_numeric.at(stem);
+                    fs::path pnf_path = cache_dir / (stem + ".pnf");
+                    fs::path err_path = cache_dir / (stem + ".err");
                     if (fs::exists(err_path)) {
                         std::cerr << "Warning: " << stem << " has a prior conversion error, skipping\n";
                         continue;
                     }
                     bool needs_convert = true;
-                    if (fs::exists(pff_path)) {
+                    if (fs::exists(pnf_path)) {
                         try {
-                            auto meta = fasta::read_pff_metadata(pff_path);
-                            if (meta.datatype == datatype &&
-                                meta.source_path == fs::absolute(fasta_path).string())
+                            auto meta = numeric::read_pnf_metadata(pnf_path);
+                            if (meta.source_path == fs::absolute(txt_path).string())
                                 needs_convert = false;
                         } catch (...) {}
                     }
-                    if (needs_convert) convert_queue.push(fasta_path);
-                }
-
-                if (!convert_queue.empty()) {
-                    int total = static_cast<int>(convert_queue.size());
-                    std::cout << "Converting " << total << " alignment(s) to PFF...\n";
-                    std::mutex queue_mutex, print_mutex;
-                    int converted = 0, failed = 0;
-
-                    auto worker = [&]() {
-                        while (true) {
-                            fs::path fasta_path;
-                            {
-                                std::lock_guard<std::mutex> lk(queue_mutex);
-                                if (convert_queue.empty()) break;
-                                fasta_path = convert_queue.front();
-                                convert_queue.pop();
-                            }
-                            fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
-                            fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
-                            try {
-                                fasta::fasta_to_pff(fasta_path, pff_path,
-                                    pff::Orientation::COLUMN_MAJOR, datatype, allowed_chars);
-                                std::lock_guard<std::mutex> lk(print_mutex);
-                                ++converted;
-                                std::cout << "[" << converted + failed << "/" << total << "] OK: "
-                                          << fasta_path.filename() << "\n";
-                            } catch (const std::exception& e) {
-                                std::ofstream ef(err_path);
-                                if (ef) ef << e.what() << "\n";
-                                std::lock_guard<std::mutex> lk(print_mutex);
-                                ++failed;
-                                std::cerr << "[" << converted + failed << "/" << total << "] FAIL: "
-                                          << fasta_path.filename() << " -> " << e.what() << "\n";
-                            }
+                    if (needs_convert) {
+                        try {
+                            numeric::tabular_to_pnf(txt_path, pnf_path);
+                            std::cout << "Converted: " << stem << "\n";
+                        } catch (const std::exception& ex) {
+                            std::ofstream ef(err_path);
+                            if (ef) ef << ex.what() << "\n";
+                            throw std::runtime_error("Conversion failed for " + stem + ": " + ex.what());
                         }
-                    };
-
-                    unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total));
-                    std::vector<std::thread> threads;
-                    for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(worker);
-                    for (auto& t : threads) t.join();
-                    std::cout << "Converted: " << converted << ", failed: " << failed << "\n";
-                }
-            }
-
-            // --- Compute predictions ---
-            // Group model entries by stem for efficient per-alignment processing
-            std::map<std::string, std::vector<size_t>> stem_entry_indices;
-            for (size_t i = 0; i < model_entries.size(); ++i)
-                stem_entry_indices[model_entries[i].stem].push_back(i);
-
-            // species_sums accumulates weighted contributions; initialized to 0 on first encounter
-            std::map<std::string, double> species_sums;
-
-            for (auto& [stem, indices] : stem_entry_indices) {
-                fs::path pff_path = cache_dir / (stem + ".pff");
-                if (!fs::exists(pff_path)) {
-                    std::cerr << "Warning: no PFF for " << stem << ", skipping its weights\n";
-                    continue;
+                    }
                 }
 
-                auto meta = fasta::read_pff_metadata(pff_path);
-                uint32_t S = meta.num_sequences;
-                uint32_t L = meta.alignment_length;
+                // --- Phase 2: Accumulate predictions from PNF ---
+                std::map<std::string, std::vector<size_t>> stem_to_idxs;
+                for (size_t i = 0; i < num_entries.size(); ++i)
+                    stem_to_idxs[num_entries[i].stem].push_back(i);
 
-                std::vector<char> raw(meta.get_data_size());
+                for (auto& [stem, idxs] : stem_to_idxs) {
+                    fs::path pnf_path = cache_dir / (stem + ".pnf");
+                    if (!fs::exists(pnf_path)) {
+                        std::cerr << "Warning: no PNF for " << stem << ", skipping\n";
+                        continue;
+                    }
+                    auto meta = numeric::read_pnf_metadata(pnf_path);
+                    auto data = numeric::read_pnf_data(pnf_path, meta);
+
+                    std::unordered_map<std::string, uint32_t> feat_idx;
+                    for (uint32_t f = 0; f < meta.num_features; ++f)
+                        feat_idx[meta.feature_labels[f]] = f;
+
+                    for (auto& id : meta.seq_ids)
+                        species_sums.emplace(id, 0.0);
+
+                    for (size_t idx : idxs) {
+                        auto& e = num_entries[idx];
+                        auto it = feat_idx.find(e.feature);
+                        if (it == feat_idx.end()) continue;
+                        uint32_t f = it->second;
+                        for (uint32_t si = 0; si < meta.num_sequences; ++si)
+                            species_sums[meta.seq_ids[si]] += e.weight * data[si][f];
+                    }
+                }
+
+            } else {
+                // --- FASTA path ---
+                // Parse weight labels as <stem>_<pos>_<allele>
+                struct ModelEntry {
+                    std::string stem;
+                    uint32_t    pos;
+                    char        allele;
+                    double      weight;
+                };
+                std::vector<ModelEntry> model_entries;
                 {
-                    std::ifstream pf(pff_path, std::ios::binary);
-                    pf.seekg(static_cast<std::streamoff>(meta.data_offset));
-                    pf.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+                    std::ifstream wf(weights_path);
+                    if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
+                    std::string line;
+                    while (std::getline(wf, line)) {
+                        if (line.empty()) continue;
+                        size_t tab = line.find('\t');
+                        if (tab == std::string::npos) continue;
+                        std::string label = line.substr(0, tab);
+                        double w = std::stod(line.substr(tab + 1));
+                        if (label == "Intercept") { intercept_val = w; continue; }
+                        size_t us2 = label.rfind('_');
+                        if (us2 == std::string::npos || us2 + 1 >= label.size()) continue;
+                        char allele = label[us2 + 1];
+                        size_t us1 = label.rfind('_', us2 - 1);
+                        if (us1 == std::string::npos) continue;
+                        uint32_t pos = static_cast<uint32_t>(
+                            std::stoul(label.substr(us1 + 1, us2 - us1 - 1)));
+                        model_entries.push_back({label.substr(0, us1), pos, allele, w});
+                    }
                 }
 
-                // Ensure every species in this alignment has an entry in the sums map
-                for (auto& id : meta.seq_ids)
-                    species_sums.emplace(id, 0.0);
+                std::set<std::string> model_stems;
+                for (auto& e : model_entries) model_stems.insert(e.stem);
+                std::cout << "Model: " << model_entries.size() << " weight(s), "
+                          << "intercept=" << intercept_val << ", "
+                          << model_stems.size() << " alignment(s)\n";
 
-                // Accumulate weighted contributions
-                bool col_major = (meta.orientation == pff::Orientation::COLUMN_MAJOR);
-                for (size_t idx : indices) {
-                    auto& entry = model_entries[idx];
-                    if (entry.pos >= L) continue;
-                    for (uint32_t si = 0; si < S; ++si) {
-                        char c = col_major
-                            ? raw[static_cast<size_t>(entry.pos) * S + si]
-                            : raw[static_cast<size_t>(si) * L + entry.pos];
-                        if (c == entry.allele)
-                            species_sums[meta.seq_ids[si]] += entry.weight;
+                // --- Load list.txt ---
+                std::vector<fs::path> all_fasta_paths;
+                {
+                    std::ifstream list_file(list_path);
+                    if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                    fs::path list_dir = list_path.parent_path();
+                    std::string line;
+                    while (std::getline(list_file, line)) {
+                        if (line.empty()) continue;
+                        for (char& c : line) if (c == '\\') c = '/';
+                        all_fasta_paths.push_back(list_dir / line);
+                    }
+                }
+
+                std::map<std::string, fs::path> stem_to_fasta;
+                for (auto& p : all_fasta_paths)
+                    stem_to_fasta[p.stem().string()] = p;
+
+                // --- Verify all model alignments present in list ---
+                {
+                    std::vector<std::string> missing;
+                    for (auto& stem : model_stems)
+                        if (!stem_to_fasta.count(stem))
+                            missing.push_back(stem);
+                    if (!missing.empty()) {
+                        std::string msg = std::to_string(missing.size()) +
+                            " alignment(s) referenced in the model are missing from the list:\n";
+                        for (auto& m : missing) msg += "  " + m + "\n";
+                        throw std::runtime_error(msg);
+                    }
+                }
+                std::cout << "All model alignments present in list.\n";
+
+                // --- Load allowed chars ---
+                std::unordered_set<char> allowed_chars;
+                if (datatype != "universal") {
+                    fs::path ini = fs::path(argv[0]).parent_path() / "data_defs.ini";
+                    if (!fs::exists(ini)) ini = fs::current_path() / "data_defs.ini";
+                    if (!fs::exists(ini)) throw std::runtime_error("data_defs.ini not found");
+                    allowed_chars = load_datatype_chars(ini, datatype);
+                    if (allowed_chars.empty())
+                        throw std::runtime_error("No chars defined for '" + datatype + "' in data_defs.ini");
+                }
+
+                // --- Convert model alignments to PFF as needed ---
+                fs::create_directories(cache_dir);
+                {
+                    std::queue<fs::path> convert_queue;
+                    for (auto& stem : model_stems) {
+                        fs::path fasta_path = stem_to_fasta.at(stem);
+                        fs::path pff_path   = cache_dir / (stem + ".pff");
+                        fs::path err_path   = cache_dir / (stem + ".err");
+                        if (fs::exists(err_path)) {
+                            std::cerr << "Warning: " << stem << " has a prior conversion error, skipping\n";
+                            continue;
+                        }
+                        bool needs_convert = true;
+                        if (fs::exists(pff_path)) {
+                            try {
+                                auto meta = fasta::read_pff_metadata(pff_path);
+                                if (meta.datatype == datatype &&
+                                    meta.source_path == fs::absolute(fasta_path).string())
+                                    needs_convert = false;
+                            } catch (...) {}
+                        }
+                        if (needs_convert) convert_queue.push(fasta_path);
+                    }
+
+                    if (!convert_queue.empty()) {
+                        int total = static_cast<int>(convert_queue.size());
+                        std::cout << "Converting " << total << " alignment(s) to PFF...\n";
+                        std::mutex queue_mutex, print_mutex;
+                        int converted = 0, failed = 0;
+
+                        auto worker = [&]() {
+                            while (true) {
+                                fs::path fasta_path;
+                                {
+                                    std::lock_guard<std::mutex> lk(queue_mutex);
+                                    if (convert_queue.empty()) break;
+                                    fasta_path = convert_queue.front();
+                                    convert_queue.pop();
+                                }
+                                fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+                                fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
+                                try {
+                                    fasta::fasta_to_pff(fasta_path, pff_path,
+                                        pff::Orientation::COLUMN_MAJOR, datatype, allowed_chars);
+                                    std::lock_guard<std::mutex> lk(print_mutex);
+                                    ++converted;
+                                    std::cout << "[" << converted + failed << "/" << total << "] OK: "
+                                              << fasta_path.filename() << "\n";
+                                } catch (const std::exception& e) {
+                                    std::ofstream ef(err_path);
+                                    if (ef) ef << e.what() << "\n";
+                                    std::lock_guard<std::mutex> lk(print_mutex);
+                                    ++failed;
+                                    std::cerr << "[" << converted + failed << "/" << total << "] FAIL: "
+                                              << fasta_path.filename() << " -> " << e.what() << "\n";
+                                }
+                            }
+                        };
+
+                        unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total));
+                        std::vector<std::thread> threads;
+                        for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(worker);
+                        for (auto& t : threads) t.join();
+                        std::cout << "Converted: " << converted << ", failed: " << failed << "\n";
+                    }
+                }
+
+                // --- Compute predictions ---
+                std::map<std::string, std::vector<size_t>> stem_entry_indices;
+                for (size_t i = 0; i < model_entries.size(); ++i)
+                    stem_entry_indices[model_entries[i].stem].push_back(i);
+
+                for (auto& [stem, indices] : stem_entry_indices) {
+                    fs::path pff_path = cache_dir / (stem + ".pff");
+                    if (!fs::exists(pff_path)) {
+                        std::cerr << "Warning: no PFF for " << stem << ", skipping its weights\n";
+                        continue;
+                    }
+
+                    auto meta = fasta::read_pff_metadata(pff_path);
+                    uint32_t S = meta.num_sequences;
+                    uint32_t L = meta.alignment_length;
+
+                    std::vector<char> raw(meta.get_data_size());
+                    {
+                        std::ifstream pf(pff_path, std::ios::binary);
+                        pf.seekg(static_cast<std::streamoff>(meta.data_offset));
+                        pf.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+                    }
+
+                    for (auto& id : meta.seq_ids)
+                        species_sums.emplace(id, 0.0);
+
+                    bool col_major = (meta.orientation == pff::Orientation::COLUMN_MAJOR);
+                    for (size_t idx : indices) {
+                        auto& entry = model_entries[idx];
+                        if (entry.pos >= L) continue;
+                        for (uint32_t si = 0; si < S; ++si) {
+                            char c = col_major
+                                ? raw[static_cast<size_t>(entry.pos) * S + si]
+                                : raw[static_cast<size_t>(si) * L + entry.pos];
+                            if (c == entry.allele)
+                                species_sums[meta.seq_ids[si]] += entry.weight;
+                        }
                     }
                 }
             }
@@ -1205,12 +1337,14 @@ int main(int argc, char* argv[]) {
                 if (!hf) throw std::runtime_error("Cannot open hypothesis file: " + hyp_path.string());
                 std::string line;
                 while (std::getline(hf, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
                     if (line.empty()) continue;
-                    auto tab = line.find('\t');
-                    if (tab == std::string::npos) continue;
-                    double val = std::stod(line.substr(tab + 1));
+                    auto delim = line.find('\t');
+                    if (delim == std::string::npos) delim = line.find(' ');
+                    if (delim == std::string::npos) continue;
+                    double val = std::stod(line.substr(delim + 1));
                     if (val == 0.0) continue;
-                    true_values[line.substr(0, tab)] = val;
+                    true_values[line.substr(0, delim)] = val;
                 }
                 std::cout << "Hypothesis: " << true_values.size() << " labelled species\n";
             }
