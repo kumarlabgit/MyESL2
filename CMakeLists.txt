@@ -25,6 +25,8 @@ set(SOURCES
     src/overlapping_sg_lasso_leastr.cpp
     src/overlapping_sg_lasso_logisticr.cpp
     src/numeric_parser.cpp
+    src/visualizer.cpp
+    src/newick.cpp
 )
 
 # Create executable

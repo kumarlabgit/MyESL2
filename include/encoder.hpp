@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -20,10 +21,14 @@ struct AlignmentResult {
 // Encode a single PFF file into a one-hot matrix.
 // hyp_seq_names: sequence names from hypothesis file in output order (zeros already removed)
 // min_minor: minimum total count of non-major, non-indel characters required to keep a position
+// drop_major: if true, skip building a feature column for the most frequent allele at each position
+// dropout_labels: set of "{stem}_{pos}_{allele}" labels to exclude (empty = include all)
 AlignmentResult encode_pff(
     const std::filesystem::path& pff_path,
     const std::vector<std::string>& hyp_seq_names,
-    int min_minor
+    int min_minor,
+    bool drop_major = false,
+    const std::unordered_set<std::string>& dropout_labels = {}
 );
 
 // Alternate encoder using direct lookup tables (DLT) in place of character equality comparisons.
@@ -32,7 +37,9 @@ AlignmentResult encode_pff(
 AlignmentResult encode_pff_dlt(
     const std::filesystem::path& pff_path,
     const std::vector<std::string>& hyp_seq_names,
-    int min_minor
+    int min_minor,
+    bool drop_major = false,
+    const std::unordered_set<std::string>& dropout_labels = {}
 );
 
 } // namespace encoder

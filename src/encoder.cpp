@@ -13,7 +13,9 @@ namespace encoder {
 AlignmentResult encode_pff(
     const std::filesystem::path& pff_path,
     const std::vector<std::string>& hyp_seq_names,
-    int min_minor)
+    int min_minor,
+    bool drop_major,
+    const std::unordered_set<std::string>& dropout_labels)
 {
     AlignmentResult result;
     result.stem = pff_path.stem().string();
@@ -71,9 +73,16 @@ AlignmentResult encode_pff(
 
         if (non_major < min_minor) continue;
 
-        // One column per non-major allele (map iteration = sorted by char)
+        // One column per allele; skip major if drop_major=true (map iteration = sorted by char)
         for (const auto& [allele, cnt] : counts) {
-            if (allele == major) continue;
+            if (drop_major && allele == major) continue;
+
+            // Check dropout
+            if (!dropout_labels.empty()) {
+                std::string lbl = result.stem + "_" + std::to_string(p) + "_" + allele;
+                if (dropout_labels.count(lbl)) continue;
+            }
+
             std::vector<uint8_t> col(N, 0);
             for (uint32_t i = 0; i < N; ++i) {
                 if (seq_mapping[i] < 0) continue;
@@ -91,7 +100,9 @@ AlignmentResult encode_pff(
 AlignmentResult encode_pff_dlt(
     const std::filesystem::path& pff_path,
     const std::vector<std::string>& hyp_seq_names,
-    int min_minor)
+    int min_minor,
+    bool drop_major,
+    const std::unordered_set<std::string>& dropout_labels)
 {
     AlignmentResult result;
     result.stem = pff_path.stem().string();
@@ -132,7 +143,7 @@ AlignmentResult encode_pff_dlt(
 
     // Per-position working arrays declared outside the loop
     int     counts[256];   // allele occurrence counts
-    int8_t  col_idx[256];  // char -> minor-allele column index, or -1
+    int8_t  col_idx[256];  // char -> column index, or -1
 
     for (uint32_t p = 0; p < L; ++p) {
         // Count alleles via direct array — no character equality comparisons
@@ -166,16 +177,25 @@ AlignmentResult encode_pff_dlt(
 
         if (non_major < min_minor) continue;
 
-        // Build col_idx: assign a column index to each minor allele (in char-value order)
+        // Build col_idx: assign a column index to each allele to include
         std::memset(col_idx, -1, sizeof(col_idx));
         int8_t next_col = 0;
-        for (int c = 0; c < 256; ++c)
-            if (counts[c] > 0 && c != static_cast<int>(major))
-                col_idx[c] = next_col++;
-        int num_minor = static_cast<int>(next_col);
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            if (drop_major && c == static_cast<int>(major)) continue;
+            // Check dropout
+            if (!dropout_labels.empty()) {
+                std::string lbl = result.stem + "_" + std::to_string(p) + "_" + static_cast<char>(c);
+                if (dropout_labels.count(lbl)) continue;
+            }
+            col_idx[c] = next_col++;
+        }
+
+        int num_cols = static_cast<int>(next_col);
+        if (num_cols == 0) continue;
 
         // Allocate output columns (all zeros)
-        std::vector<std::vector<uint8_t>> new_cols(num_minor, std::vector<uint8_t>(N, 0));
+        std::vector<std::vector<uint8_t>> new_cols(num_cols, std::vector<uint8_t>(N, 0));
 
         // Single pass over sequences — lookup replaces per-allele equality comparison
         for (uint32_t i = 0; i < N; ++i) {
@@ -186,7 +206,7 @@ AlignmentResult encode_pff_dlt(
         }
 
         // Append columns and map entries in column-index order
-        for (int j = 0; j < num_minor; ++j)
+        for (int j = 0; j < num_cols; ++j)
             result.columns.push_back(std::move(new_cols[j]));
         for (int c = 0; c < 256; ++c)
             if (col_idx[c] >= 0)
