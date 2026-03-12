@@ -30,7 +30,7 @@ SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
 {
   //subset features and responses according to xval_id and xval_idxs
   arma::uvec indices = arma::find(xval_idxs != xval_id);
-  Train(features.cols(indices), responses.elem(indices).t(), weights, slep_opts, intercept);
+  Train(features.rows(indices), responses.elem(indices).t(), weights, slep_opts, intercept);
 }
 
 
@@ -156,7 +156,7 @@ bool initial_pass = true;
 //  arma::rowvec r = responses;
 
 
-  arma::mat A = features.t();
+  const arma::mat& A = features;
   arma::mat& ind = opts_ind;
   arma::colvec y = responses.t();
   double* z;

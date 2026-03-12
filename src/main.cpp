@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
             unsigned int num_threads = std::thread::hardware_concurrency();
             if (num_threads == 0) num_threads = 1;
             fs::path cache_dir = fs::current_path() / "pff_cache";
-            int min_minor = 1;
+            int min_minor = 2;
             bool use_dlt = false;
             std::string method;
             std::string datatype = "universal";
@@ -118,6 +118,8 @@ int main(int argc, char* argv[]) {
             bool drop_major = false;
             std::string class_bal; // "up", "down", or "weighted"
             std::unordered_set<std::string> dropout_set; // feature labels to exclude
+            std::string write_features_path;             // --write-features <path>
+            std::string write_features_transposed_path;  // --write-features-transposed <path>
 
             for (int i = 5; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -179,6 +181,10 @@ int main(int argc, char* argv[]) {
                         if (!line.empty()) dropout_set.insert(line);
                     }
                     std::cout << "Dropout: " << dropout_set.size() << " features excluded\n";
+                } else if (arg == "--write-features" && i + 1 < argc) {
+                    write_features_path = argv[++i];
+                } else if (arg == "--write-features-transposed" && i + 1 < argc) {
+                    write_features_transposed_path = argv[++i];
                 } else {
                     std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
                 }
@@ -690,9 +696,10 @@ int main(int argc, char* argv[]) {
                                 work_queue.pop();
                             }
                             try {
+                                bool skip_x = (datatype == "protein" || datatype == "nucleotide");
                                 results[idx] = use_dlt
-                                    ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor, drop_major, dropout_set)
-                                    : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor, drop_major, dropout_set);
+                                    ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor, drop_major, dropout_set, skip_x)
+                                    : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor, drop_major, dropout_set, skip_x);
                                 {
                                     std::lock_guard<std::mutex> lock(print_mutex);
                                     ++done_count;
@@ -802,6 +809,40 @@ int main(int argc, char* argv[]) {
 
             double write_elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - write_start).count();
+
+            // --- Optionally write feature matrix to file ---
+            auto write_fmat = [&](const std::string& path, bool transposed) {
+                std::ofstream out(path);
+                if (!out) {
+                    std::cerr << "Warning: cannot open '" << path << "' for writing\n";
+                    return;
+                }
+                if (!transposed) {
+                    std::cout << "Writing feature matrix (" << features.n_rows
+                              << " x " << features.n_cols << ") -> " << path << '\n';
+                    for (arma::uword r = 0; r < features.n_rows; ++r) {
+                        for (arma::uword c = 0; c < features.n_cols; ++c) {
+                            if (c > 0) out << ',';
+                            out << features(r, c);
+                        }
+                        out << '\n';
+                    }
+                } else {
+                    std::cout << "Writing transposed feature matrix (" << features.n_cols
+                              << " x " << features.n_rows << ") -> " << path << '\n';
+                    for (arma::uword c = 0; c < features.n_cols; ++c) {
+                        for (arma::uword r = 0; r < features.n_rows; ++r) {
+                            if (r > 0) out << ',';
+                            out << features(r, c);
+                        }
+                        out << '\n';
+                    }
+                }
+            };
+            if (!write_features_path.empty())
+                write_fmat(write_features_path, false);
+            if (!write_features_transposed_path.empty())
+                write_fmat(write_features_transposed_path, true);
 
             // --- Class balancing (applied to features and responses before regression) ---
             if (!class_bal.empty()) {
@@ -1052,7 +1093,7 @@ int main(int argc, char* argv[]) {
                                 return pa < pb;
                             });
                         std::ofstream pf(lam_dir / "pss.txt");
-                        pf << std::fixed << std::setprecision(6);
+                        pf << std::fixed << std::setprecision(15);
                         for (auto& [key, v] : pss_entries) {
                             auto tp = key.find('\t');
                             pf << key.substr(0, tp) << '_' << key.substr(tp + 1) << '\t' << v << '\n';
@@ -1218,7 +1259,7 @@ int main(int argc, char* argv[]) {
                         std::vector<std::pair<double, std::string>> med_gss;
                         for (auto& [g, v] : gss_all) {
                             double med = median_nonzero(v);
-                            if (std::abs(med) >= 5e-7) med_gss.push_back({med, g});
+                            if (med != 0.0) med_gss.push_back({med, g});
                         }
                         std::sort(med_gss.rbegin(), med_gss.rend());
                         std::ofstream mf(output_dir / "gss_median.txt");
@@ -1248,7 +1289,7 @@ int main(int argc, char* argv[]) {
                             std::vector<std::pair<std::string, double>> med_pss;
                             for (auto& [k, v] : pss_all) {
                                 double med = median_nonzero(v);
-                                if (std::abs(med) >= 5e-7) med_pss.push_back({k, med});
+                                if (med != 0.0) med_pss.push_back({k, med});
                             }
                             std::sort(med_pss.begin(), med_pss.end(),
                                 [](const auto& a, const auto& b) {
@@ -1294,7 +1335,7 @@ int main(int argc, char* argv[]) {
                         size_t bss_written = 0;
                         for (const auto& label : bss_order) {
                             double med = median_nonzero(bss_all[label]);
-                            if (std::abs(med) >= 5e-7) {
+                            if (med != 0.0) {
                                 mf << label << '\t' << med << '\n';
                                 ++bss_written;
                             }
@@ -1942,6 +1983,8 @@ int main(int argc, char* argv[]) {
             std::vector<std::string> train_args_extra;
             std::string datatype_dp = "universal";
             std::string method_dp;
+            double grid_rmse_cutoff = 100.0;
+            double grid_acc_cutoff  = 0.0;
 
             for (int i = extra_start; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -1964,6 +2007,10 @@ int main(int argc, char* argv[]) {
                 } else if (arg == "--min-groups" && i + 1 < argc) {
                     train_args_extra.push_back("--param");
                     train_args_extra.push_back(std::string("min_genes=") + argv[++i]);
+                } else if (arg == "--grid-rmse-cutoff" && i + 1 < argc) {
+                    grid_rmse_cutoff = std::stod(argv[++i]);
+                } else if (arg == "--grid-acc-cutoff" && i + 1 < argc) {
+                    grid_acc_cutoff = std::stod(argv[++i]);
                 } else {
                     // Pass through to train
                     train_args_extra.push_back(arg);
@@ -2014,40 +2061,260 @@ int main(int argc, char* argv[]) {
                     return;
                 }
 
-                fs::path lam0_dir     = run_dir / "lambda_0";
-                fs::path weights_file = lam0_dir / "weights.txt";
-                if (!fs::exists(weights_file)) return;
+                // ── Discover all lambda dirs produced by train ──────────────────
+                std::vector<fs::path> lambda_dirs;
+                for (int li = 0; ; ++li) {
+                    fs::path ld = run_dir / ("lambda_" + std::to_string(li));
+                    if (!fs::exists(ld / "weights.txt")) break;
+                    lambda_dirs.push_back(ld);
+                }
+                if (lambda_dirs.empty()) return;
 
-                fs::path eval_out = run_dir / "eval.txt";
-                std::string eval_cmd = exe + " evaluate "
-                    + quote_arg(weights_file.string()) + " "
-                    + quote_arg(list_path.string()) + " "
-                    + quote_arg(eval_out.string())
-                    + (datatype_dp != "universal" ? " --datatype " + datatype_dp : "")
-                    + " --hypothesis " + quote_arg(hyp_file.string())
-                    + " --no-visualize";
-                std::cout << "Running: " << eval_cmd << "\n" << std::flush;
-                std::system(eval_cmd.c_str());
+                // ── Per-lambda evaluate ─────────────────────────────────────────
+                std::string dt_arg = datatype_dp != "universal"
+                    ? " --datatype " + datatype_dp : "";
+                std::string hyp_arg = " --hypothesis " + quote_arg(hyp_file.string());
+                for (auto& ld : lambda_dirs) {
+                    std::string ecmd = exe + " evaluate "
+                        + quote_arg((ld / "weights.txt").string()) + " "
+                        + quote_arg(list_path.string()) + " "
+                        + quote_arg((ld / "eval.txt").string())
+                        + dt_arg + hyp_arg + " --no-visualize";
+                    std::cout << "Running: " << ecmd << "\n" << std::flush;
+                    std::system(ecmd.c_str());
+                }
 
-                fs::path gp_file = run_dir / "eval_gene_predictions.txt";
-                if (fs::exists(gp_file)) {
+                // ── Parse gene_predictions, filter by RMSE/acc thresholds ───────
+                struct LamGP {
+                    std::vector<std::string> seq_ids;
+                    std::vector<double> responses, predictions, intercepts;
+                    std::vector<std::string> gene_names;
+                    std::vector<std::vector<double>> gene_scores; // [gene][seq]
+                    double rmse = 0.0, acc = 0.0;
+                };
+
+                auto parse_gp = [](const fs::path& path) -> LamGP {
+                    LamGP lam;
+                    std::ifstream f(path);
+                    if (!f) return lam;
+                    std::string line;
+                    if (!std::getline(f, line)) return lam;
+                    // Parse header
+                    {
+                        std::istringstream ss(line);
+                        std::string col;
+                        int ci = 0;
+                        while (std::getline(ss, col, '\t')) {
+                            if (ci >= 4) lam.gene_names.push_back(col);
+                            ++ci;
+                        }
+                    }
+                    lam.gene_scores.resize(lam.gene_names.size());
+                    // Parse data rows
+                    while (std::getline(f, line)) {
+                        if (line.empty()) continue;
+                        std::vector<std::string> cols;
+                        {
+                            std::istringstream ss(line);
+                            std::string col;
+                            while (std::getline(ss, col, '\t')) cols.push_back(col);
+                        }
+                        if (cols.size() < 4) continue;
+                        lam.seq_ids.push_back(cols[0]);
+                        lam.responses.push_back(std::stod(cols[1]));
+                        lam.predictions.push_back(std::stod(cols[2]));
+                        lam.intercepts.push_back(std::stod(cols[3]));
+                        for (size_t g = 0; g < lam.gene_names.size(); ++g) {
+                            if (4 + g < cols.size() && cols[4 + g] != "NaN")
+                                lam.gene_scores[g].push_back(std::stod(cols[4 + g]));
+                            else
+                                lam.gene_scores[g].push_back(
+                                    std::numeric_limits<double>::quiet_NaN());
+                        }
+                    }
+                    // Compute RMSE and accuracy over labelled species
+                    double sq_sum = 0.0;
+                    int n_lab = 0, n_cor = 0;
+                    for (size_t i = 0; i < lam.seq_ids.size(); ++i) {
+                        double resp = lam.responses[i];
+                        if (resp == 0.0) continue;
+                        double diff = lam.predictions[i] - resp;
+                        sq_sum += diff * diff;
+                        ++n_lab;
+                        if ((lam.predictions[i] > 0.0) == (resp > 0.0)) ++n_cor;
+                    }
+                    lam.rmse = n_lab > 0 ? std::sqrt(sq_sum / n_lab) : 0.0;
+                    lam.acc  = n_lab > 0 ? static_cast<double>(n_cor) / n_lab : 0.0;
+                    return lam;
+                };
+
+                std::vector<LamGP> qualifying;
+                for (auto& ld : lambda_dirs) {
+                    fs::path gp_file = ld / "eval_gene_predictions.txt";
+                    if (!fs::exists(gp_file)) continue;
+                    LamGP lam = parse_gp(gp_file);
+                    if (lam.seq_ids.empty()) continue;
+                    bool ok = lam.rmse <= grid_rmse_cutoff && lam.acc >= grid_acc_cutoff;
+                    std::cout << "  " << ld.filename().string()
+                              << ": RMSE=" << std::fixed << std::setprecision(4) << lam.rmse
+                              << " ACC=" << lam.acc << (ok ? " [OK]" : " [skip]") << "\n";
+                    if (ok) qualifying.push_back(std::move(lam));
+                }
+
+                if (qualifying.empty()) {
+                    std::cerr << "Warning: no lambda models passed thresholds for "
+                              << label << "\n";
+                    return;
+                }
+                std::cout << qualifying.size() << "/" << lambda_dirs.size()
+                          << " lambda models included in aggregation\n";
+
+                // ── Aggregate qualifying gene_predictions ────────────────────────
+                // Union of gene names in first-appearance order
+                std::vector<std::string> all_genes;
+                {
+                    std::unordered_map<std::string, size_t> seen;
+                    for (auto& lam : qualifying)
+                        for (auto& g : lam.gene_names)
+                            if (seen.find(g) == seen.end()) {
+                                seen[g] = all_genes.size();
+                                all_genes.push_back(g);
+                            }
+                }
+
+                const LamGP& ref = qualifying[0];
+                size_t N = ref.seq_ids.size();
+                size_t G = all_genes.size();
+                size_t M = qualifying.size();
+
+                // Prediction: arithmetic mean across qualifying models
+                std::vector<double> agg_pred(N, 0.0);
+                for (auto& lam : qualifying)
+                    for (size_t i = 0; i < N; ++i)
+                        agg_pred[i] += lam.predictions[i] / static_cast<double>(M);
+
+                // Intercept: arithmetic mean
+                std::vector<double> agg_intercept(N, 0.0);
+                for (auto& lam : qualifying)
+                    for (size_t i = 0; i < N; ++i)
+                        agg_intercept[i] += lam.intercepts[i] / static_cast<double>(M);
+
+                // Gene scores: median of non-zero values per (gene, seq) cell
+                auto median_nz = [](std::vector<double> vals) -> double {
+                    std::vector<double> nz;
+                    for (double x : vals)
+                        if (!std::isnan(x) && x != 0.0) nz.push_back(x);
+                    if (nz.empty()) return 0.0;
+                    std::sort(nz.begin(), nz.end());
+                    size_t m = nz.size() / 2;
+                    return (nz.size() % 2 == 0) ? (nz[m-1] + nz[m]) / 2.0 : nz[m];
+                };
+
+                // Build per-model gene→index map for O(1) lookup
+                std::vector<std::unordered_map<std::string, size_t>> lam_gene_maps(M);
+                for (size_t mi = 0; mi < M; ++mi)
+                    for (size_t g = 0; g < qualifying[mi].gene_names.size(); ++g)
+                        lam_gene_maps[mi][qualifying[mi].gene_names[g]] = g;
+
+                // agg_gene[g][i], any_present[g][i]
+                std::vector<std::vector<double>> agg_gene(G, std::vector<double>(N, 0.0));
+                std::vector<std::vector<bool>>   any_present(G, std::vector<bool>(N, false));
+                for (size_t g_out = 0; g_out < G; ++g_out) {
+                    const std::string& gname = all_genes[g_out];
+                    for (size_t i = 0; i < N; ++i) {
+                        std::vector<double> vals;
+                        for (size_t mi = 0; mi < M; ++mi) {
+                            auto it = lam_gene_maps[mi].find(gname);
+                            if (it == lam_gene_maps[mi].end()) continue;
+                            double v = qualifying[mi].gene_scores[it->second][i];
+                            if (!std::isnan(v)) {
+                                any_present[g_out][i] = true;
+                                vals.push_back(v);
+                            }
+                        }
+                        agg_gene[g_out][i] = median_nz(vals);
+                    }
+                }
+
+                // ── Write aggregated eval_gene_predictions.txt ───────────────────
+                fs::path gp_out = run_dir / "eval_gene_predictions.txt";
+                {
+                    std::ofstream gp(gp_out);
+                    gp << std::fixed << std::setprecision(6);
+                    gp << "SeqID\tResponse\tPrediction\tIntercept";
+                    for (auto& g : all_genes) gp << '\t' << g;
+                    gp << '\n';
+                    for (size_t i = 0; i < N; ++i) {
+                        gp << ref.seq_ids[i] << '\t' << ref.responses[i] << '\t'
+                           << agg_pred[i] << '\t' << agg_intercept[i];
+                        for (size_t g = 0; g < G; ++g) {
+                            if (!any_present[g][i])
+                                gp << "\tNaN";
+                            else
+                                gp << '\t' << agg_gene[g][i];
+                        }
+                        gp << '\n';
+                    }
+                }
+
+                // ── Derive eval.txt from aggregated predictions ──────────────────
+                {
+                    std::ofstream ef(run_dir / "eval.txt");
+                    ef << std::fixed << std::setprecision(6);
+                    ef << "SequenceID\tPredictedValue\tTrueValue\n";
+                    for (size_t i = 0; i < N; ++i)
+                        ef << ref.seq_ids[i] << '\t' << agg_pred[i] << '\t'
+                           << ref.responses[i] << '\n';
+                }
+
+                // ── Derive eval_SPS_SPP.txt ──────────────────────────────────────
+                {
+                    auto expit = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
+                    double max_ep_pos = 0.5, min_ep_neg = 0.5;
+                    for (size_t i = 0; i < N; ++i) {
+                        double ep = expit(agg_pred[i]);
+                        if (ref.responses[i] > 0.0 && ep > max_ep_pos) max_ep_pos = ep;
+                        if (ref.responses[i] < 0.0 && ep < min_ep_neg) min_ep_neg = ep;
+                    }
+                    double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
+                    double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
+                    std::ofstream sf(run_dir / "eval_SPS_SPP.txt");
+                    sf << std::fixed << std::setprecision(6);
+                    sf << "SeqID\tResponse\tSPS\tSPP\n";
+                    for (size_t i = 0; i < N; ++i) {
+                        double ep  = expit(agg_pred[i]);
+                        double spp = ref.responses[i] > 0.0 ? (ep - 0.5) / norm_pos
+                                   : ref.responses[i] < 0.0 ? (ep - 0.5) / norm_neg
+                                   : (ep - 0.5) / norm_pos;
+                        sf << ref.seq_ids[i] << '\t' << ref.responses[i] << '\t'
+                           << agg_pred[i] << '\t' << spp << '\n';
+                    }
+                }
+
+                // ── Generate SVG from aggregated gene_predictions ────────────────
+                {
                     fs::path svg_out = run_dir / "eval.svg";
                     std::string viz_cmd = exe + " visualize "
-                        + quote_arg(gp_file.string()) + " "
+                        + quote_arg(gp_out.string()) + " "
                         + quote_arg(svg_out.string()) + " --m-grid";
                     std::cout << "Running: " << viz_cmd << "\n" << std::flush;
                     std::system(viz_cmd.c_str());
                 }
 
-                fs::path gss_file = lam0_dir / "gss.txt";
+                // ── HSS: prefer gss_median.txt, fall back to lambda_0/gss.txt ────
                 double hss = 0.0;
-                if (fs::exists(gss_file)) {
-                    std::ifstream gf(gss_file);
-                    std::string line;
-                    while (std::getline(gf, line)) {
-                        auto tab = line.find('\t');
-                        if (tab != std::string::npos)
-                            hss += std::stod(line.substr(tab + 1));
+                {
+                    fs::path gss_file = run_dir / "gss_median.txt";
+                    if (!fs::exists(gss_file))
+                        gss_file = lambda_dirs[0] / "gss.txt";
+                    if (fs::exists(gss_file)) {
+                        std::ifstream gf(gss_file);
+                        std::string gline;
+                        while (std::getline(gf, gline)) {
+                            auto tab = gline.find('\t');
+                            if (tab != std::string::npos)
+                                hss += std::stod(gline.substr(tab + 1));
+                        }
                     }
                 }
                 hss_summary.push_back({label, hss});

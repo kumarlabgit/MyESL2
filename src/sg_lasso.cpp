@@ -643,7 +643,7 @@ const arma::fcolvec SGLasso::altra(const arma::fcolvec& v_in,
         i=1;
     }
     else{
-        memcpy(x, v, sizeof(double) * n);
+        memcpy(x, v, sizeof(float) * n);
         i=0;
     }
 //std::cout << "Altra 3..." << std::endl;

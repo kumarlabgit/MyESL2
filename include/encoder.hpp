@@ -23,12 +23,15 @@ struct AlignmentResult {
 // min_minor: minimum total count of non-major, non-indel characters required to keep a position
 // drop_major: if true, skip building a feature column for the most frequent allele at each position
 // dropout_labels: set of "{stem}_{pos}_{allele}" labels to exclude (empty = include all)
+// skip_x: if true, treat 'X' (unknown amino acid / nucleotide) like '-' and '?' (not counted
+//         towards allele totals); set for protein/nucleotide datatypes, not for universal
 AlignmentResult encode_pff(
     const std::filesystem::path& pff_path,
     const std::vector<std::string>& hyp_seq_names,
     int min_minor,
     bool drop_major = false,
-    const std::unordered_set<std::string>& dropout_labels = {}
+    const std::unordered_set<std::string>& dropout_labels = {},
+    bool skip_x = false
 );
 
 // Alternate encoder using direct lookup tables (DLT) in place of character equality comparisons.
@@ -39,7 +42,8 @@ AlignmentResult encode_pff_dlt(
     const std::vector<std::string>& hyp_seq_names,
     int min_minor,
     bool drop_major = false,
-    const std::unordered_set<std::string>& dropout_labels = {}
+    const std::unordered_set<std::string>& dropout_labels = {},
+    bool skip_x = false
 );
 
 } // namespace encoder

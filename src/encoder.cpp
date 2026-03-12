@@ -15,7 +15,8 @@ AlignmentResult encode_pff(
     const std::vector<std::string>& hyp_seq_names,
     int min_minor,
     bool drop_major,
-    const std::unordered_set<std::string>& dropout_labels)
+    const std::unordered_set<std::string>& dropout_labels,
+    bool skip_x)
 {
     AlignmentResult result;
     result.stem = pff_path.stem().string();
@@ -51,12 +52,12 @@ AlignmentResult encode_pff(
 
     // Encode each alignment position
     for (uint32_t p = 0; p < L; ++p) {
-        // Count alleles among hypothesis sequences, ignoring '-' and '?'
+        // Count alleles among hypothesis sequences, ignoring '-', '?', and optionally 'X'
         std::map<char, int> counts;
         for (uint32_t i = 0; i < N; ++i) {
             if (seq_mapping[i] < 0) continue;
             char c = raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])];
-            if (c == '-' || c == '?') continue;
+            if (c == '-' || c == '?' || (skip_x && c == 'X')) continue;
             counts[c]++;
         }
 
@@ -76,6 +77,7 @@ AlignmentResult encode_pff(
         // One column per allele; skip major if drop_major=true (map iteration = sorted by char)
         for (const auto& [allele, cnt] : counts) {
             if (drop_major && allele == major) continue;
+            if (cnt < min_minor) continue; // per-allele count filter (matches old project behaviour)
 
             // Check dropout
             if (!dropout_labels.empty()) {
@@ -102,7 +104,8 @@ AlignmentResult encode_pff_dlt(
     const std::vector<std::string>& hyp_seq_names,
     int min_minor,
     bool drop_major,
-    const std::unordered_set<std::string>& dropout_labels)
+    const std::unordered_set<std::string>& dropout_labels,
+    bool skip_x)
 {
     AlignmentResult result;
     result.stem = pff_path.stem().string();
@@ -134,12 +137,11 @@ AlignmentResult encode_pff_dlt(
     }
 
     // Lookup table: characters to skip when counting alleles
-    static const auto is_skip = []() {
-        std::array<bool, 256> t{};
-        t[static_cast<uint8_t>('-')] = true;
-        t[static_cast<uint8_t>('?')] = true;
-        return t;
-    }();
+    // '-' and '?' are always skipped; 'X' is skipped only for protein/nucleotide datatypes
+    std::array<bool, 256> is_skip{};
+    is_skip[static_cast<uint8_t>('-')] = true;
+    is_skip[static_cast<uint8_t>('?')] = true;
+    if (skip_x) is_skip[static_cast<uint8_t>('X')] = true;
 
     // Per-position working arrays declared outside the loop
     int     counts[256];   // allele occurrence counts
@@ -183,6 +185,7 @@ AlignmentResult encode_pff_dlt(
         for (int c = 0; c < 256; ++c) {
             if (counts[c] == 0) continue;
             if (drop_major && c == static_cast<int>(major)) continue;
+            if (counts[c] < min_minor) continue; // per-allele count filter (matches old project behaviour)
             // Check dropout
             if (!dropout_labels.empty()) {
                 std::string lbl = result.stem + "_" + std::to_string(p) + "_" + static_cast<char>(c);
