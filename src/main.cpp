@@ -606,7 +606,11 @@ int main(int argc, char* argv[]) {
                         uint64_t ncols = nr.columns.size();
                         alg_table(0, col) = static_cast<double>(offset + 1);
                         alg_table(1, col) = static_cast<double>(offset + ncols);
-                        alg_table(2, col) = std::sqrt(static_cast<double>(ncols));
+                        { // truncate weight to 6 decimal places to match old preprocess output
+                            std::ostringstream ss;
+                            ss << std::fixed << std::setprecision(6) << std::sqrt(static_cast<double>(ncols));
+                            alg_table(2, col) = std::stod(ss.str());
+                        }
                         offset += ncols;
                         ++col;
                     }
@@ -771,7 +775,11 @@ int main(int argc, char* argv[]) {
                         uint64_t ncols = r.columns.size();
                         alg_table(0, col) = static_cast<double>(offset + 1);
                         alg_table(1, col) = static_cast<double>(offset + ncols);
-                        alg_table(2, col) = std::sqrt(static_cast<double>(ncols));
+                        { // truncate weight to 6 decimal places to match old preprocess output
+                            std::ostringstream ss;
+                            ss << std::fixed << std::setprecision(6) << std::sqrt(static_cast<double>(ncols));
+                            alg_table(2, col) = std::stod(ss.str());
+                        }
                         offset += ncols;
                         ++col;
                     }

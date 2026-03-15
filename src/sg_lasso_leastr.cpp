@@ -3,7 +3,6 @@
 #include <sstream>
 #include <iomanip>
 
-
 SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
                                    const arma::rowvec& responses,
                                    const arma::mat& weights,
@@ -199,7 +198,6 @@ bool initial_pass = true;
 
   //sgLeastR.m:168-175
   arma::mat ATy = A.t() * y;
-
   //sgLeastR.m:178-201
   double* lambda;
 
@@ -297,7 +295,6 @@ if (iterStep < 6 || opts_maxIter - iterStep < 6)
     //sgLogisticR.m:331-378
 //std::cout << "6..." << std::endl;
 //std::cout<<2<<std::endl;
-int pass_counter = 0;
     while (true)
     {
       v = s - g/L;
@@ -305,6 +302,7 @@ int pass_counter = 0;
       //sgLogisticR.m:337-338
       arma::mat ind_work = ind;
       ind_work.col(2) = ind_work.col(2) * (lambda2/L);
+
       arma::rowvec first_row = {-1, -1, lambda1/L};
       ind_work.insert_rows(0, first_row);
       //ind_work(0,0) = -1;
