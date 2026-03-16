@@ -169,4 +169,21 @@ std::vector<std::pair<std::string, double>> get_leaf_distances(const NewickNode&
     return result;
 }
 
+// ─── Parent map ───────────────────────────────────────────────────────────────
+
+static void build_parent_map_helper(
+        const NewickNode& node, const NewickNode* parent,
+        std::unordered_map<const NewickNode*, const NewickNode*>& map) {
+    if (parent) map[&node] = parent;
+    for (auto& child : node.children)
+        build_parent_map_helper(child, &node, map);
+}
+
+std::unordered_map<const NewickNode*, const NewickNode*>
+build_parent_map(const NewickNode& root) {
+    std::unordered_map<const NewickNode*, const NewickNode*> map;
+    build_parent_map_helper(root, nullptr, map);
+    return map;
+}
+
 } // namespace newick

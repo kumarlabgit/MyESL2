@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace newick {
@@ -35,5 +36,9 @@ int count_leaves(const NewickNode& node);
 // Compute total branch length from a node to each leaf, for phylo sampling
 // Returns map from leaf name to sum of branch lengths from 'from_node' to that leaf
 std::vector<std::pair<std::string, double>> get_leaf_distances(const NewickNode& from_node);
+
+// Returns a map: node address → parent address (root has no entry)
+std::unordered_map<const NewickNode*, const NewickNode*>
+    build_parent_map(const NewickNode& root);
 
 } // namespace newick
