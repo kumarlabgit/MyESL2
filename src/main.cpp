@@ -117,6 +117,7 @@ int main(int argc, char* argv[]) {
             double auto_bit_ct = -1.0;
             bool drop_major = false;
             std::string class_bal; // "up", "down", or "weighted"
+            int min_groups = 0;   // 0 = disabled
             std::unordered_set<std::string> dropout_set; // feature labels to exclude
             std::string write_features_path;             // --write-features <path>
             std::string write_features_transposed_path;  // --write-features-transposed <path>
@@ -127,9 +128,6 @@ int main(int argc, char* argv[]) {
                     orientation = pff::Orientation::ROW_MAJOR;
                 } else if (arg == "column") {
                     orientation = pff::Orientation::COLUMN_MAJOR;
-                } else if (arg == "--threads" && i + 1 < argc) {
-                    num_threads = static_cast<unsigned int>(std::stoi(argv[++i]));
-                    if (num_threads == 0) num_threads = 1;
                 } else if (arg == "--cache-dir" && i + 1 < argc) {
                     cache_dir = argv[++i];
                 } else if (arg == "--min-minor" && i + 1 < argc) {
@@ -172,6 +170,8 @@ int main(int argc, char* argv[]) {
                     class_bal = argv[++i];
                     if (class_bal != "up" && class_bal != "down" && class_bal != "weighted")
                         throw std::runtime_error("--class-bal must be up, down, or weighted");
+                } else if (arg == "--min-groups" && i + 1 < argc) {
+                    min_groups = std::stoi(argv[++i]);
                 } else if (arg == "--dropout" && i + 1 < argc) {
                     std::ifstream df(argv[++i]);
                     if (!df) throw std::runtime_error("Cannot open dropout file: " + std::string(argv[i]));
@@ -1021,21 +1021,14 @@ int main(int argc, char* argv[]) {
                     for (uint32_t i = 0; i < N; ++i)
                         xval_idxs(i) = static_cast<double>(i % nfolds);
 
-                std::mutex queue_mutex;
-                std::queue<int> work_queue;
-                for (int i = 0; i < (int)lambdas.size(); ++i) work_queue.push(i);
-
-                // Per-lambda output accumulated during parallel phase, printed in order after join
-                std::vector<std::string> lambda_outputs(lambdas.size());
-
                 // Build sorted stems list for numeric longest-prefix matching in GSS
                 std::vector<std::string> sorted_stems_desc = all_stems_ordered;
                 std::sort(sorted_stems_desc.begin(), sorted_stems_desc.end(),
                     [](const std::string& a, const std::string& b){ return a.size() > b.size(); });
 
-                // Helper: compute and write GSS/PSS, return HSS
+                // Helper: compute and write GSS/PSS, return nonzero gene count
                 auto compute_sig_scores = [&](const fs::path& wpath, const fs::path& lam_dir,
-                                              std::ostringstream& sout, int lam_idx) {
+                                              std::ostringstream& sout, int lam_idx) -> int {
                     bool is_numeric_mode = (datatype == "numeric");
                     std::map<std::string, double> gss; // stem -> sum(|w|)
                     // PSS key = "stem\tpos_str" -> sum(|w|)
@@ -1109,131 +1102,145 @@ int main(int argc, char* argv[]) {
                     }
 
                     sout << "  [" << lam_idx << "] HSS=" << std::fixed << std::setprecision(4) << hss << "\n";
+                    return static_cast<int>(gss.size());
                 };
 
-                auto lambda_worker = [&]() {
-                    while (true) {
-                        int idx;
+                // Validate lambda ordering for skip-ahead (requires lambda1-outer, lambda2-inner)
+                bool skip_ahead_valid = true;
+                if (min_groups > 0 && lambdas.size() > 1) {
+                    for (size_t i = 1; i < lambdas.size(); ++i) {
+                        bool same_l1   = (lambdas[i][0] == lambdas[i-1][0]);
+                        bool l1_incr   = (lambdas[i][0] >  lambdas[i-1][0]);
+                        bool l2_incr   = (lambdas[i][1] >  lambdas[i-1][1]);
+                        if (!same_l1 && !l1_incr) { skip_ahead_valid = false; break; }
+                        if ( same_l1 && !l2_incr) { skip_ahead_valid = false; break; }
+                    }
+                    if (!skip_ahead_valid)
+                        std::cerr << "Warning: lambda list is not in lambda1-outer/lambda2-inner order; "
+                                     "--min-groups skip-ahead disabled.\n";
+                }
+
+                double min_lambda2 = std::numeric_limits<double>::infinity();
+                for (auto& lam : lambdas) min_lambda2 = std::min(min_lambda2, lam[1]);
+                double max_lambda2 = std::numeric_limits<double>::infinity();
+
+                for (int idx = 0; idx < (int)lambdas.size(); ++idx) {
+                    auto& lam = lambdas[idx];
+                    fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+                    fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
+
+                    if (skip_ahead_valid && min_groups > 0 && lam[1] > max_lambda2) {
+                        std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
+                                  << "] Skipping (gene count threshold)\n";
+                        continue;
+                    }
+
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(4);
+
+                    if (nfolds == 0) {
+                        // Single model
+                        auto regr = regression::createRegressionAnalysis(
+                            method, features, responses, alg_table.t(), params, lam);
                         {
-                            std::lock_guard<std::mutex> lk(queue_mutex);
-                            if (work_queue.empty()) break;
-                            idx = work_queue.front();
-                            work_queue.pop();
+                            std::ofstream wo(lam_dir / "weights.txt");
+                            std::ifstream mi(output_dir / "combined.map");
+                            regr->writeSparseMappedWeightsToStream(wo, mi);
                         }
-                        auto& lam = lambdas[idx];
-                        fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
-                        fs::create_directories(lam_dir);
+                        out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                            << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
+                        int gene_count = compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
+                        out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
+                        std::cout << out.str();
 
-                        std::ostringstream out;
-                        out << std::fixed << std::setprecision(4);
-
-                        if (nfolds == 0) {
-                            // Single model
-                            auto regr = regression::createRegressionAnalysis(
-                                method, features, responses, alg_table.t(), params, lam);
+                        if (skip_ahead_valid && min_groups > 0 && gene_count <= min_groups) {
+                            if (lam[1] == min_lambda2) break; // even min lambda2 is too sparse
+                            max_lambda2 = std::min(max_lambda2, lam[1]);
+                        }
+                    } else {
+                        // K-fold CV
+                        std::vector<double> cv_preds(N, 0.0);
+                        for (int k = 0; k < nfolds; ++k) {
+                            auto regr = regression::createRegressionAnalysisXVal(
+                                method, features, responses, alg_table.t(), params, lam,
+                                xval_idxs, k);
+                            fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
                             {
-                                std::ofstream wo(lam_dir / "weights.txt");
+                                std::ofstream wo(fw);
                                 std::ifstream mi(output_dir / "combined.map");
                                 regr->writeSparseMappedWeightsToStream(wo, mi);
                             }
-                            out << "  [" << idx << "] lambda=[" << lam[0] << ","
-                                << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
-                            compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
-                        } else {
-                            // K-fold CV
-                            std::vector<double> cv_preds(N, 0.0);
-                            for (int k = 0; k < nfolds; ++k) {
-                                auto regr = regression::createRegressionAnalysisXVal(
-                                    method, features, responses, alg_table.t(), params, lam,
-                                    xval_idxs, k);
-                                fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
-                                {
-                                    std::ofstream wo(fw);
-                                    std::ifstream mi(output_dir / "combined.map");
-                                    regr->writeSparseMappedWeightsToStream(wo, mi);
-                                }
 
-                                // Parse fold weights
-                                double fold_intercept = 0.0;
-                                std::vector<std::pair<uint64_t, double>> fold_weights;
-                                {
-                                    std::ifstream wf(fw);
-                                    std::string line;
-                                    while (std::getline(wf, line)) {
-                                        if (line.empty()) continue;
-                                        auto tab = line.find('\t');
-                                        if (tab == std::string::npos) continue;
-                                        std::string label = line.substr(0, tab);
-                                        double w = std::stod(line.substr(tab + 1));
-                                        if (label == "Intercept") { fold_intercept = w; continue; }
-                                        auto it = label_to_col.find(label);
-                                        if (it != label_to_col.end())
-                                            fold_weights.emplace_back(it->second, w);
-                                    }
-                                }
-
-                                // Predict held-out
-                                int held_out = 0;
-                                for (uint32_t i = 0; i < N; ++i) {
-                                    if (xval_idxs(i) != static_cast<double>(k)) continue;
-                                    ++held_out;
-                                    double pred = fold_intercept;
-                                    for (auto& [col, w] : fold_weights)
-                                        pred += w * static_cast<double>(features(i, col));
-                                    cv_preds[i] = pred;
-                                }
-
-                                out << "  [" << idx << "] fold " << k
-                                    << ": held-out=" << held_out
-                                    << ", non-zero weights=" << fold_weights.size() << "\n";
-                            }
-
-                            // Write cv_predictions.txt
+                            // Parse fold weights
+                            double fold_intercept = 0.0;
+                            std::vector<std::pair<uint64_t, double>> fold_weights;
                             {
-                                std::ofstream cv_out(lam_dir / "cv_predictions.txt");
-                                cv_out << std::fixed << std::setprecision(6);
-                                cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
-                                for (uint32_t i = 0; i < N; ++i)
-                                    cv_out << hyp_seq_names[i] << '\t'
-                                           << cv_preds[i] << '\t'
-                                           << hyp_values[i] << '\n';
+                                std::ifstream wf(fw);
+                                std::string line;
+                                while (std::getline(wf, line)) {
+                                    if (line.empty()) continue;
+                                    auto tab = line.find('\t');
+                                    if (tab == std::string::npos) continue;
+                                    std::string label = line.substr(0, tab);
+                                    double w = std::stod(line.substr(tab + 1));
+                                    if (label == "Intercept") { fold_intercept = w; continue; }
+                                    auto it = label_to_col.find(label);
+                                    if (it != label_to_col.end())
+                                        fold_weights.emplace_back(it->second, w);
+                                }
                             }
 
-                            // Classification metrics
-                            int tp = 0, tn = 0, fp = 0, fn = 0;
+                            // Predict held-out
+                            int held_out = 0;
                             for (uint32_t i = 0; i < N; ++i) {
-                                bool pred_pos = cv_preds[i] > 0.0;
-                                bool true_pos = hyp_values[i] > 0.0f;
-                                if      ( true_pos &&  pred_pos) ++tp;
-                                else if (!true_pos && !pred_pos) ++tn;
-                                else if (!true_pos &&  pred_pos) ++fp;
-                                else                              ++fn;
+                                if (xval_idxs(i) != static_cast<double>(k)) continue;
+                                ++held_out;
+                                double pred = fold_intercept;
+                                for (auto& [col, w] : fold_weights)
+                                    pred += w * static_cast<double>(features(i, col));
+                                cv_preds[i] = pred;
                             }
-                            double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
-                            double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
-                            double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
-                            double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
 
-                            out << "  [" << idx << "] lambda=[" << lam[0] << ","
-                                << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
-                            out << "    TP=" << tp << " TN=" << tn
-                                << " FP=" << fp << " FN=" << fn << "\n";
-                            out << "    TPR=" << tpr << " TNR=" << tnr
-                                << " FPR=" << fpr << " FNR=" << fnr << "\n";
+                            out << "  [" << idx << "] fold " << k
+                                << ": held-out=" << held_out
+                                << ", non-zero weights=" << fold_weights.size() << "\n";
                         }
 
-                        lambda_outputs[idx] = out.str();
+                        // Write cv_predictions.txt
+                        {
+                            std::ofstream cv_out(lam_dir / "cv_predictions.txt");
+                            cv_out << std::fixed << std::setprecision(6);
+                            cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
+                            for (uint32_t i = 0; i < N; ++i)
+                                cv_out << hyp_seq_names[i] << '\t'
+                                       << cv_preds[i] << '\t'
+                                       << hyp_values[i] << '\n';
+                        }
+
+                        // Classification metrics
+                        int tp = 0, tn = 0, fp = 0, fn = 0;
+                        for (uint32_t i = 0; i < N; ++i) {
+                            bool pred_pos = cv_preds[i] > 0.0;
+                            bool true_pos = hyp_values[i] > 0.0f;
+                            if      ( true_pos &&  pred_pos) ++tp;
+                            else if (!true_pos && !pred_pos) ++tn;
+                            else if (!true_pos &&  pred_pos) ++fp;
+                            else                              ++fn;
+                        }
+                        double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
+                        double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
+                        double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
+                        double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
+
+                        out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                            << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
+                        out << "    TP=" << tp << " TN=" << tn
+                            << " FP=" << fp << " FN=" << fn << "\n";
+                        out << "    TPR=" << tpr << " TNR=" << tnr
+                            << " FPR=" << fpr << " FNR=" << fnr << "\n";
+                        std::cout << out.str();
                     }
-                };
-
-                unsigned int tc = std::min(num_threads,
-                                           static_cast<unsigned int>(lambdas.size()));
-                std::vector<std::thread> threads;
-                threads.reserve(tc);
-                for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(lambda_worker);
-                for (auto& t : threads) t.join();
-
-                for (auto& s : lambda_outputs) std::cout << s;
+                }
 
                 // Phase 2a: Grid summary — median GSS/PSS/BSS across all lambdas
                 if (lambdas.size() > 1 && nfolds == 0) {
@@ -1988,6 +1995,8 @@ int main(int argc, char* argv[]) {
             std::string clade_list_file;
             std::string gen_clade_spec; // "lower,upper"
             std::string class_bal_dp = "phylo";
+            int min_groups_dp = 3;      // default 3 for DrPhylo mode, matches old pipeline
+            bool min_groups_dp_set = false;
             std::vector<std::string> train_args_extra;
             std::string datatype_dp = "universal";
             std::string method_dp;
@@ -2013,8 +2022,10 @@ int main(int argc, char* argv[]) {
                     train_args_extra.push_back("--method");
                     train_args_extra.push_back(argv[i]);
                 } else if (arg == "--min-groups" && i + 1 < argc) {
-                    train_args_extra.push_back("--param");
-                    train_args_extra.push_back(std::string("min_genes=") + argv[++i]);
+                    min_groups_dp = std::stoi(argv[++i]);
+                    min_groups_dp_set = true;
+                    train_args_extra.push_back("--min-groups");
+                    train_args_extra.push_back(std::to_string(min_groups_dp));
                 } else if (arg == "--grid-rmse-cutoff" && i + 1 < argc) {
                     grid_rmse_cutoff = std::stod(argv[++i]);
                 } else if (arg == "--grid-acc-cutoff" && i + 1 < argc) {
@@ -2038,6 +2049,12 @@ int main(int argc, char* argv[]) {
                 if (s.find(' ') != std::string::npos) return "\"" + s + "\"";
                 return s;
             };
+            // Inject default --min-groups if not explicitly provided
+            if (!min_groups_dp_set) {
+                train_args_extra.push_back("--min-groups");
+                train_args_extra.push_back(std::to_string(min_groups_dp));
+            }
+
             std::string train_extra_str;
             if (method_dp.empty())
                 train_extra_str = " --method sg_lasso";
@@ -2050,11 +2067,14 @@ int main(int argc, char* argv[]) {
 
             // Shared helper: run train + evaluate + visualize for one hypothesis file.
             // Writes results into run_dir; appends HSS entry labelled by label.
-            // class_bal_dp == "phylo" means no --class-bal flag is passed to train.
+            // phylo/phylo_1/phylo_2: sampling is done at hypothesis level;
+            // weighted balancing (sWeight) is always also applied, matching old pipeline behavior.
             auto run_one = [&](const fs::path& hyp_file, const fs::path& run_dir,
                                const std::string& label) {
                 std::string bal_arg;
-                if (class_bal_dp != "phylo")
+                if (class_bal_dp == "phylo" || class_bal_dp == "phylo_1" || class_bal_dp == "phylo_2")
+                    bal_arg = " --class-bal weighted";
+                else
                     bal_arg = " --class-bal " + class_bal_dp;
 
                 std::string train_cmd = exe + " train "
@@ -2073,8 +2093,9 @@ int main(int argc, char* argv[]) {
                 std::vector<fs::path> lambda_dirs;
                 for (int li = 0; ; ++li) {
                     fs::path ld = run_dir / ("lambda_" + std::to_string(li));
-                    if (!fs::exists(ld / "weights.txt")) break;
-                    lambda_dirs.push_back(ld);
+                    if (!fs::exists(ld)) break;                    // dir absent → end of sequence
+                    if (fs::exists(ld / "weights.txt"))
+                        lambda_dirs.push_back(ld);                 // skip silently if weights absent
                 }
                 if (lambda_dirs.empty()) return;
 
@@ -2354,6 +2375,31 @@ int main(int argc, char* argv[]) {
                 auto all_tree_leaves = newick::get_leaves(tree);
                 std::cout << "Tree has " << all_tree_leaves.size() << " leaves\n";
 
+                // Pre-compute shared helpers for phylo sampling modes
+                auto parent_map = newick::build_parent_map(tree);
+
+                // Reversed DFS leaf order for tie-breaking (matches old pipeline's taxa_list.reverse())
+                auto taxa_list_rev = all_tree_leaves;
+                std::reverse(taxa_list_rev.begin(), taxa_list_rev.end());
+
+                // Leaf branch lengths
+                std::unordered_map<std::string, double> leaf_bl_map;
+                std::function<void(const newick::NewickNode&)> collect_bl =
+                    [&](const newick::NewickNode& n) {
+                        if (n.is_leaf()) leaf_bl_map[n.name] = n.branch_length;
+                        for (auto& c : n.children) collect_bl(c);
+                    };
+                collect_bl(tree);
+
+                // Total branch length (modes 1 and 2 skip trimming when == 0)
+                double tree_tbl = 0.0;
+                std::function<void(const newick::NewickNode&)> sum_bl =
+                    [&](const newick::NewickNode& n) {
+                        tree_tbl += n.branch_length;
+                        for (auto& c : n.children) sum_bl(c);
+                    };
+                sum_bl(tree);
+
                 auto find_node = [](const newick::NewickNode& root, const std::string& name)
                         -> const newick::NewickNode* {
                     std::vector<const newick::NewickNode*> queue = {&root};
@@ -2383,19 +2429,112 @@ int main(int argc, char* argv[]) {
                     for (auto& leaf : all_tree_leaves)
                         if (!pos_set.count(leaf)) neg_leaves.push_back(leaf);
 
-                    // Phylo sampling: keep nearest 3 × |pos| negatives by branch distance
-                    if (class_bal_dp == "phylo" && neg_leaves.size() > 3 * pos_leaves.size()) {
-                        auto leaf_dists = newick::get_leaf_distances(*clade_node);
-                        std::unordered_map<std::string, double> dist_map;
-                        for (auto& [leaf, d] : leaf_dists)
-                            dist_map[leaf] = d;
-                        std::sort(neg_leaves.begin(), neg_leaves.end(),
-                            [&](const std::string& a, const std::string& b) {
-                                double da = dist_map.count(a) ? dist_map[a] : 1e18;
-                                double db = dist_map.count(b) ? dist_map[b] : 1e18;
-                                return da < db;
-                            });
-                        neg_leaves.resize(3 * pos_leaves.size());
+                    if (class_bal_dp == "phylo" || class_bal_dp == "phylo_1" || class_bal_dp == "phylo_2") {
+                        std::unordered_map<std::string, int> resp;
+                        for (auto& leaf : all_tree_leaves) resp[leaf] = 0;
+                        for (auto& leaf : pos_leaves)      resp[leaf] = 1;
+                        int pos_count = (int)pos_leaves.size();
+
+                        // Recompute response_sum
+                        auto recompute = [&]() {
+                            int s = 0; for (auto& [l, r] : resp) s += r; return s;
+                        };
+
+                        // Trim one leaf from set: smallest branch_length, reversed-DFS tie-break
+                        auto trim_one = [&](std::vector<std::string>& set) {
+                            double min_bl = std::numeric_limits<double>::infinity();
+                            for (auto& leaf : set) min_bl = std::min(min_bl, leaf_bl_map[leaf]);
+                            std::set<std::string> ties;
+                            for (auto& leaf : set) if (leaf_bl_map[leaf] == min_bl) ties.insert(leaf);
+                            for (auto& taxa : taxa_list_rev) {
+                                if (ties.count(taxa)) {
+                                    resp[taxa] = 0;
+                                    set.erase(std::find(set.begin(), set.end(), taxa));
+                                    return;
+                                }
+                            }
+                        };
+
+                        // Assign all unassigned leaves under a node as -1
+                        auto assign_neg = [&](const newick::NewickNode& n) {
+                            for (auto& leaf : newick::get_leaves(n))
+                                if (resp[leaf] == 0) resp[leaf] = -1;
+                        };
+
+                        // Recursive walk up tree assigning negatives (modes 2 and 3)
+                        auto recursive_walk = [&]() {
+                            const newick::NewickNode* target = clade_node;
+                            int response_sum = pos_count;
+                            while (response_sum > 0) {
+                                auto pit = parent_map.find(target);
+                                if (pit == parent_map.end()) {
+                                    // at root
+                                    for (auto& [l, r] : resp) if (r == 0) r = -1;
+                                    response_sum = 0; break;
+                                }
+                                const newick::NewickNode* par = pit->second;
+                                assign_neg(*par);
+                                response_sum = recompute();
+                                target = par;
+
+                                if (response_sum < static_cast<int>(0.1 * pos_count)) {
+                                    auto git = parent_map.find(target);
+                                    const newick::NewickNode* gpar =
+                                        (git != parent_map.end()) ? git->second : &tree;
+                                    int next_sum = 0;
+                                    for (auto& leaf : newick::get_leaves(*gpar))
+                                        next_sum += (resp[leaf] == 1) ? 1 : -1;
+                                    if (std::abs(next_sum) > response_sum * 4)
+                                        response_sum = 0;
+                                }
+                            }
+                        };
+
+                        if (class_bal_dp == "phylo_1") {
+                            // Mode 1: immediate parent only
+                            auto pit = parent_map.find(clade_node);
+                            const newick::NewickNode* par =
+                                (pit != parent_map.end()) ? pit->second : &tree;
+                            assign_neg(*par);
+                            int response_sum = recompute();
+                            if (tree_tbl > 0 && response_sum <= -1) {
+                                std::vector<std::string> neg_set;
+                                for (auto& leaf : all_tree_leaves) if (resp[leaf] == -1) neg_set.push_back(leaf);
+                                for (int i = 0; i < -response_sum; ++i) trim_one(neg_set);
+                            }
+                        } else if (class_bal_dp == "phylo_2") {
+                            // Mode 2: recursive walk + trim both directions
+                            recursive_walk();
+                            int response_sum = recompute();
+                            if (tree_tbl > 0 && response_sum < 0) {
+                                std::vector<std::string> neg_set;
+                                for (auto& leaf : all_tree_leaves) if (resp[leaf] == -1) neg_set.push_back(leaf);
+                                for (int i = 0; i < -response_sum; ++i) trim_one(neg_set);
+                                response_sum = recompute();
+                            }
+                            if (tree_tbl > 0 && response_sum > 0) {
+                                std::vector<std::string> pos_set_trim;
+                                for (auto& leaf : all_tree_leaves) if (resp[leaf] == 1) pos_set_trim.push_back(leaf);
+                                for (int i = 0; i < response_sum; ++i) trim_one(pos_set_trim);
+                            }
+                        } else { // "phylo" → Mode 3 (default)
+                            // Mode 3: recursive walk + trim negatives only (no tree_tbl guard)
+                            recursive_walk();
+                            int response_sum = recompute();
+                            if (response_sum <= -1) {
+                                std::vector<std::string> neg_set;
+                                for (auto& leaf : all_tree_leaves) if (resp[leaf] == -1) neg_set.push_back(leaf);
+                                for (int i = 0; i < -response_sum; ++i) trim_one(neg_set);
+                            }
+                        }
+
+                        // Rebuild neg_leaves (and pos_leaves for mode 2 which may trim positives)
+                        neg_leaves.clear();
+                        for (auto& leaf : all_tree_leaves) if (resp[leaf] == -1) neg_leaves.push_back(leaf);
+                        if (class_bal_dp == "phylo_2") {
+                            pos_leaves.clear();
+                            for (auto& leaf : all_tree_leaves) if (resp[leaf] == 1) pos_leaves.push_back(leaf);
+                        }
                     }
 
                     fs::path hyp_file = clade_dir / "hypothesis.txt";
