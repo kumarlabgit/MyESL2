@@ -1,7 +1,6 @@
 # Build directories
 build/
 out/
-bin/
 lib/
 
 # CMake
