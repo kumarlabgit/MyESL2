@@ -1815,9 +1815,9 @@ int main(int argc, char* argv[]) {
                 gene_pred_path = out_dir / (stem_base + "_gene_predictions.txt");
                 {
                     std::ofstream gp(gene_pred_path);
-                    gp << std::fixed << std::setprecision(6);
+                    gp << std::fixed << std::setprecision(15);
                     // Header
-                    gp << "SeqID\tResponse\tPrediction\tIntercept";
+                    gp << "SeqID\tResponse\tPrediction";
                     for (auto& g : eval_gene_order) gp << '\t' << g;
                     gp << '\n';
                     for (auto& [species, sum] : species_sums) {
@@ -1825,7 +1825,7 @@ int main(int argc, char* argv[]) {
                         double resp = 0.0;
                         auto tv = true_values.find(species);
                         if (tv != true_values.end()) resp = tv->second;
-                        gp << species << '\t' << resp << '\t' << pred << '\t' << intercept_val;
+                        gp << species << '\t' << resp << '\t' << pred;
                         for (auto& g : eval_gene_order) {
                             auto gm = eval_gene_scores.find(g);
                             if (gm != eval_gene_scores.end()) {
@@ -1875,7 +1875,7 @@ int main(int argc, char* argv[]) {
                         if (resp > 0.0)
                             spp = (ep - 0.5) / norm_pos;
                         else if (resp < 0.0)
-                            spp = (ep - 0.5) / norm_neg;
+                            spp = (0.5 - ep) / norm_neg;
                         else
                             spp = (ep - 0.5) / norm_pos; // default to pos normalization
                         sf << species << '\t' << resp << '\t' << pred << '\t' << spp << '\n';
@@ -2095,7 +2095,7 @@ int main(int argc, char* argv[]) {
                 // ── Parse gene_predictions, filter by RMSE/acc thresholds ───────
                 struct LamGP {
                     std::vector<std::string> seq_ids;
-                    std::vector<double> responses, predictions, intercepts;
+                    std::vector<double> responses, predictions;
                     std::vector<std::string> gene_names;
                     std::vector<std::vector<double>> gene_scores; // [gene][seq]
                     double rmse = 0.0, acc = 0.0;
@@ -2113,7 +2113,7 @@ int main(int argc, char* argv[]) {
                         std::string col;
                         int ci = 0;
                         while (std::getline(ss, col, '\t')) {
-                            if (ci >= 4) lam.gene_names.push_back(col);
+                            if (ci >= 3) lam.gene_names.push_back(col);
                             ++ci;
                         }
                     }
@@ -2127,14 +2127,13 @@ int main(int argc, char* argv[]) {
                             std::string col;
                             while (std::getline(ss, col, '\t')) cols.push_back(col);
                         }
-                        if (cols.size() < 4) continue;
+                        if (cols.size() < 3) continue;
                         lam.seq_ids.push_back(cols[0]);
                         lam.responses.push_back(std::stod(cols[1]));
                         lam.predictions.push_back(std::stod(cols[2]));
-                        lam.intercepts.push_back(std::stod(cols[3]));
                         for (size_t g = 0; g < lam.gene_names.size(); ++g) {
-                            if (4 + g < cols.size() && cols[4 + g] != "NaN")
-                                lam.gene_scores[g].push_back(std::stod(cols[4 + g]));
+                            if (3 + g < cols.size() && cols[3 + g] != "NaN")
+                                lam.gene_scores[g].push_back(std::stod(cols[3 + g]));
                             else
                                 lam.gene_scores[g].push_back(
                                     std::numeric_limits<double>::quiet_NaN());
@@ -2201,12 +2200,6 @@ int main(int argc, char* argv[]) {
                     for (size_t i = 0; i < N; ++i)
                         agg_pred[i] += lam.predictions[i] / static_cast<double>(M);
 
-                // Intercept: arithmetic mean
-                std::vector<double> agg_intercept(N, 0.0);
-                for (auto& lam : qualifying)
-                    for (size_t i = 0; i < N; ++i)
-                        agg_intercept[i] += lam.intercepts[i] / static_cast<double>(M);
-
                 // Gene scores: median of non-zero values per (gene, seq) cell
                 auto median_nz = [](std::vector<double> vals) -> double {
                     std::vector<double> nz;
@@ -2249,12 +2242,12 @@ int main(int argc, char* argv[]) {
                 {
                     std::ofstream gp(gp_out);
                     gp << std::fixed << std::setprecision(6);
-                    gp << "SeqID\tResponse\tPrediction\tIntercept";
+                    gp << "SeqID\tResponse\tPrediction_mean";
                     for (auto& g : all_genes) gp << '\t' << g;
                     gp << '\n';
                     for (size_t i = 0; i < N; ++i) {
                         gp << ref.seq_ids[i] << '\t' << ref.responses[i] << '\t'
-                           << agg_pred[i] << '\t' << agg_intercept[i];
+                           << agg_pred[i];
                         for (size_t g = 0; g < G; ++g) {
                             if (!any_present[g][i])
                                 gp << "\tNaN";
@@ -2292,7 +2285,7 @@ int main(int argc, char* argv[]) {
                     for (size_t i = 0; i < N; ++i) {
                         double ep  = expit(agg_pred[i]);
                         double spp = ref.responses[i] > 0.0 ? (ep - 0.5) / norm_pos
-                                   : ref.responses[i] < 0.0 ? (ep - 0.5) / norm_neg
+                                   : ref.responses[i] < 0.0 ? (0.5 - ep) / norm_neg
                                    : (ep - 0.5) / norm_pos;
                         sf << ref.seq_ids[i] << '\t' << ref.responses[i] << '\t'
                            << agg_pred[i] << '\t' << spp << '\n';
@@ -2309,20 +2302,17 @@ int main(int argc, char* argv[]) {
                     std::system(viz_cmd.c_str());
                 }
 
-                // ── HSS: prefer gss_median.txt, fall back to lambda_0/gss.txt ────
+                // ── HSS: sum of all per-lambda GSS values ────────────────────────
                 double hss = 0.0;
-                {
-                    fs::path gss_file = run_dir / "gss_median.txt";
-                    if (!fs::exists(gss_file))
-                        gss_file = lambda_dirs[0] / "gss.txt";
-                    if (fs::exists(gss_file)) {
-                        std::ifstream gf(gss_file);
-                        std::string gline;
-                        while (std::getline(gf, gline)) {
-                            auto tab = gline.find('\t');
-                            if (tab != std::string::npos)
-                                hss += std::stod(gline.substr(tab + 1));
-                        }
+                for (auto& ldir : lambda_dirs) {
+                    fs::path gss_file = ldir / "gss.txt";
+                    if (!fs::exists(gss_file)) continue;
+                    std::ifstream gf(gss_file);
+                    std::string gline;
+                    while (std::getline(gf, gline)) {
+                        auto tab = gline.find('\t');
+                        if (tab != std::string::npos)
+                            hss += std::stod(gline.substr(tab + 1));
                     }
                 }
                 hss_summary.push_back({label, hss});

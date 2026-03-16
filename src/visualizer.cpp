@@ -22,7 +22,7 @@ GenePredictionsTable read_gene_predictions(const std::filesystem::path& path)
     GenePredictionsTable tbl;
     std::string line;
 
-    // Header line: SeqID  Response  Prediction  Intercept  gene1  gene2  ...
+    // Header line: SeqID  Response  Prediction[_mean]  gene1  gene2  ...
     if (!std::getline(f, line))
         throw std::runtime_error("Empty gene_predictions file: " + path.string());
 
@@ -34,13 +34,10 @@ GenePredictionsTable read_gene_predictions(const std::filesystem::path& path)
         while (std::getline(ss, col, '\t'))
             header_cols.push_back(col);
     }
-    if (header_cols.size() < 4)
-        throw std::runtime_error("gene_predictions header has fewer than 4 columns");
+    if (header_cols.size() < 3)
+        throw std::runtime_error("gene_predictions header has fewer than 3 columns");
 
-    // Extract intercept from first data row (it's constant)
-    double intercept_val = 0.0;
-
-    for (size_t c = 4; c < header_cols.size(); ++c)
+    for (size_t c = 3; c < header_cols.size(); ++c)
         tbl.gene_names.push_back(header_cols[c]);
 
     size_t G = tbl.gene_names.size();
@@ -57,16 +54,13 @@ GenePredictionsTable read_gene_predictions(const std::filesystem::path& path)
         tbl.seq_ids.push_back(cols[0]);
         tbl.responses.push_back(std::stod(cols[1]));
         tbl.predictions.push_back(std::stod(cols[2]));
-        if (tbl.seq_ids.size() == 1)
-            intercept_val = std::stod(cols[3]);
         for (size_t g = 0; g < G; ++g) {
-            double v = (4 + g < cols.size() && cols[4 + g] != "NaN")
-                ? std::stod(cols[4 + g])
+            double v = (3 + g < cols.size() && cols[3 + g] != "NaN")
+                ? std::stod(cols[3 + g])
                 : std::numeric_limits<double>::quiet_NaN();
             tbl.gene_scores[g].push_back(v);
         }
     }
-    tbl.intercept = intercept_val;
     return tbl;
 }
 
