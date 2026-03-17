@@ -9,6 +9,8 @@
 
 namespace regression {
 
+enum class Precision { FP32, FP64 };
+
 class RegressionAnalysis {
 public:
     virtual ~RegressionAnalysis() = default;
@@ -32,13 +34,15 @@ public:
 //              "field"     = <path>   — CSV file of group indices (overlapping methods)
 //            all other entries are passed through as slep_opts
 // lambda:    {lambda1, lambda2}
+// precision: FP32 (default) or FP64
 std::unique_ptr<RegressionAnalysis> createRegressionAnalysis(
     const std::string&                        method,
     const arma::fmat&                         features,
     const arma::frowvec&                      responses,
     const arma::mat&                          alg_table,
     const std::map<std::string, std::string>& params,
-    const std::array<double, 2>&              lambda);
+    const std::array<double, 2>&              lambda,
+    Precision                                 precision = Precision::FP32);
 
 std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
     const std::string&                        method,
@@ -48,6 +52,7 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
     const std::map<std::string, std::string>& params,
     const std::array<double, 2>&              lambda,
     const arma::rowvec&                       xval_idxs,
-    int                                       xval_id);
+    int                                       xval_id,
+    Precision                                 precision = Precision::FP32);
 
 } // namespace regression

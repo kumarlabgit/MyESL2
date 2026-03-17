@@ -1,12 +1,12 @@
-//#include <algorithm>
-#include "overlapping_sg_lasso_leastr.hpp"
-#include "overlapping.hpp"
+
+#include "overlapping_sg_lasso_logisticr_fp32.hpp"
+#include "overlapping_fp32.hpp"
 #include <sstream>
 #include <iomanip>
 
 
-OLSGLassoLeastR::OLSGLassoLeastR(const arma::mat& features,
-                                   const arma::rowvec& responses,
+OLSGLassoLogisticRFP32::OLSGLassoLogisticRFP32(const arma::fmat& features,
+                                   const arma::frowvec& responses,
                                    const arma::mat& weights,
                                    const arma::rowvec& field,
                                    double* lambda,
@@ -19,8 +19,8 @@ OLSGLassoLeastR::OLSGLassoLeastR(const arma::mat& features,
 }
 
 
-OLSGLassoLeastR::OLSGLassoLeastR(const arma::mat& features,
-                                   const arma::rowvec& responses,
+OLSGLassoLogisticRFP32::OLSGLassoLogisticRFP32(const arma::fmat& features,
+                                   const arma::frowvec& responses,
                                    const arma::mat& weights,
                                    const arma::rowvec& field,
                                    double* lambda,
@@ -37,7 +37,7 @@ OLSGLassoLeastR::OLSGLassoLeastR(const arma::mat& features,
 }
 
 
-void OLSGLassoLeastR::writeModelToXMLStream(std::ofstream& XMLFile)
+void OLSGLassoLogisticRFP32::writeModelToXMLStream(std::ofstream& XMLFile)
 {
   int i_level = 0;
   //std::string XMLString = "";
@@ -66,7 +66,7 @@ void OLSGLassoLeastR::writeModelToXMLStream(std::ofstream& XMLFile)
 
 }
 
-void OLSGLassoLeastR::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
+void OLSGLassoLogisticRFP32::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
 {
   /*
   int i_level = 0;
@@ -104,8 +104,8 @@ void OLSGLassoLeastR::writeSparseMappedWeightsToStream(std::ofstream& MappedWeig
 }
 
 
-arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
-                               const arma::rowvec& responses,
+arma::frowvec& OLSGLassoLogisticRFP32::Train(const arma::fmat& features,
+                               const arma::frowvec& responses,
                                const arma::mat& weights,
                                std::map<std::string, std::string> slep_opts,
                                const arma::rowvec& field,
@@ -125,21 +125,21 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
   //Set all optional parameters to defaults
   int opts_maxIter = 100;
   int opts_init = 2; //Previously set to 2
-  int opts_tFlag = 5; //Previously set to 3
+  int opts_tFlag = 5;
   int opts_nFlag = 0;
   int opts_rFlag = 1;
   int opts_mFlag = 0;
-  double opts_tol = 0.0001; //Previously set to 0.00001
-  arma::mat opts_ind = weights;
+  double opts_tol = 0.0001;
+  int opts_disableEC = 0;
+  arma::fmat opts_ind = arma::conv_to<arma::fmat>::from(weights);
   opts_ind.cols(0,1) = opts_ind.cols(0,1) - 1;
-  arma::rowvec opts_field = field - 1;
+  arma::frowvec opts_field = arma::conv_to<arma::frowvec>::from(field) - 1.0f;
 
   //Set overlapping specific parameters to defaults
 
   int opts_maxIter2 = 100;
   double opts_tol2 = 0.0001;
   int opts_flag2 = 2;
-  int opts_disableEC = 0;
   //Overwrite default options with those found in slep_opts file.
   if ( slep_opts.find("maxIter") != slep_opts.end() ) {
 	opts_maxIter = std::stoi(slep_opts["maxIter"]);
@@ -213,39 +213,28 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
         }
   }
 
-  /*
-   * We want to calculate the a_i coefficients of:
-   * \sum_{i=0}^n (a_i * x_i^i)
-   * In order to get the intercept value, we will add a row of ones.
-   */
 
-  // We store the number of rows and columns of the features.
-  // Reminder: Armadillo stores the data transposed from how we think of it,
-  //           that is, columns are actually rows (see: column major order).
+  // Reminder: Armadillo stores data in column major order
   const size_t nCols = features.n_cols;
 
-//  arma::mat p = features;
-//  arma::rowvec r = responses;
-
-
-  arma::mat A = features.t();
-  arma::mat& ind = opts_ind;
-  arma::colvec y = responses.t();
+  const arma::fmat& A = features;
+  arma::fmat& ind = opts_ind;
+  arma::fcolvec y = responses.t();
   double* z;
   z = this->Lambda();
   double lambda2_max;
   const size_t m = A.n_rows;
   const size_t n = A.n_cols;
-  arma::colvec m_ones(m, arma::fill::ones);
-  arma::colvec m_zeros(m, arma::fill::zeros);
-  arma::colvec n_zeros(n, arma::fill::zeros);
+  arma::fcolvec m_ones(m, arma::fill::ones);
+  arma::fcolvec m_zeros(m, arma::fill::zeros);
+  arma::fcolvec n_zeros(n, arma::fill::zeros);
 
   double lambda1 = z[0];
   double lambda2 = z[1];
 
-  double *gap;
-  gap = (double*) malloc(sizeof(double));
-  double penalty2 [5];
+  float *gap;
+  gap = (float*) malloc(sizeof(float));
+  float penalty2 [5];
 
   if (lambda1<0 || lambda2<0)
   {
@@ -258,28 +247,35 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
   }
 
   int groupNum = ind.n_rows;
-  arma::colvec Y(opts_field.n_cols, arma::fill::zeros);
+  arma::fcolvec Y(opts_field.n_cols, arma::fill::zeros);
 
-  //sgLogisticR.m:177-195
-  //arma::colvec sample_weights(m);
-  //sample_weights.fill(1.0/m);
+  arma::fcolvec sample_weights(m);
+  arma::uvec p_flag = arma::find(y == 1);
+  arma::uvec not_p_flag = arma::find(y != 1);
+  double m1, m2;
+  if (opts_sWeight.size() == 2)
+  {
+    std::cout << "Using sample weights of " << opts_sWeight[0] << "(positive) and " << opts_sWeight[1] << "(negative)" << std::endl;
+    m1 = p_flag.n_elem * opts_sWeight[0];
+    m2 = not_p_flag.n_elem * opts_sWeight[1];
+    sample_weights(p_flag).fill(opts_sWeight[0] / (m1 + m2));
+    sample_weights(not_p_flag).fill(opts_sWeight[1] / (m1 + m2));
 
-//std::cout << "1..." << std::endl;
+  } else if (opts_sWeight.size() != 0) {
+    std::cout << "Invalid sample weights specified, defaulting to unweighted samples." << std::endl;
+    sample_weights.fill(1.0/m);
+  } else {
+  sample_weights.fill(1.0/m);
+  }
 
-  //sgLogisticR.m:200-202
-  //arma::uvec p_flag = arma::find(y == 1);
-  //arma::uvec not_p_flag = arma::find(y != 1);
-  //arma::colvec b(m);
+  int rsL2 = 0; //Todo: add overlapping_LogisticR.m:257-261
+
+  arma::fcolvec b(m);
 //std::cout << "p_flag.n_elem:" << p_flag.n_elem << std::endl;
   //double m1 = static_cast<double>(p_flag.n_elem) / (double)m;
-  //double m2 = 1 - m1;
+  m1 = arma::sum(sample_weights(p_flag)) / arma::sum(sample_weights);
+  m2 = 1 - m1;
 
-  //sgLeastR.m:168-175
-
-  arma::mat ATy = A.t() * y;
-
-
-  //sgLeastR.m:178-201
   double* lambda;
   bool estimate_l2 = false;
 
@@ -291,14 +287,12 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
 	 {
 		throw std::invalid_argument("\n opts.rFlag=1, so z should be in [0,1]\n");
 	 }
-	 //arma::mat A_ol(responses.n_cols,field.n_cols,arma::fill::zeros);
+	 b(p_flag) = arma::fcolvec(p_flag.n_elem, arma::fill::ones) * m2;   b(not_p_flag) = arma::fcolvec(not_p_flag.n_elem, arma::fill::ones) * (-m1);
+	 b = b % sample_weights;
 
-	 //for(int i=0; i<field.n_cols; i++)
-	 //	A_ol.col(i)=A.col(field[i]);
+	 arma::fmat ATb = A.t() * b;
 
-	 arma::mat temp = arma::abs(ATy);
-	 //arma::mat ATy_ol = A_ol.t() * y;
-	 //arma::mat temp = arma::abs(ATy_ol);
+	 arma::fmat temp = arma::abs(ATb);
 
 	 double lambda1_max = arma::as_scalar(arma::max(temp));
 
@@ -307,8 +301,6 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
 
 	 temp = arma::max(temp - lambda1, n_zeros);
 
-//std::cout << "temp.n_rows: " << temp.n_rows << " temp.n_cols: " << temp.n_cols << std::endl;
-//std::cout << "field.n_rows: " << field.n_rows << " field.n_cols: " << field.n_cols << std::endl;
 
 	 if (temp.n_rows==field.n_cols)
 	 {
@@ -320,67 +312,55 @@ arma::rowvec& OLSGLassoLeastR::Train(const arma::mat& features,
 		 std::cout << "Could not compute Lambda2 max, attempting to estimate instead..." << std::endl;
 		 estimate_l2 = true;
 	 }
-
-	 //lambda2 = lambda2 * lambda2_max;
   }
 
-  //sgLogisticR.m:203-216
-  arma::colvec x(n, arma::fill::zeros);   //x.fill(0);
-
-  if (opts_init != 2){
-	  x = ATy;
-  }
-//std::cout << "4..." << std::endl;
-
+  arma::fcolvec x(n, arma::fill::zeros);   //x.fill(0);
+  double c = std::log(m1/m2);
 
 //std::cout << "A_cols:" << A.n_cols << " A_rows:" << A.n_rows << " x_cols:" << x.n_cols << " x_rows:" << x.n_rows << std::endl;
 
-  //sgLeastR.m:219-226
-  arma::mat Ax = A * x;
+  arma::fmat Ax = A * x;
 
 //std::cout << "Ax_cols:" << Ax.n_cols << " Ax_rows:" << Ax.n_rows << std::endl;
 
-//std::cout << "2..." << std::endl;
-
-  //sgLeastR.m:228-253
   int bFlag = 0;
-  double L = 1.0;
+  double L = (1.0/m) + rsL2;
 
-  //arma::colvec weighty = sample_weights % y;
+  arma::fcolvec weighty = sample_weights % y;
 
-  arma::colvec xp = x;   arma::colvec Axp = Ax;   arma::colvec xxp(n, arma::fill::zeros);
-  //double cp = c;   double ccp = 0;
+  arma::fcolvec xp = x;   arma::fcolvec Axp = Ax;   arma::fcolvec xxp(n, arma::fill::zeros);
+  double cp = c;   double ccp = 0;
 
   double alphap = 0;   double alpha = 1;
 
-
-  //sgLeastR.m:255-382
   double beta, sc, gc, fun_s, fun_x, l_sum, r_sum, tree_norm;
 //  arma::mat As;
-  arma::colvec aa, bb, prob, s, v;
+  arma::fcolvec aa, bb, prob, s, v;
   arma::rowvec ValueL(opts_maxIter);
   arma::rowvec funVal(opts_maxIter);
   //arma::mat ind_work(ind.n_rows + 1, ind.n_cols);
 
-//std::cout << "3..." << std::endl;
-
 std::cout << "m:" << m << " n:" << n << std::endl;
 
-opts_ind = opts_ind.t();
+opts_ind = opts_ind.t(); //This might be wrong
 
   for (int iterStep = 0; iterStep < opts_maxIter; iterStep = iterStep + 1)
   {
-    //sgLogisticR.m:293-304
-    beta = (alphap - 1)/alpha;   s = x + (xxp * beta);
+    beta = (alphap - 1)/alpha;   s = x + (xxp * beta);   sc = c + (beta * ccp);
 //std::cout << "sc:" << sc << " c:" << c << " beta:" << beta << " ccp:" << ccp << " m1:" << m1 << " m2:" << m2 << std::endl;
 //std::cout << "As_elems:" << As.n_elem << "Ax_elems:" << Ax.n_elem << " Axp_elems:" << Axp.n_elem << " beta:" << beta << std::endl;
-    arma::mat As = Ax + ((Ax - Axp) * beta);
+    arma::fmat As = Ax + ((Ax - Axp) * beta);
+    aa = -y % (As + sc);
+    bb = arma::max(aa,m_zeros);
+    fun_s = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb)) + arma::as_scalar(rsL2/2 * s.t() * s);
+    prob = m_ones / (m_ones + arma::exp(aa));
+    b = -weighty % (m_ones - prob);
 
-    //sgLogisticR.m:318-329
-//std::cout << "A_rows:" << A.n_rows << " A_cols:" << A.n_cols << " b_elems:" << b.n_elem << std::endl;
-    arma::mat ATAs = A.t() * As;
-    arma::mat g = ATAs - ATy;
-    xp = x;   Axp = Ax;
+    gc = arma::sum(b);
+    arma::fmat g = A.t() * b;
+    g = g + (rsL2 * s);
+    xp = x;   Axp = Ax;   cp = c;
+
 	if (iterStep == 0)
 	{
 	  if (estimate_l2)
@@ -391,15 +371,7 @@ opts_ind = opts_ind.t();
 		  for(int i = 1; i <= 100; i = i + 1)
 		  {
 			//Run overlapping
-//std::cout << "3.1..." << std::endl;
-//std::cout << "x.n_rows: " << x.n_rows << " x.n_cols: " << x.n_cols << std::endl;
-//std::cout << "v.n_rows: " << v.n_rows << " v.n_cols: " << v.n_cols << std::endl;
-//std::cout << "opts_ind.n_rows: " << opts_ind.n_rows << " opts_ind.n_cols: " << opts_ind.n_cols << std::endl;
-//std::cout << "opts_field.n_rows: " << opts_field.n_rows << " opts_field.n_cols: " << opts_field.n_cols << std::endl;
-//std::cout << "sizeof(gap): " << sizeof(gap) << " gap[0]: " << gap[0] << std::endl;
-
 			overlapping(x.memptr(), gap, penalty2, v.memptr(),  n, groupNum, lambda1/L, l2_high/L, opts_ind.memptr(), opts_field.memptr(), Y.memptr(), opts_maxIter2, opts_flag2, opts_tol2);
-//std::cout << "3.2..." << std::endl;
 			//Check if x is zeroed out
 			if (arma::max(arma::abs(x)) == 0)
 			{
@@ -442,52 +414,13 @@ opts_ind = opts_ind.t();
 	  }
 	}
     int firstFlag = 1;
-//std::cout << "4..." << std::endl;
-    //sgLogisticR.m:331-378
     while (true)
     {
-      v = s - g/L;
-      //sgLogisticR.m:337-338
-//      arma::mat ind_work = ind;
-//      ind_work.col(2) = ind_work.col(2) * (lambda2/L);
-//      arma::rowvec first_row = {-1, -1, lambda1/L};
-//      ind_work.insert_rows(0, first_row);
-      //ind_work(0,0) = -1;
-      //ind_work(0,1) = -1;
-      //ind_work(0,2) = lambda1/L;
-      //ind_work.submat(1,0,ind_work.n_rows,1) = ind.cols(0,1);
-      //ind_work(arma::span(1,ind_work.n_rows),2) = ind.col(2) * (lambda2/L);
-
-      //sgLogisticR.m:340-342
-      //x = altra(v, n, ind_work, ind_work.n_rows);
-
-//std::cout << "x:" << std::endl;
-//std::cout << x << std::endl;
-//std::cout << "v:" << std::endl;
-//std::cout << v << std::endl;
-//std::cout << "Y:" << std::endl;
-//std::cout << Y << std::endl;
-//std::cout << "opts_tol2:" << std::endl;
-//std::cout << opts_tol2 << std::endl;
-
+      v = s - g/L; c = sc - gc/L;
       overlapping(x.memptr(), gap, penalty2, v.memptr(),  n, groupNum, lambda1/L, lambda2/L, opts_ind.memptr(), opts_field.memptr(), Y.memptr(), opts_maxIter2, opts_flag2, opts_tol2);
 
-//std::cout << "gap:" << std::endl;
-//std::cout << gap << std::endl;
-//std::cout << "penalty2:" << std::endl;
-//std::cout << penalty2 << std::endl;
-//std::cout << "opts_field:" << std::endl;
-//std::cout << opts_field << std::endl;
-//std::cout << "opts_ind:" << std::endl;
-//std::cout << opts_ind << std::endl;
-//std::cout << "x:" << std::endl;
-//std::cout << x << std::endl;
-//std::cout << "v:" << std::endl;
-//std::cout << v << std::endl;
-
-//      arma::colvec temp_x = altra(v, n, ind_work, ind_work.n_rows);
 //std::cout << "temp_x_rows:" << temp_x.n_rows << " temp_x_cols:" << temp_x.n_cols << " x_rows:" << x.n_rows << " x_cols:" << x.n_cols << std::endl;
-//std::cout << "9..." << std::endl;
+
       v = x - s;
       int nonzero_x_count = 0;
       for (int i = 0; i < x.n_rows; i = i + 1)
@@ -497,13 +430,19 @@ opts_ind = opts_ind.t();
 	  }
 //std::cout << "nonzero_x_count:" << nonzero_x_count << std::endl;
 
-      //sgLogisticR.m:345-353
       Ax = A * x;
-      //sgLogisticR.m:356-377
-      arma::mat Av = Ax - As;
-      r_sum = arma::as_scalar(v.t() * v); l_sum = arma::as_scalar(Av.t() * Av);
-//std::cout << "r_sum:" << r_sum << " l_sum:" << l_sum << " L:" << L << std::endl;
-//throw 20;
+      aa = -y % (Ax + c);
+      bb = arma::max(aa, m_zeros);
+//std::cout << "aa.n_rows:" << aa.n_rows << " bb.n_rows:" << bb.n_rows << " c:" << c << " sc:" << sc << " gc:" << gc << " L:" << L << std::endl;
+//      for (int i = 0; i <= bb.n_rows; i = i + 1)
+//      {
+//		 std::cout << "aa["<< i << "]:" << aa(i) << " bb[" << i << "]:" << bb(i) << " Ax[" << i << "]:" << Ax(i) << " y[" << i << "]:" << y(i) << std::endl;
+//	  }
+      fun_x = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb)) + arma::as_scalar((rsL2/2)*x.t()*x);
+      r_sum = (arma::as_scalar(v.t() * v) + std::pow(c - sc, 2)) / 2;
+      l_sum = fun_x - fun_s - arma::as_scalar(v.t() * g) - (c - sc) * gc;
+
+//std::cout << "r_sum:" << r_sum << " l_sum:" << l_sum << " L:" << L << " fun_x:" << fun_x << std::endl;
 
       if (r_sum <= std::pow(0.1, 20))
       {
@@ -519,33 +458,16 @@ opts_ind = opts_ind.t();
 	     L = std::max(2*L, l_sum/r_sum);
 	  }
     }
-    //sgLogisticR.m:382-401
+
     alphap = alpha;   alpha = (1 + std::pow(4 * alpha * alpha + 1.0, 0.5))/2.0;
-
-    xxp = x - xp; arma::mat Axy = Ax - y;
-
     ValueL(iterStep) = L;
-    //funVal(iterStep) = fun_x;
-
-    //ind_work(0,0) = -1;
-    //ind_work(0,1) = -1;
-    //ind_work(0,2) = lambda1;
-    //ind_work.submat(1,0,ind_work.n_rows,1) = ind.cols(0,1);
-    //ind_work(arma::span(1,ind_work.n_rows),2) = ind.col(2) * lambda2;
-//    arma::mat ind_work = ind;
-//    ind_work.col(2) = ind_work.col(2) * (lambda2);
-//    arma::rowvec first_row = {-1, -1, lambda1};
-//    ind_work.insert_rows(0, first_row);
-
-//    tree_norm = treeNorm(x, n, ind_work, ind_work.n_rows);
-
-    funVal(iterStep) = arma::as_scalar(Axy.t() * Axy) + lambda1 * sum(abs(x)) + lambda2 *penalty2[0];
+    xxp = x - xp;   ccp = c - cp;
+    funVal(iterStep) = fun_x + lambda1 * arma::sum(arma::abs(x));
 
     if (bFlag) {break;}
-    double norm_xp, norm_xxp;
-    norm_xxp = sqrt(arma::as_scalar(xxp.t() * xxp));
 
-    //sgLogisticR.m:403-435
+    double norm_xp, norm_xxp;
+
     switch (opts_tFlag)
     {
 	  case 0:
@@ -595,122 +517,34 @@ opts_ind = opts_ind.t();
     }
     if (bFlag) {break;}
 
-	//sgLogisticR.m:438-441
 	if ((iterStep + 1) % opts_rStartNum == 0)
 	{
 	  alphap = 0;   alpha = 1;   xp = x;   Axp = Ax;   xxp = n_zeros;   L = L/2;
 	}
 
   }
-  //arma::rowvec x_row = x.t();
-  arma::rowvec x_row = x.as_row();
 
-  //parameters = x_row;
+  arma::frowvec x_row = x.as_row();
   parameters = x_row.t();
-
-  free(gap);
+  std::cout << "Intercept: " << c << std::endl;
+  this->intercept_value = c;
 
   this->nz_gene_count = countNonZeroGenes(parameters, weights, opts_field);
 
   return x_row;
+
 }
 
 
-  // Here we add the row of ones to the features.
-  // The intercept is not penalized. Add an "all ones" row to design and set
-  // intercept = false to get a penalized intercept.
-//  if (intercept)
-//  {
-//    p.insert_rows(0, arma::ones<arma::mat>(1, nCols));
-//  }
 
-//  if (weights.n_elem > 0)
-//  {
-//    p = p * diagmat(sqrt(weights));
-//    r = sqrt(weights) % responses;
-//  }
-
-  // Convert to this form:
-  // a * (X X^T) = y X^T.
-  // Then we'll use Armadillo to solve it.
-  // The total runtime of this should be O(d^2 N) + O(d^3) + O(dN).
-  // (assuming the SVD is used to solve it)
-//  arma::mat cov = p * p.t() +
-//      lambda * arma::eye<arma::mat>(p.n_rows, p.n_rows);
-
-//  parameters = arma::solve(cov, p * r.t());
-//  return ComputeError(features, responses);
-
-/*
-void OLSGLassoLeastR::Predict(const arma::mat& points,
-    arma::rowvec& predictions) const
-{
-  if (intercept)
-  {
-    // We want to be sure we have the correct number of dimensions in the
-    // dataset.
-    Log::Assert(points.n_rows == parameters.n_rows - 1);
-    // Get the predictions, but this ignores the intercept value
-    // (parameters[0]).
-    predictions = arma::trans(parameters.subvec(1, parameters.n_elem - 1))
-        * points;
-    // Now add the intercept.
-    predictions += parameters(0);
-  }
-  else
-  {
-    // We want to be sure we have the correct number of dimensions in
-    // the dataset.
-    Log::Assert(points.n_rows == parameters.n_rows);
-    predictions = arma::trans(parameters) * points;
-  }
-}
-
-double OLSGLassoLeastR::ComputeError(const arma::mat& features,
-                                      const arma::rowvec& responses) const
-{
-  // Get the number of columns and rows of the dataset.
-  const size_t nCols = features.n_cols;
-  const size_t nRows = features.n_rows;
-
-  // Calculate the differences between actual responses and predicted responses.
-  // We must also add the intercept (parameters(0)) to the predictions.
-  arma::rowvec temp;
-  if (intercept)
-  {
-    // Ensure that we have the correct number of dimensions in the dataset.
-    if (nRows != parameters.n_rows - 1)
-    {
-      Log::Fatal << "The test data must have the same number of columns as the "
-          "training file." << std::endl;
-    }
-    temp = responses - (parameters(0) +
-        arma::trans(parameters.subvec(1, parameters.n_elem - 1)) * features);
-  }
-  else
-  {
-    // Ensure that we have the correct number of dimensions in the dataset.
-    if (nRows != parameters.n_rows)
-    {
-      Log::Fatal << "The test data must have the same number of columns as the "
-          "training file." << std::endl;
-    }
-    temp = responses - arma::trans(parameters) * features;
-  }
-  const double cost = arma::dot(temp, temp) / nCols;
-
-  return cost;
-}
-*/
-
-const arma::colvec OLSGLassoLeastR::altra(const arma::colvec& v_in,
+const arma::fcolvec OLSGLassoLogisticRFP32::altra(const arma::fcolvec& v_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
 {
-	double *x;
-	x = (double*) malloc(n*sizeof(double));
-	const double* v = v_in.memptr();
+	float *x;
+	x = (float*) malloc(n*sizeof(float));
+	const float* v = v_in.memptr();
     int i, j, m;
     double lambda,twoNorm, ratio;
     std::vector<double> ind_buf(ind_mat.n_cols * ind_mat.n_rows);
@@ -759,10 +593,10 @@ const arma::colvec OLSGLassoLeastR::altra(const arma::colvec& v_in,
         i=1;
     }
     else{
-        memcpy(x, v, sizeof(double) * n);
+        memcpy(x, v, sizeof(float) * n);
         i=0;
     }
-//std::cout << "Altra 3..." << std::endl;
+
     /*
      * sequentially process each node
      *
@@ -794,21 +628,21 @@ const arma::colvec OLSGLassoLeastR::altra(const arma::colvec& v_in,
                 x[j]=0;
         }
 	}
-//std::cout << "Altra 4..." << std::endl;
-	arma::colvec x_col(&x[0], n);
+
+	arma::fcolvec x_col(&x[0], n);
 	free(x);
-//std::cout << "Altra 5..." << std::endl;
+
 	return x_col;
 }
 
 
-const double OLSGLassoLeastR::treeNorm(const arma::rowvec& x_in,
+const double OLSGLassoLogisticRFP32::treeNorm(const arma::frowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
 {
 	double tree_norm;
-	const double* x = x_in.memptr();
+	const float* x = x_in.memptr();
     int i, j, m;
     double twoNorm, lambda;
     std::vector<double> ind_buf(ind_mat.n_cols * ind_mat.n_rows);
@@ -878,14 +712,14 @@ const double OLSGLassoLeastR::treeNorm(const arma::rowvec& x_in,
 }
 
 
-const double OLSGLassoLeastR::computeLambda2Max(const arma::rowvec& x_in,
+const double OLSGLassoLogisticRFP32::computeLambda2Max(const arma::frowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
 {
     int i, j, m;
     double lambda,twoNorm;
-    const double* x = x_in.memptr();
+    const float* x = x_in.memptr();
     std::vector<double> ind_buf(ind_mat.n_cols * ind_mat.n_rows);
     double* ind = ind_buf.data();
 
@@ -915,27 +749,4 @@ const double OLSGLassoLeastR::computeLambda2Max(const arma::rowvec& x_in,
 	}
 
 	return lambda2_max;
-}
-
-
-
-int countNonZeroGenes(const arma::vec& arr, const arma::mat& ranges, const arma::rowvec& field) {
-    auto detectNonZeroInRange = [&arr](int start, int end, const arma::rowvec& field) -> int {
-        for (int i = start; i <= end; ++i) {
-            if (arr(field[i]) != 0) {
-                return 1;
-            }
-        }
-        return 0;
-    };
-    int count = 0;
-
-    for (arma::uword i = 0; i < ranges.n_rows; ++i) {
-        int start = static_cast<int>(ranges(i, 0))-1;
-        int end = static_cast<int>(ranges(i, 1))-1;
-        count = count + detectNonZeroInRange(start, end, field);
-    }
-
-    //std::cout << "Number of non-zero genes: " << count << std::endl;
-    return count;
 }

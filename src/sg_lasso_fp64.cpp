@@ -1,9 +1,11 @@
 
-#include "sg_lasso_leastr.hpp"
+#include "sg_lasso_fp64.hpp"
+#include "sg_lasso_helpers.hpp"
 #include <sstream>
 #include <iomanip>
 
-SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
+
+SGLassoFP64::SGLassoFP64(const arma::mat& features,
                                    const arma::rowvec& responses,
                                    const arma::mat& weights,
                                    double* lambda,
@@ -16,7 +18,7 @@ SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
 }
 
 
-SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
+SGLassoFP64::SGLassoFP64(const arma::mat& features,
                                    const arma::rowvec& responses,
                                    const arma::mat& weights,
                                    double* lambda,
@@ -33,7 +35,7 @@ SGLassoLeastR::SGLassoLeastR(const arma::mat& features,
 }
 
 
-void SGLassoLeastR::writeModelToXMLStream(std::ofstream& XMLFile)
+void SGLassoFP64::writeModelToXMLStream(std::ofstream& XMLFile)
 {
   int i_level = 0;
   //std::string XMLString = "";
@@ -62,10 +64,23 @@ void SGLassoLeastR::writeModelToXMLStream(std::ofstream& XMLFile)
 
 }
 
-void SGLassoLeastR::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
+void SGLassoFP64::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
 {
+  /*
+  int i_level = 0;
+  //std::string XMLString = "";
+  XMLFile << std::string(i_level * 8, ' ') + "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<model>" + "\n";
+  i_level++;
+  XMLFile << std::string(i_level * 8, ' ') + "<parameters>" + "\n";
+  i_level++;
+  XMLFile << std::string(i_level * 8, ' ') + "<n_rows>" + std::to_string(this->parameters.n_cols) + "</n_rows>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<n_cols>" + std::to_string(this->parameters.n_rows) + "</n_cols>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<n_elem>" + std::to_string(this->parameters.n_elem) + "</n_elem>" + "\n";
+  */
   std::string line;
   std::getline(FeatureMap, line);
+  //for(int i=0; i<this->parameters.n_cols; i++)
   for(int i=0; i<this->parameters.n_elem; i++)
   {
     std::getline(FeatureMap, line);
@@ -86,21 +101,23 @@ void SGLassoLeastR::writeSparseMappedWeightsToStream(std::ofstream& MappedWeight
   FeatureMap.seekg(0);
 }
 
-//double SGLassoLeastR::Train(const arma::mat& features,
-//                               const arma::rowvec& responses,
-//                               const bool intercept)
-//{
-//  return Train(features, responses, arma::rowvec(), intercept);
-//}
 
-arma::rowvec& SGLassoLeastR::Train(const arma::mat& features,
+arma::rowvec& SGLassoFP64::Train(const arma::mat& A,
                                const arma::rowvec& responses,
                                const arma::mat& weights,
                                std::map<std::string, std::string> slep_opts,
                                const bool intercept)
 {
   this->intercept = intercept;
-bool initial_pass = true;
+  auto trim = [](std::string& s)
+  {
+     size_t p = s.find_first_not_of(" \t\r\n");
+     s.erase(0, p);
+
+     p = s.find_last_not_of(" \t\r\n");
+     if (std::string::npos != p)
+        s.erase(p+1);
+  };
 
   //Set all optional parameters to defaults
   int opts_maxIter = 100;
@@ -139,6 +156,43 @@ bool initial_pass = true;
   if ( slep_opts.find("disableEC") != slep_opts.end() ) {
 	opts_disableEC = std::stoi(slep_opts["disableEC"]);
   }
+  std::string line;
+  if ( slep_opts.find("nu") != slep_opts.end() ) {
+        std::vector<float> opts_nu;
+        std::ifstream nuFile (slep_opts["nu"]);
+        if (nuFile.is_open())
+        {
+          while (getline(nuFile, line))
+          {
+            trim(line);
+            opts_nu.push_back(std::stod(line));
+          }
+        }
+  }
+  if ( slep_opts.find("mu") != slep_opts.end() ) {
+        std::vector<float> opts_mu;
+        std::ifstream muFile (slep_opts["mu"]);
+        if (muFile.is_open())
+        {
+          while (getline(muFile, line))
+          {
+            trim(line);
+            opts_mu.push_back(std::stod(line));
+          }
+        }
+  }
+  std::vector<float> opts_sWeight;
+  if ( slep_opts.find("sWeight") != slep_opts.end() ) {
+        std::ifstream sWeightFile (slep_opts["sWeight"]);
+        if (sWeightFile.is_open())
+        {
+          while (getline(sWeightFile, line))
+          {
+            trim(line);
+            opts_sWeight.push_back(std::stod(line));
+          }
+        }
+  }
 
   /*
    * We want to calculate the a_i coefficients of:
@@ -149,13 +203,12 @@ bool initial_pass = true;
   // We store the number of rows and columns of the features.
   // Reminder: Armadillo stores the data transposed from how we think of it,
   //           that is, columns are actually rows (see: column major order).
-  const size_t nCols = features.n_cols;
+  const size_t nCols = A.n_rows;
 
 //  arma::mat p = features;
 //  arma::rowvec r = responses;
 
 
-  const arma::mat& A = features;
   arma::mat& ind = opts_ind;
   arma::colvec y = responses.t();
   double* z;
@@ -172,33 +225,44 @@ bool initial_pass = true;
 
   if (lambda1<0 || lambda2<0)
   {
-	//Log::Fatal << "\n z should be nonnegative!\n" << std::endl;
 	throw std::invalid_argument("\n z should be nonnegative!\n");
   }
 
   if(ind.n_cols != 3)
   {
-	//Log::Fatal << "\n Check opts_ind, expected 3 cols" << std::endl;
 	throw std::invalid_argument("\n Check opts_ind, expected 3 cols\n");
   }
 
   //sgLogisticR.m:177-195
-  //arma::colvec sample_weights(m);
-  //sample_weights.fill(1.0/m);
+  arma::colvec sample_weights(m);
+  arma::uvec p_flag = arma::find(y == 1);
+  arma::uvec not_p_flag = arma::find(y != 1);
+  double m1, m2;
+  if (opts_sWeight.size() == 2)
+  {
+    std::cout << "Using sample weights of " << opts_sWeight[0] << "(positive) and " << opts_sWeight[1] << "(negative)" << std::endl;
+    m1 = p_flag.n_elem * opts_sWeight[0];
+    m2 = not_p_flag.n_elem * opts_sWeight[1];
+    sample_weights(p_flag).fill(opts_sWeight[0] / (m1 + m2));
+    sample_weights(not_p_flag).fill(opts_sWeight[1] / (m1 + m2));
+
+  } else if (opts_sWeight.size() != 0) {
+    std::cout << "Invalid sample weights specified, defaulting to unweighted samples." << std::endl;
+    sample_weights.fill(1.0/m);
+  } else {
+  sample_weights.fill(1.0/m);
+  }
 
 //std::cout << "1..." << std::endl;
 
   //sgLogisticR.m:200-202
-  //arma::uvec p_flag = arma::find(y == 1);
-  //arma::uvec not_p_flag = arma::find(y != 1);
-  //arma::colvec b(m);
+  arma::colvec b(m);
 //std::cout << "p_flag.n_elem:" << p_flag.n_elem << std::endl;
   //double m1 = static_cast<double>(p_flag.n_elem) / (double)m;
-  //double m2 = 1 - m1;
+  m1 = arma::sum(sample_weights(p_flag)) / arma::sum(sample_weights);
+  m2 = 1 - m1;
 
-  //sgLeastR.m:168-175
-  arma::mat ATy = A.t() * y;
-  //sgLeastR.m:178-201
+  //sgLogisticR.m:205-241
   double* lambda;
 
   if (opts_rFlag == 0)
@@ -207,102 +271,106 @@ bool initial_pass = true;
   } else {
 	 if (lambda1<0 || lambda1>1 || lambda2<0 || lambda2>1)
 	 {
-		//Log::Fatal << "\n opts.rFlag=1, and z should be in [0,1]" << std::endl;
 		throw std::invalid_argument("\n opts.rFlag=1, so z should be in [0,1]\n");
 	 }
+	 b(p_flag) = arma::colvec(p_flag.n_elem, arma::fill::ones) * m2;   b(not_p_flag) = arma::colvec(not_p_flag.n_elem, arma::fill::ones) * (-m1);
+	 b = b % sample_weights;
 
-	 arma::mat temp = arma::abs(ATy);
+	 arma::mat ATb = A.t() * b;
+
+	 arma::mat temp = arma::abs(ATb);
 
 	 double lambda1_max = arma::as_scalar(arma::max(temp));
 
 	 lambda1 = lambda1 * lambda1_max;
 
 	 temp = arma::max(temp - lambda1, n_zeros);
-//std::cout<<"rows:"<< temp.n_rows <<"\tcols:"<< temp.n_cols <<std::endl;
+
 	 lambda2_max = computeLambda2Max(temp.t(), n, ind, ind.n_rows);
 
 	 lambda2 = lambda2 * lambda2_max;
 std::cout << "lambda1_max: " << lambda1_max << " lambda1: " << lambda1 << std::endl;
 std::cout << "lambda2_max: " << lambda2_max << " lambda2: " << lambda2 << std::endl;
-//std::cout << "lambda1: " << lambda1 << "lambda2: " << lambda2 << std::endl;
   }
 
-  //sgLogisticR.m:203-216
+  //sgLogisticR.m:243-261
   arma::colvec x(n, arma::fill::zeros);   //x.fill(0);
 //std::cout << "4..." << std::endl;
+  double c = std::log(m1/m2);
+
+
 //std::cout << "A_cols:" << A.n_cols << " A_rows:" << A.n_rows << " x_cols:" << x.n_cols << " x_rows:" << x.n_rows << std::endl;
 
-  //sgLeastR.m:219-226
+  //sgLogisticR.m:264-271
   arma::mat Ax = A * x;
+
 //std::cout << "Ax_cols:" << Ax.n_cols << " Ax_rows:" << Ax.n_rows << std::endl;
 
 //std::cout << "2..." << std::endl;
 
-  //sgLeastR.m:228-253
+  //sgLogisticR.m:277-290
   int bFlag = 0;
-  double L = 1.0;
+  double L = 1.0/m;
 
-  //arma::colvec weighty = sample_weights % y;
+  arma::colvec weighty = sample_weights % y;
 
   arma::colvec xp = x;   arma::colvec Axp = Ax;   arma::colvec xxp(n, arma::fill::zeros);
-  //double cp = c;   double ccp = 0;
+  double cp = c;   double ccp = 0;
 
   double alphap = 0;   double alpha = 1;
 
 
-  //sgLeastR.m:255-382
+  //sgLogisticR.m:292-442
   double beta, sc, gc, fun_s, fun_x, l_sum, r_sum, tree_norm;
 //  arma::mat As;
-  arma::colvec aa, bb, prob, s, v;
+  //arma::colvec aa, bb, v, s, prob;
+  arma::colvec aa, bb, v, s, prob;
   arma::rowvec ValueL(opts_maxIter);
   arma::rowvec funVal(opts_maxIter);
   //arma::mat ind_work(ind.n_rows + 1, ind.n_cols);
 
 //std::cout << "3..." << std::endl;
 
-//ATy.save("ATy_mat.csv", arma::csv_ascii);
-//Ax.save("Ax_mat.csv", arma::csv_ascii);
-//std::cout << "opts_maxIter:" << opts_maxIter << std::endl;
-
 std::cout << "m:" << m << " n:" << n << std::endl;
 
   for (int iterStep = 0; iterStep < opts_maxIter; iterStep = iterStep + 1)
   {
-
-/*
-if (iterStep < 6 || opts_maxIter - iterStep < 6)
-{
-  x.save("x_mat" + std::to_string(iterStep + 1) + ".csv", arma::csv_ascii);
-}
-*/
-
     //sgLogisticR.m:293-304
 //std::cout << "4(" << iterStep << ")..." << std::endl;
-    beta = (alphap - 1)/alpha;   s = x + (xxp * beta);
+    beta = (alphap - 1)/alpha;   s = x + (xxp * beta);   sc = c + (beta * ccp);
 //std::cout << "sc:" << sc << " c:" << c << " beta:" << beta << " ccp:" << ccp << " m1:" << m1 << " m2:" << m2 << std::endl;
 //std::cout << "4.1..." << std::endl;
 //std::cout << "As_elems:" << As.n_elem << "Ax_elems:" << Ax.n_elem << " Axp_elems:" << Axp.n_elem << " beta:" << beta << std::endl;
     arma::mat As = Ax + ((Ax - Axp) * beta);
-
+//std::cout << "4.2..." << std::endl;
+    aa = -y % (As + sc);
+//std::cout << "4.3..." << std::endl;
+    //sgLogisticR.m:306-316
+    bb = arma::max(aa,m_zeros);
+//std::cout << "5..." << std::endl;
+    fun_s = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb));
+//std::cout << "5.1..." << std::endl;
+    prob = m_ones / (m_ones + arma::exp(aa));
+//std::cout << "5.2..." << std::endl;
+    b = -weighty % (m_ones - prob);
+//std::cout << "5.3..." << std::endl;
+    gc = arma::sum(b);
 //std::cout << "5.4..." << std::endl;
     //sgLogisticR.m:318-329
 //std::cout << "A_rows:" << A.n_rows << " A_cols:" << A.n_cols << " b_elems:" << b.n_elem << std::endl;
-    arma::mat ATAs = A.t() * As;
-    arma::mat g = ATAs - ATy;
+    arma::mat g = A.t() * b;
 //std::cout << "5.5..." << std::endl;
-    xp = x;   Axp = Ax;
+    xp = x;   Axp = Ax;   cp = c;
 //std::cout << "5.6..." << std::endl;
     //sgLogisticR.m:331-378
 //std::cout << "6..." << std::endl;
-//std::cout<<2<<std::endl;
     while (true)
     {
-      v = s - g/L;
+      v = s - g/L; c = sc - gc/L;
 //std::cout << "7..." << std::endl;
       //sgLogisticR.m:337-338
       arma::mat ind_work = ind;
       ind_work.col(2) = ind_work.col(2) * (lambda2/L);
-
       arma::rowvec first_row = {-1, -1, lambda1/L};
       ind_work.insert_rows(0, first_row);
       //ind_work(0,0) = -1;
@@ -313,90 +381,60 @@ if (iterStep < 6 || opts_maxIter - iterStep < 6)
 
 //std::cout << "8..." << std::endl;
       //sgLogisticR.m:340-342
-/*
-      if (iterStep == 0)
-      {
-        ind.save("ind_mat.csv", arma::csv_ascii);
-        ind_work.save("ind_work_mat.csv", arma::csv_ascii);
-      }
-      if (iterStep < 5)
-      {
-        v.save("v_initial_mat_" + std::to_string(iterStep+1) + "_" + std::to_string(pass_counter) + ".csv", arma::csv_ascii);
-        s.save("s_initial_mat_" + std::to_string(iterStep+1) + "_" + std::to_string(pass_counter) + ".csv", arma::csv_ascii);
-        g.save("g_initial_mat_" + std::to_string(iterStep+1) + "_" + std::to_string(pass_counter) + ".csv", arma::csv_ascii);
-        pass_counter++;
-      }
-*/
-
       x = altra(v, n, ind_work, ind_work.n_rows);
-
-/*
-      if (initial_pass)
-      {
-        x.save("x_first_pass_mat.csv", arma::csv_ascii);
-      }
-*/
-
 //      arma::colvec temp_x = altra(v, n, ind_work, ind_work.n_rows);
 //std::cout << "temp_x_rows:" << temp_x.n_rows << " temp_x_cols:" << temp_x.n_cols << " x_rows:" << x.n_rows << " x_cols:" << x.n_cols << std::endl;
 //std::cout << "9..." << std::endl;
       v = x - s;
       int nonzero_x_count = 0;
-//      std::cout<<3<<std::endl;
-//      for (int i = 0; i <= x.n_rows; i = i + 1)
       for (int i = 0; i < x.n_rows; i = i + 1)
       {
 		 //std::cout << "aa["<< i << "]:" << aa(i) << " bb[" << i << "]:" << bb(i) << " Ax[" << i << "]:" << Ax(i) << std::endl;
 		 if (x(i) != 0) { nonzero_x_count = nonzero_x_count + 1;}
 	  }
-//std::cout<<4<<std::endl;
 //std::cout << "nonzero_x_count:" << nonzero_x_count << std::endl;
 
       //sgLogisticR.m:345-353
       Ax = A * x;
 //std::cout << "10..." << std::endl;
-//std::cout<<5<<std::endl;
       //sgLogisticR.m:356-377
-      arma::mat Av = Ax - As;
-      r_sum = arma::as_scalar(v.t() * v); l_sum = arma::as_scalar(Av.t() * Av);
-
-/*
-      if (iterStep < 5)
-      {
-        std::cout << "iterStep:" << iterStep << " r_sum:" << r_sum << " l_sum:" << l_sum << " L:" << L << " fun_x:" << fun_x << std::endl;
-      }
-*/
-
-//std::cout<<6<<std::endl;
+      aa = -y % (Ax + c);
+//std::cout << "11..." << std::endl;
+      bb = arma::max(aa, m_zeros);
+//std::cout << "aa.n_rows:" << aa.n_rows << " bb.n_rows:" << bb.n_rows << " c:" << c << " sc:" << sc << " gc:" << gc << " L:" << L << std::endl;
+//      for (int i = 0; i <= bb.n_rows; i = i + 1)
+//      {
+//		 std::cout << "aa["<< i << "]:" << aa(i) << " bb[" << i << "]:" << bb(i) << " Ax[" << i << "]:" << Ax(i) << " y[" << i << "]:" << y(i) << std::endl;
+//	  }
+      fun_x = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb));
+//std::cout << "12..." << std::endl;
+      r_sum = (arma::as_scalar(v.t() * v) + std::pow(c - sc, 2)) / 2;
+      l_sum = fun_x - fun_s - arma::as_scalar(v.t() * g) - (c - sc) * gc;
 //std::cout << "13..." << std::endl;
 //std::cout << "r_sum:" << r_sum << " l_sum:" << l_sum << " L:" << L << " fun_x:" << fun_x << std::endl;
-initial_pass = false;
+
       if (r_sum <= std::pow(0.1, 20))
       {
 	     bFlag = 1;
-//	     if (iterStep < 5) {std::cout<<"break1"<<std::endl;}
 	     break;
 	  }
 
 //	  if (l_sum <= r_sum * L) // Changed to epsilon comparison on 4/17/2024 to match windows output
 	  if ((opts_disableEC==0 && (l_sum < r_sum * L || abs(l_sum - (r_sum * L)) < std::pow(0.1, 12)) || opts_disableEC==1 && l_sum <= r_sum * L))
 	  {
-//         if (iterStep < 5) {std::cout<<"break2"<<std::endl;}
 	     break;
 	  } else {
-	     L = std::max(2*L, l_sum/r_sum);
-//	     if (iterStep < 5) {std::cout<<"new L:" << L << std::endl;}
+	     L = std::max(static_cast<double>(2*L), l_sum/r_sum);
 	  }
-
     }
-
+//std::cout << "14..." << std::endl;
     //sgLogisticR.m:382-401
     alphap = alpha;   alpha = (1 + std::pow(4 * alpha * alpha + 1.0, 0.5))/2.0;
 
-    xxp = x - xp; arma::mat Axy = Ax - y;
-
     ValueL(iterStep) = L;
-    //funVal(iterStep) = fun_x;
+
+    xxp = x - xp;   ccp = c - cp;
+    funVal(iterStep) = fun_x;
 
     //ind_work(0,0) = -1;
     //ind_work(0,1) = -1;
@@ -407,8 +445,10 @@ initial_pass = false;
     ind_work.col(2) = ind_work.col(2) * (lambda2);
     arma::rowvec first_row = {-1, -1, lambda1};
     ind_work.insert_rows(0, first_row);
+
     tree_norm = treeNorm(x.t(), n, ind_work, ind_work.n_rows);
-    funVal(iterStep) = arma::as_scalar(Axy.t() * Axy) / 2.0 + tree_norm;
+
+    funVal(iterStep) = fun_x + tree_norm;
 
     if (bFlag) {break;}
 
@@ -440,18 +480,16 @@ initial_pass = false;
 	}
 
   }
-//x.save("x_mat_final.csv", arma::csv_ascii);
-//std::cout << "17..." << std::endl;
-//std::cout<<"rows:"<< x.n_rows <<"\tcols:"<< x.n_cols <<std::endl;
+
   arma::rowvec x_row = x.as_row();
-//std::cout << "18..." << std::endl;
-  parameters = x_row.t();
-//std::cout << "19..." << std::endl;
-  this->intercept_value = 0;
-//x_row.save("x_row.csv", arma::csv_ascii);
+
+
+  std::cout << "Intercept: " << c << std::endl;
+  this->intercept_value = c;
 
 //std::cout << "15..." << std::endl;
 
+  parameters = x_row.t();
   this->nz_gene_count = countNonZeroGenes(parameters, weights);
 
   return x_row;
@@ -485,8 +523,11 @@ initial_pass = false;
 
 }
 
+
+
+
 /*
-void SGLassoLeastR::Predict(const arma::mat& points,
+void SGLassoFP64::Predict(const arma::mat& points,
     arma::rowvec& predictions) const
 {
   if (intercept)
@@ -509,10 +550,8 @@ void SGLassoLeastR::Predict(const arma::mat& points,
     predictions = arma::trans(parameters) * points;
   }
 }
-*/
 
-
-/*double SGLassoLeastR::ComputeError(const arma::mat& features,
+double SGLassoFP64::ComputeError(const arma::mat& features,
                                       const arma::rowvec& responses) const
 {
   // Get the number of columns and rows of the dataset.
@@ -549,8 +588,7 @@ void SGLassoLeastR::Predict(const arma::mat& points,
 }
 */
 
-
-const arma::colvec SGLassoLeastR::altra(const arma::colvec& v_in,
+const arma::colvec SGLassoFP64::altra(const arma::colvec& v_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
@@ -649,7 +687,7 @@ const arma::colvec SGLassoLeastR::altra(const arma::colvec& v_in,
 }
 
 
-const double SGLassoLeastR::treeNorm(const arma::rowvec& x_in,
+const double SGLassoFP64::treeNorm(const arma::rowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
@@ -725,16 +763,14 @@ const double SGLassoLeastR::treeNorm(const arma::rowvec& x_in,
 }
 
 
-const double SGLassoLeastR::computeLambda2Max(const arma::rowvec& x_in,
+const double SGLassoFP64::computeLambda2Max(const arma::rowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
 {
     int i, j, m;
     double lambda,twoNorm;
-
     const double* x = x_in.memptr();
-
     std::vector<double> ind_buf(ind_mat.n_cols * ind_mat.n_rows);
     double* ind = ind_buf.data();
 
@@ -767,23 +803,3 @@ const double SGLassoLeastR::computeLambda2Max(const arma::rowvec& x_in,
 }
 
 
-int countNonZeroGenes(const arma::vec& arr, const arma::mat& ranges) {
-    auto detectNonZeroInRange = [&arr](int start, int end) -> int {
-        for (int i = start; i <= end; ++i) {
-            if (arr(i) != 0) {
-                return 1;
-            }
-        }
-        return 0;
-    };
-    int count = 0;
-
-    for (arma::uword i = 0; i < ranges.n_rows; ++i) {
-        int start = static_cast<int>(ranges(i, 0))-1;
-        int end = static_cast<int>(ranges(i, 1))-1;
-        count = count + detectNonZeroInRange(start, end);
-    }
-
-    //std::cout << "Number of non-zero genes: " << count << std::endl;
-    return count;
-}

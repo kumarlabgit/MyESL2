@@ -60,6 +60,7 @@ void print_usage(const char* prog_name) {
     std::cout << "\nCommands:\n";
     std::cout << "  train      - Convert FASTA files to PFF, encode, then run regression\n";
     std::cout << "               --method <name>:         regression method (omit to skip regression)\n";
+    std::cout << "               --precision fp32|fp64:   arithmetic precision (default: fp32)\n";
     std::cout << "               --lambda <l1> <l2>:      single lambda pair; writes lambda_list.txt (default: 0.1 0.1)\n";
     std::cout << "               --lambda-file <path>:    file of lambda pairs (one 'l1 l2' per line); mutually exclusive with --lambda\n";
     std::cout << "               --param <key>=<value>:   slep option or method-specific param\n";
@@ -106,6 +107,7 @@ int main(int argc, char* argv[]) {
             int min_minor = 2;
             bool use_dlt = false;
             std::string method;
+            regression::Precision precision = regression::Precision::FP32;
             std::string datatype = "universal";
             std::array<double, 2> lambda = {0.1, 0.1};
             std::map<std::string, std::string> params;
@@ -136,6 +138,14 @@ int main(int argc, char* argv[]) {
                     use_dlt = true;
                 } else if (arg == "--method" && i + 1 < argc) {
                     method = argv[++i];
+                } else if (arg == "--precision" && i + 1 < argc) {
+                    std::string prec_str = argv[++i];
+                    if (prec_str == "fp64")
+                        precision = regression::Precision::FP64;
+                    else if (prec_str == "fp32")
+                        precision = regression::Precision::FP32;
+                    else
+                        throw std::runtime_error("--precision must be fp32 or fp64");
                 } else if (arg == "--lambda" && i + 2 < argc) {
                     lambda[0] = std::stod(argv[++i]);
                     lambda[1] = std::stod(argv[++i]);
@@ -244,8 +254,10 @@ int main(int argc, char* argv[]) {
                           << " (" << auto_bit_ct << "% of " << min_class << ")\n";
             }
 
-            // Read list file
+            // Read list file — supports overlapping groups (comma-separated files per line)
             std::vector<fs::path> all_fasta_paths;
+            std::vector<std::vector<fs::path>> groups;
+            std::unordered_map<std::string, size_t> stem_to_unique_idx;
             {
                 std::ifstream list_file(list_path);
                 if (!list_file) {
@@ -256,9 +268,33 @@ int main(int argc, char* argv[]) {
                 std::string line;
                 while (std::getline(list_file, line)) {
                     if (line.empty()) continue;
-                    for (char& c : line) if (c == '\\') c = '/';
-                    all_fasta_paths.push_back(list_dir / line);
+                    std::vector<fs::path> group;
+                    std::stringstream ss(line);
+                    std::string token;
+                    while (std::getline(ss, token, ',')) {
+                        while (!token.empty() && (token.front()==' '||token.front()=='\t')) token.erase(token.begin());
+                        while (!token.empty() && (token.back()==' '||token.back()=='\t'||token.back()=='\r')) token.pop_back();
+                        if (token.empty()) continue;
+                        for (char& c : token) if (c == '\\') c = '/';
+                        fs::path p = list_dir / token;
+                        group.push_back(p);
+                        std::string stem = p.stem().string();
+                        if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
+                            stem_to_unique_idx[stem] = all_fasta_paths.size();
+                            all_fasta_paths.push_back(p);
+                        }
+                    }
+                    if (!group.empty()) groups.push_back(std::move(group));
                 }
+            }
+            bool is_overlapping = false;
+            {
+                std::unordered_map<std::string, int> stem_group_count;
+                for (auto& g : groups) {
+                    if (g.size() > 1) is_overlapping = true;
+                    for (auto& p : g) stem_group_count[p.stem().string()]++;
+                }
+                for (auto& [s, c] : stem_group_count) if (c > 1) { is_overlapping = true; break; }
             }
 
             fs::create_directories(cache_dir);
@@ -614,17 +650,80 @@ int main(int argc, char* argv[]) {
                         offset += ncols;
                         ++col;
                     }
-                    std::ofstream table(output_dir / "alignment_table.txt");
-                    for (int row = 0; row < 3; ++row) {
-                        for (int c = 0; c < n_aligned; ++c) {
-                            if (c > 0) table << '\t';
-                            if (row < 2)
-                                table << static_cast<uint64_t>(alg_table(row, c));
-                            else
-                                table << std::fixed << std::setprecision(6) << alg_table(row, c);
-                        }
-                        table << '\n';
+                }
+                // Build per-file column range lookup from alg_table
+                {
+                    std::unordered_map<std::string, std::pair<uint64_t,uint64_t>> stem_to_cols;
+                    int col = 0;
+                    for (auto& nr : num_results) {
+                        if (nr.failed) continue;
+                        stem_to_cols[nr.stem] = {
+                            static_cast<uint64_t>(alg_table(0, col)),
+                            static_cast<uint64_t>(alg_table(1, col))
+                        };
+                        ++col;
                     }
+                    // Build group_table (3 × N_groups) and field_indices
+                    arma::mat group_table(3, groups.size());
+                    std::vector<uint64_t> field_indices;
+                    {
+                        uint64_t field_pos = 1;
+                        for (size_t gi = 0; gi < groups.size(); ++gi) {
+                            uint64_t grp_start = field_pos;
+                            for (auto& p : groups[gi]) {
+                                auto it = stem_to_cols.find(p.stem().string());
+                                if (it == stem_to_cols.end()) continue;
+                                for (uint64_t fi = it->second.first; fi <= it->second.second; ++fi) {
+                                    field_indices.push_back(fi);
+                                    ++field_pos;
+                                }
+                            }
+                            uint64_t grp_end = field_pos - 1;
+                            group_table(0, gi) = static_cast<double>(grp_start);
+                            group_table(1, gi) = static_cast<double>(grp_end);
+                            {
+                                std::ostringstream ss;
+                                ss << std::fixed << std::setprecision(6)
+                                   << std::sqrt(static_cast<double>(grp_end - grp_start + 1));
+                                group_table(2, gi) = std::stod(ss.str());
+                            }
+                        }
+                    }
+                    // Write alignment_table.txt from group_table
+                    {
+                        std::ofstream table(output_dir / "alignment_table.txt");
+                        for (int row = 0; row < 3; ++row) {
+                            for (size_t c = 0; c < groups.size(); ++c) {
+                                if (c > 0) table << '\t';
+                                if (row < 2) table << static_cast<uint64_t>(group_table(row, c));
+                                else         table << std::fixed << std::setprecision(6) << group_table(row, c);
+                            }
+                            table << '\n';
+                        }
+                    }
+                    // Write field.txt and group_indices.txt when overlapping
+                    if (is_overlapping) {
+                        {
+                            std::ofstream ff(output_dir / "field.txt");
+                            for (size_t i = 0; i < field_indices.size(); ++i) {
+                                if (i > 0) ff << ',';
+                                ff << field_indices[i];
+                            }
+                            ff << '\n';
+                        }
+                        {
+                            std::ofstream gi(output_dir / "group_indices.txt");
+                            for (int row = 0; row < 3; ++row) {
+                                for (size_t c = 0; c < groups.size(); ++c) {
+                                    if (c > 0) gi << ',';
+                                    if (row < 2) gi << static_cast<uint64_t>(group_table(row, c));
+                                    else         gi << std::fixed << std::setprecision(6) << group_table(row, c);
+                                }
+                                gi << '\n';
+                            }
+                        }
+                    }
+                    alg_table = group_table;
                 }
 
                 if (!all_missing.empty()) {
@@ -783,17 +882,80 @@ int main(int argc, char* argv[]) {
                         offset += ncols;
                         ++col;
                     }
-                    std::ofstream table(output_dir / "alignment_table.txt");
-                    for (int row = 0; row < 3; ++row) {
-                        for (int c = 0; c < n_aligned; ++c) {
-                            if (c > 0) table << '\t';
-                            if (row < 2)
-                                table << static_cast<uint64_t>(alg_table(row, c));
-                            else
-                                table << std::fixed << std::setprecision(6) << alg_table(row, c);
-                        }
-                        table << '\n';
+                }
+                // Build per-file column range lookup from alg_table
+                {
+                    std::unordered_map<std::string, std::pair<uint64_t,uint64_t>> stem_to_cols;
+                    int col = 0;
+                    for (auto& r : results) {
+                        if (r.failed) continue;
+                        stem_to_cols[r.stem] = {
+                            static_cast<uint64_t>(alg_table(0, col)),
+                            static_cast<uint64_t>(alg_table(1, col))
+                        };
+                        ++col;
                     }
+                    // Build group_table (3 × N_groups) and field_indices
+                    arma::mat group_table(3, groups.size());
+                    std::vector<uint64_t> field_indices;
+                    {
+                        uint64_t field_pos = 1;
+                        for (size_t gi = 0; gi < groups.size(); ++gi) {
+                            uint64_t grp_start = field_pos;
+                            for (auto& p : groups[gi]) {
+                                auto it = stem_to_cols.find(p.stem().string());
+                                if (it == stem_to_cols.end()) continue;
+                                for (uint64_t fi = it->second.first; fi <= it->second.second; ++fi) {
+                                    field_indices.push_back(fi);
+                                    ++field_pos;
+                                }
+                            }
+                            uint64_t grp_end = field_pos - 1;
+                            group_table(0, gi) = static_cast<double>(grp_start);
+                            group_table(1, gi) = static_cast<double>(grp_end);
+                            {
+                                std::ostringstream ss;
+                                ss << std::fixed << std::setprecision(6)
+                                   << std::sqrt(static_cast<double>(grp_end - grp_start + 1));
+                                group_table(2, gi) = std::stod(ss.str());
+                            }
+                        }
+                    }
+                    // Write alignment_table.txt from group_table
+                    {
+                        std::ofstream table(output_dir / "alignment_table.txt");
+                        for (int row = 0; row < 3; ++row) {
+                            for (size_t c = 0; c < groups.size(); ++c) {
+                                if (c > 0) table << '\t';
+                                if (row < 2) table << static_cast<uint64_t>(group_table(row, c));
+                                else         table << std::fixed << std::setprecision(6) << group_table(row, c);
+                            }
+                            table << '\n';
+                        }
+                    }
+                    // Write field.txt and group_indices.txt when overlapping
+                    if (is_overlapping) {
+                        {
+                            std::ofstream ff(output_dir / "field.txt");
+                            for (size_t i = 0; i < field_indices.size(); ++i) {
+                                if (i > 0) ff << ',';
+                                ff << field_indices[i];
+                            }
+                            ff << '\n';
+                        }
+                        {
+                            std::ofstream gi(output_dir / "group_indices.txt");
+                            for (int row = 0; row < 3; ++row) {
+                                for (size_t c = 0; c < groups.size(); ++c) {
+                                    if (c > 0) gi << ',';
+                                    if (row < 2) gi << static_cast<uint64_t>(group_table(row, c));
+                                    else         gi << std::fixed << std::setprecision(6) << group_table(row, c);
+                                }
+                                gi << '\n';
+                            }
+                        }
+                    }
+                    alg_table = group_table;
                 }
 
                 if (!all_missing.empty()) {
@@ -962,7 +1124,7 @@ int main(int argc, char* argv[]) {
                         if (!(ss >> vmin >> c1 >> vmax >> c2 >> vstep) || c1 != ',' || c2 != ',')
                             throw std::runtime_error("--lambda-grid spec must be 'min,max,step': " + spec);
                         if (vstep <= 0.0) throw std::runtime_error("lambda-grid step must be > 0");
-                        for (double v = vmin; v < vmax - vstep * 1e-9; v += vstep)
+                        for (double v = vmin; v <= vmax + vstep * 1e-9; v += vstep)
                             vals.push_back(v);
                         return vals;
                     };
@@ -1077,7 +1239,7 @@ int main(int argc, char* argv[]) {
                         for (auto& [g, v] : gss) sorted_gss.push_back({v, g});
                         std::sort(sorted_gss.rbegin(), sorted_gss.rend());
                         std::ofstream gf(lam_dir / "gss.txt");
-                        gf << std::fixed << std::setprecision(6);
+                        gf << std::setprecision(15);
                         for (auto& [v, g] : sorted_gss) gf << g << '\t' << v << '\n';
                     }
 
@@ -1138,10 +1300,16 @@ int main(int argc, char* argv[]) {
                     std::ostringstream out;
                     out << std::fixed << std::setprecision(4);
 
+                    if (is_overlapping
+                        && (method == "olsg_lasso_leastr" || method == "olsg_lasso_logisticr")
+                        && params.find("field") == params.end()) {
+                        params["field"] = (output_dir / "field.txt").string();
+                    }
+
                     if (nfolds == 0) {
                         // Single model
                         auto regr = regression::createRegressionAnalysis(
-                            method, features, responses, alg_table.t(), params, lam);
+                            method, features, responses, alg_table.t(), params, lam, precision);
                         {
                             std::ofstream wo(lam_dir / "weights.txt");
                             std::ifstream mi(output_dir / "combined.map");
@@ -1163,7 +1331,7 @@ int main(int argc, char* argv[]) {
                         for (int k = 0; k < nfolds; ++k) {
                             auto regr = regression::createRegressionAnalysisXVal(
                                 method, features, responses, alg_table.t(), params, lam,
-                                xval_idxs, k);
+                                xval_idxs, k, precision);
                             fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
                             {
                                 std::ofstream wo(fw);

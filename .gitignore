@@ -47,6 +47,8 @@ fungi_analysis.exe
 *.dll
 *.lib
 
+old_src/
+
 # PFF cache and output directories
 bench_protein/
 pff_cache/
