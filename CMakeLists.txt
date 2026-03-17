@@ -31,6 +31,10 @@ set(SOURCES
     src/numeric_parser.cpp
     src/visualizer.cpp
     src/newick.cpp
+    src/pipeline_preprocess.cpp
+    src/pipeline_encode.cpp
+    src/pipeline_train.cpp
+    src/pipeline_evaluate.cpp
 )
 
 # Create executable
