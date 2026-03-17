@@ -40,8 +40,14 @@ struct EncodeOptions {
     std::string  write_features_transposed_path;
     std::unordered_set<std::string> dropout_labels;
     regression::Precision precision = regression::Precision::FP32;
+    uint64_t max_mem    = uint64_t(8) * 1024 * 1024 * 1024;  // abort if estimated matrix exceeds this (bytes); default 8 GB
+    bool     disable_mc = false; // if true, warn instead of throwing on max_mem exceeded
 };
 
 EncodeResult encode(const EncodeOptions& opts);
+
+// Returns a map of stem -> encoded feature column count.
+// Runs the per-file encoder but discards column data; writes nothing to disk.
+std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts);
 
 } // namespace pipeline

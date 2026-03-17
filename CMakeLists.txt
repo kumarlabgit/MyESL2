@@ -35,6 +35,7 @@ set(SOURCES
     src/pipeline_encode.cpp
     src/pipeline_train.cpp
     src/pipeline_evaluate.cpp
+    src/pipeline_adaptive.cpp
 )
 
 # Create executable

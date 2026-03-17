@@ -1,4 +1,5 @@
 #include "pipeline_evaluate.hpp"
+#include "process_log.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
 #include "pff_format.hpp"
@@ -65,6 +66,17 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
     if (cache_dir.empty()) cache_dir = fs::current_path() / "pff_cache";
 
     EvaluateResult result;
+
+    fs::path eval_log_dir = opts.output_file.parent_path();
+    if (eval_log_dir.empty()) eval_log_dir = ".";
+    process_log::Section plog(eval_log_dir / "process_log.txt", "evaluate");
+    plog.param("weights_path", opts.weights_path)
+        .param("list_path",    opts.list_path)
+        .param("output_file",  opts.output_file)
+        .param("datatype",     opts.datatype);
+    if (!opts.hyp_path.empty()) plog.param("hyp_path", opts.hyp_path);
+
+    try {
 
     double intercept_val = 0.0;
     std::map<std::string, double> species_sums;
@@ -670,7 +682,24 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         }
     }
 
+    std::ostringstream plog_m;
+    plog_m << std::fixed << std::setprecision(4);
+    plog_m << "hss = " << result.hss << "\n";
+    if (!opts.hyp_path.empty()) {
+        plog_m << "tp = "  << result.tp  << "\n"
+               << "tn = "  << result.tn  << "\n"
+               << "fp = "  << result.fp  << "\n"
+               << "fn = "  << result.fn  << "\n"
+               << "tpr = " << result.tpr << "\n"
+               << "tnr = " << result.tnr << "\n";
+    }
+    plog.finish(plog_m.str());
     return result;
+
+    } catch (const std::exception& e) {
+        plog.fail(e.what());
+        throw;
+    }
 }
 
 // ---------------------------------------------------------------------------

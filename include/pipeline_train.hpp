@@ -23,6 +23,9 @@ struct TrainOptions {
     int          nfolds             = 0;
     int          min_groups         = 0;
     std::map<std::string, std::string> params;  // slep opts, merged with enc.extra_params
+    bool        adaptive_sparsification = false;
+    std::string adaptive_l1_spec = "0.1,0.3,0.1";    // produces 0.1, 0.2, 0.3
+    std::string adaptive_l2_spec = "0.1,0.3,0.1"; // produces 0.1, 0.2, 0.3
 };
 
 struct TrainResult {

@@ -17,6 +17,7 @@
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
 #include "pipeline_evaluate.hpp"
+#include "pipeline_adaptive.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
 #include "pff_format.hpp"
@@ -27,33 +28,111 @@
 namespace fs = std::filesystem;
 
 void print_usage(const char* prog_name) {
-    std::cout << "MyESL2 - My Evolutionary Sparse Learning 2\n";
-    std::cout << "===========================\n\n";
-    std::cout << "Usage:\n";
-    std::cout << "  " << prog_name << " train <list.txt> <hypothesis.txt> <output_dir> [column|row] [--cache-dir DIR] [--min-minor N] [--threads N] [--dlt] [--datatype <type>] [--nfolds N]\n";
-    std::cout << "  " << prog_name << " evaluate <weights.txt> <list.txt> <output_file> [--cache-dir DIR] [--datatype <type>] [--threads N] [--hypothesis <file>]\n";
-    std::cout << "  " << prog_name << " info <file.pff>\n";
-    std::cout << "\nCommands:\n";
-    std::cout << "  train      - Convert FASTA files to PFF, encode, then run regression\n";
-    std::cout << "               --method <name>:         regression method (omit to skip regression)\n";
-    std::cout << "               --precision fp32|fp64:   arithmetic precision (default: fp32)\n";
-    std::cout << "               --lambda <l1> <l2>:      single lambda pair; writes lambda_list.txt (default: 0.1 0.1)\n";
-    std::cout << "               --lambda-file <path>:    file of lambda pairs (one 'l1 l2' per line); mutually exclusive with --lambda\n";
-    std::cout << "               --param <key>=<value>:   slep option or method-specific param\n";
-    std::cout << "                 intercept=false        disable intercept term\n";
-    std::cout << "                 field=<path>           group-index CSV (overlapping methods)\n";
-    std::cout << "               --nfolds N:              run K-fold cross-validation (N >= 2, requires --method)\n";
-    std::cout << "  evaluate   - Apply a trained model to predict response values for new species\n";
-    std::cout << "               --hypothesis <file>: compare predictions to true values (TPR/TNR/FPR/FNR)\n";
-    std::cout << "  info       - Display PFF file metadata\n";
-    std::cout << "\nCommon options:\n";
-    std::cout << "  --cache-dir DIR: directory for .pff and .err files (default: pff_cache in CWD)\n";
-    std::cout << "  --threads N:     number of worker threads (default: all cores)\n";
-    std::cout << "  --min-minor N:   min non-major non-indel count to keep a position (default: 1)\n";
-    std::cout << "  --dlt:           use direct lookup table encoder\n";
-    std::cout << "  --datatype <type>: universal (default), protein, nucleotide, numeric\n";
-    std::cout << "                     numeric: list file points to whitespace-delimited tabular files\n";
-    std::cout << "                              (first col = sample name, remaining cols = float features)\n";
+    const std::string p = prog_name;
+    std::cout <<
+        "MyESL2 - My Evolutionary Sparse Learning 2\n"
+        "===========================================\n\n"
+        "USAGE\n"
+        "  " + p + " <command> [args...]\n\n"
+        "COMMANDS\n"
+        "  train       Full pipeline: preprocess -> encode -> regression\n"
+        "  evaluate    Apply a trained model to new data\n"
+        "  drphylo     Per-clade DrPhylo analysis\n"
+        "  aim         Iterative AIM feature-selection loop\n"
+        "  visualize   SVG heatmap from gene_predictions.txt\n"
+        "  info        Display PFF file metadata\n\n"
+
+        "-------------------------------------------\n"
+        "TRAIN\n"
+        "  " + p + " train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]\n\n"
+        "  Positional:\n"
+        "    list.txt        paths to FASTA/numeric input files (one per line)\n"
+        "    hypothesis.txt  species labels (tab-delimited: name <TAB> value)\n"
+        "    output_dir      directory for all output files\n"
+        "    column|row      PFF orientation (default: column)\n\n"
+        "  Regression:\n"
+        "    --method <name>              regression method (omit to skip regression)\n"
+        "    --precision fp32|fp64        arithmetic precision (default: fp32)\n"
+        "    --lambda <l1> <l2>           single lambda pair (default: 0.1 0.1)\n"
+        "    --lambda-file <path>         file of lambda pairs, one 'l1 l2' per line\n"
+        "    --lambda-grid <s1> <s2>      Cartesian product grid; each spec is min,max,step\n"
+        "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
+        "    --min-groups N               skip lambdas selecting fewer than N non-zero groups\n"
+        "    --param <key>=<value>        pass option to solver\n"
+        "      intercept=false            disable intercept term\n"
+        "      field=<path>               group-index CSV (overlapping group methods)\n"
+        "  Encoding:\n"
+        "    --auto-bit-ct X              set min_minor = ceil(X% x min_class_size)\n"
+        "    --drop-major-allele          exclude major-allele column from FASTA encoder\n"
+        "    --class-bal up|down|weighted balance classes before regression\n"
+        "    --dropout <file>             exclude features listed in file from encoding\n"
+        "    --write-features <path>      write encoded feature matrix to file\n"
+        "    --write-features-transposed <path>  write transposed feature matrix to file\n"
+        "    --max-mem <bytes>            abort if estimated feature matrix exceeds this size (default: 8589934592)\n"
+        "      --param disable_mc=1       warn instead of aborting when max_mem is exceeded\n"
+        "    --adaptive-sparsification    on max_mem_exceeded, run adaptive sparsification\n"
+        "    --adaptive-lambda-grid <l1_spec> <l2_spec>\n"
+        "                                 lambda grid for exploration combos (min,max,step each)\n"
+        "                                 (default: \"0.1,0.3,0.1\" \"0.1,0.3,0.1\")\n"
+        "  Common:\n"
+        "    --cache-dir DIR              directory for .pff/.pnf cache (default: ./pff_cache)\n"
+        "    --min-minor N                min non-major non-indel count to keep a position (default: 1)\n"
+        "    --threads N                  worker threads (default: all cores)\n"
+        "    --dlt                        use direct lookup table encoder\n"
+        "    --datatype <type>            universal (default), protein, nucleotide, numeric\n"
+        "                                 numeric: list file points to whitespace-delimited tabular files\n"
+        "                                          (first col = sample name, remaining cols = features)\n\n"
+
+        "-------------------------------------------\n"
+        "EVALUATE\n"
+        "  " + p + " evaluate <weights.txt> <list.txt> <output_file> [options]\n\n"
+        "    --hypothesis <file>     compare predictions to known labels (writes TPR/TNR/FPR/FNR)\n"
+        "    --no-visualize          skip automatic SVG generation\n"
+        "    --cache-dir DIR\n"
+        "    --threads N\n"
+        "    --datatype <type>\n\n"
+
+        "-------------------------------------------\n"
+        "DRPHYLO\n"
+        "  " + p + " drphylo <list.txt> <tree.nwk> <output_dir> [options]   (tree mode)\n"
+        "  " + p + " drphylo <list.txt> <output_dir> --hypothesis <file> [options]  (direct mode)\n\n"
+        "  Clade selection (required in tree mode, mutually exclusive):\n"
+        "    --clade-list <file>          file listing clades to test\n"
+        "    --gen-clade-list <spec>      auto-generate clade list from tree\n"
+        "  DrPhylo-specific:\n"
+        "    --hypothesis <file>          run a single hypothesis instead of tree clades\n"
+        "    --grid-rmse-cutoff X         exclude lambda results above RMSE threshold (default: 100)\n"
+        "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
+        "  Shared with train (same semantics):\n"
+        "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
+        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele\n"
+        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
+
+        "-------------------------------------------\n"
+        "AIM\n"
+        "  " + p + " aim <list.txt> <hypothesis.txt> <output_dir> [options]\n\n"
+        "  AIM-specific:\n"
+        "    --aim-acc-cutoff X    TPR and TNR threshold to accept a feature set (default: 0.9)\n"
+        "    --aim-max-iter N      max AIM iterations (default: 10)\n"
+        "    --aim-max-ft N        stop after accumulating this many features total (default: 1000)\n"
+        "    --aim-window N        top-N features considered per iteration (default: 100)\n"
+        "  Shared with train (same semantics):\n"
+        "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
+        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele\n"
+        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
+
+        "-------------------------------------------\n"
+        "VISUALIZE\n"
+        "  " + p + " visualize <gene_predictions.txt> <output.svg> [options]\n\n"
+        "    --gene-limit N        max genes displayed\n"
+        "    --species-limit N     max species displayed\n"
+        "    --ssq-threshold X     hide genes with sum-squared score below X\n"
+        "    --m-grid              draw monochrome grid lines\n\n"
+
+        "-------------------------------------------\n"
+        "INFO\n"
+        "  " + p + " info <file.pff>\n"
+        "    Display metadata for a PFF or PNF cache file.\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -129,8 +208,16 @@ int main(int argc, char* argv[]) {
                 }
                 else if (arg == "--write-features"           && i+1<argc) enc_opts.write_features_path = argv[++i];
                 else if (arg == "--write-features-transposed"&& i+1<argc) enc_opts.write_features_transposed_path = argv[++i];
+                else if (arg == "--max-mem"     && i+1<argc) enc_opts.max_mem = std::stoull(argv[++i]);
+                else if (arg == "--adaptive-sparsification") train_opts.adaptive_sparsification = true;
+                else if (arg == "--adaptive-lambda-grid" && i+2<argc) {
+                    train_opts.adaptive_l1_spec = argv[++i];
+                    train_opts.adaptive_l2_spec = argv[++i];
+                }
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
+            if (train_opts.params.count("disable_mc") && train_opts.params.at("disable_mc") == "1")
+                enc_opts.disable_mc = true;
 
             if (!train_opts.lambda_file_path.empty() && train_opts.lambda_explicitly_set)
                 throw std::runtime_error("--lambda and --lambda-file are mutually exclusive");
@@ -142,12 +229,22 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("--nfolds requires --method");
 
             pipeline::preprocess(pre_opts);
-            auto enc = pipeline::encode(enc_opts);
-            pipeline::train(enc, train_opts);
+            try {
+                auto enc = pipeline::encode(enc_opts);
+                pipeline::train(enc, train_opts);
 
-            std::cout << "\n--- Summary ---\n";
-            std::cout << "  Features matrix: " << enc.features.n_rows << " x " << enc.features.n_cols << "\n";
-            std::cout << "  Response vector: 1 x " << enc.responses.n_elem << "\n";
+                std::cout << "\n--- Summary ---\n";
+                std::cout << "  Features matrix: " << enc.features.n_rows << " x " << enc.features.n_cols << "\n";
+                std::cout << "  Response vector: 1 x " << enc.responses.n_elem << "\n";
+            } catch (const std::runtime_error& e) {
+                if (std::string_view(e.what()).starts_with("max_mem_exceeded")
+                    && train_opts.adaptive_sparsification) {
+                    std::cout << "[adaptive] max_mem exceeded — starting adaptive sparsification\n";
+                    pipeline::adaptive_train(enc_opts, train_opts);
+                } else {
+                    throw;
+                }
+            }
 
         // =====================================================================
         } else if (command == "evaluate") {
@@ -260,8 +357,11 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
                 else if (arg == "--auto-bit-ct"      && i+1<argc) enc_opts_base.auto_bit_ct   = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
+                else if (arg == "--max-mem"           && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
             }
+            if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
+                enc_opts_base.disable_mc = true;
             if (!min_groups_set) train_opts_base.min_groups = 3;
 
             fs::create_directories(output_dir);
@@ -392,8 +492,11 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
                 else if (arg == "--auto-bit-ct"    && i+1<argc) enc_opts_base.auto_bit_ct = std::stod(argv[++i]);
+                else if (arg == "--max-mem"         && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
             }
+            if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
+                enc_opts_base.disable_mc = true;
             if (!has_lambda) { train_opts_base.lambda_grid_specs[0]="0.1,0.9,0.1"; train_opts_base.lambda_grid_specs[1]="0.0001,0.0002,0.0001"; train_opts_base.lambda_grid_set=true; }
             if (!has_method) train_opts_base.method = "sg_lasso";
 
@@ -662,6 +765,37 @@ int main(int argc, char* argv[]) {
                 for (auto& lbl : accumulated_selected) sf << lbl << '\n';
             }
             std::cout << "[AIM] Done. aim_selected.txt written (" << total_selected << " features)\n";
+
+        // =====================================================================
+        } else if (command == "encode-sizes") {
+        // =====================================================================
+            if (argc < 4) {
+                std::cerr << "Error: encode-sizes requires <output_dir> <hypothesis.txt>\n";
+                return 1;
+            }
+            pipeline::EncodeOptions enc_opts;
+            enc_opts.output_dir = argv[2];
+            enc_opts.hyp_path   = argv[3];
+            for (int i = 4; i < argc; ++i) {
+                std::string arg = argv[i];
+                if      (arg == "--min-minor"       && i+1<argc) enc_opts.min_minor    = std::stoi(argv[++i]);
+                else if (arg == "--auto-bit-ct"     && i+1<argc) enc_opts.auto_bit_ct  = std::stod(argv[++i]);
+                else if (arg == "--drop-major-allele")            enc_opts.drop_major   = true;
+                else if (arg == "--dropout"         && i+1<argc) {
+                    std::ifstream df(argv[++i]);
+                    if (!df) throw std::runtime_error("Cannot open dropout file: " + std::string(argv[i]));
+                    std::string line;
+                    while (std::getline(df, line)) { if (!line.empty() && line.back()=='\r') line.pop_back(); if (!line.empty()) enc_opts.dropout_labels.insert(line); }
+                }
+                else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
+            }
+            auto sizes = pipeline::encode_sizes(enc_opts);
+            uint64_t total = 0;
+            for (auto& [stem, ncols] : sizes) {
+                std::cout << stem << '\t' << ncols << '\n';
+                total += ncols;
+            }
+            std::cout << "\nFiles: " << sizes.size() << "  Total columns: " << total << "\n";
 
         // =====================================================================
         } else if (command == "visualize") {

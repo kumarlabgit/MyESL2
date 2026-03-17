@@ -1,5 +1,6 @@
 #include "pipeline_encode.hpp"
 #include "pipeline_preprocess.hpp"
+#include "process_log.hpp"
 #include "encoder.hpp"
 #include "numeric_parser.hpp"
 #include "fasta_parser.hpp"
@@ -17,6 +18,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <random>
+#include <atomic>
 
 namespace pipeline {
 
@@ -40,6 +42,16 @@ EncodeResult encode(const EncodeOptions& opts)
         num_threads = std::thread::hardware_concurrency();
         if (num_threads == 0) num_threads = 1;
     }
+
+    process_log::Section plog(opts.output_dir / "process_log.txt", "encode");
+    plog.param("hyp_path",      opts.hyp_path)
+        .param("max_mem_bytes", opts.max_mem)
+        .param("precision",     std::string(opts.precision == regression::Precision::FP64 ? "fp64" : "fp32"));
+    if (!opts.class_bal.empty()) plog.param("class_bal",  opts.class_bal);
+    if (opts.drop_major)         plog.param("drop_major", true);
+    if (opts.auto_bit_ct > 0)    plog.param("auto_bit_ct", opts.auto_bit_ct);
+
+    try {
 
     // ----------------------------------------------------------------
     // 4. Read hypothesis file
@@ -132,10 +144,13 @@ EncodeResult encode(const EncodeOptions& opts)
         for (auto& [s, c] : stem_group_count) if (c > 1) { is_overlapping = true; break; }
     }
 
+    plog.param("genes", (int)all_fasta_paths.size());
+
     // ----------------------------------------------------------------
     // 6. Phase 2 encoding
     // ----------------------------------------------------------------
     uint32_t N = static_cast<uint32_t>(hyp_seq_names.size());
+
     uint64_t total_cols = 0;
     int n_aligned = 0, failed_count = 0;
     arma::fmat features;
@@ -184,6 +199,8 @@ EncodeResult encode(const EncodeOptions& opts)
         uint64_t running_cols = 0;
         uint64_t first_estimate = 0;
         int next_pct = 1;
+        std::atomic<bool> mem_exceeded{false};
+        std::string mem_err_msg;
         {
             std::mutex queue_mutex, print_mutex;
             std::queue<int> work_queue;
@@ -207,7 +224,7 @@ EncodeResult encode(const EncodeOptions& opts)
                     int idx;
                     {
                         std::lock_guard<std::mutex> lock(queue_mutex);
-                        if (work_queue.empty()) break;
+                        if (work_queue.empty() || mem_exceeded.load()) break;
                         idx = work_queue.front();
                         work_queue.pop();
                     }
@@ -246,6 +263,21 @@ EncodeResult encode(const EncodeOptions& opts)
                                       << pnf_paths[idx].filename().string()
                                       << " -> " << F << " features\n";
                             check_milestone();
+                            if (opts.max_mem > 0 && !mem_exceeded.load()) {
+                                uint64_t cur_bytes = running_cols * static_cast<uint64_t>(N) * sizeof(float);
+                                if (static_cast<double>(cur_bytes) > static_cast<double>(opts.max_mem) * 0.8) {
+                                    uint64_t est_bytes = static_cast<uint64_t>(
+                                        static_cast<double>(cur_bytes) * total_files / done_count);
+                                    if (static_cast<double>(est_bytes) > static_cast<double>(opts.max_mem) * 1.25) {
+                                        mem_err_msg = "max_mem_exceeded: estimated final matrix size "
+                                            + fmt_bytes(est_bytes) + " exceeds 125% of max_mem ("
+                                            + fmt_bytes(opts.max_mem) + ")";
+                                        mem_exceeded = true;
+                                        if (opts.disable_mc)
+                                            std::cout << "[max_mem] warning: " << mem_err_msg << " (ignored)\n";
+                                    }
+                                }
+                            }
                         }
                     } catch (const std::exception& e) {
                         nr.failed = true;
@@ -267,6 +299,7 @@ EncodeResult encode(const EncodeOptions& opts)
             for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
             for (auto& t : threads) t.join();
         }
+        if (mem_exceeded.load() && !opts.disable_mc) throw std::runtime_error(mem_err_msg);
         (void)std::chrono::steady_clock::now(); // encode_start used implicitly above
 
         for (auto& nr : num_results) {
@@ -283,15 +316,23 @@ EncodeResult encode(const EncodeOptions& opts)
             std::cout << "\n";
         }
 
+        // Save column counts before freeing intermediate storage
+        std::vector<size_t> num_col_counts(num_results.size(), 0);
+        for (size_t ri = 0; ri < num_results.size(); ++ri)
+            if (!num_results[ri].failed) num_col_counts[ri] = num_results[ri].columns.size();
+
         features.zeros(N, total_cols);
         {
             uint64_t col_offset = 0;
-            for (auto& nr : num_results) {
+            for (size_t ri = 0; ri < num_results.size(); ++ri) {
+                auto& nr = num_results[ri];
                 if (nr.failed) continue;
-                for (size_t j = 0; j < nr.columns.size(); ++j)
-                    for (uint32_t i = 0; i < N; ++i)
-                        features(i, col_offset + j) = nr.columns[j][i];
-                col_offset += nr.columns.size();
+                size_t ncols = num_col_counts[ri];
+                for (size_t j = 0; j < ncols; ++j)
+                    for (uint32_t si = 0; si < N; ++si)
+                        features(si, col_offset + j) = nr.columns[j][si];
+                { decltype(nr.columns) tmp; tmp.swap(nr.columns); } // free after copy
+                col_offset += ncols;
             }
         }
 
@@ -301,9 +342,10 @@ EncodeResult encode(const EncodeOptions& opts)
         {
             uint64_t offset = 0;
             int col = 0;
-            for (auto& nr : num_results) {
+            for (size_t ri = 0; ri < num_results.size(); ++ri) {
+                auto& nr = num_results[ri];
                 if (nr.failed) continue;
-                uint64_t ncols = nr.columns.size();
+                uint64_t ncols = num_col_counts[ri];
                 alg_table(0, col) = static_cast<double>(offset + 1);
                 alg_table(1, col) = static_cast<double>(offset + ncols);
                 {
@@ -434,6 +476,8 @@ EncodeResult encode(const EncodeOptions& opts)
         uint64_t running_cols = 0;
         uint64_t first_estimate = 0;
         int next_pct = 1;
+        std::atomic<bool> mem_exceeded{false};
+        std::string mem_err_msg;
         {
             std::mutex queue_mutex, print_mutex;
             std::queue<int> work_queue;
@@ -457,7 +501,7 @@ EncodeResult encode(const EncodeOptions& opts)
                     int idx;
                     {
                         std::lock_guard<std::mutex> lock(queue_mutex);
-                        if (work_queue.empty()) break;
+                        if (work_queue.empty() || mem_exceeded.load()) break;
                         idx = work_queue.front();
                         work_queue.pop();
                     }
@@ -475,6 +519,21 @@ EncodeResult encode(const EncodeOptions& opts)
                                       << pff_paths[idx].filename().string()
                                       << " -> " << results[idx].columns.size() << " columns\n";
                             check_milestone();
+                            if (opts.max_mem > 0 && !mem_exceeded.load()) {
+                                uint64_t cur_bytes = running_cols * static_cast<uint64_t>(N) * sizeof(float);
+                                if (static_cast<double>(cur_bytes) > static_cast<double>(opts.max_mem) * 0.8) {
+                                    uint64_t est_bytes = static_cast<uint64_t>(
+                                        static_cast<double>(cur_bytes) * total_encode / done_count);
+                                    if (static_cast<double>(est_bytes) > static_cast<double>(opts.max_mem) * 1.25) {
+                                        mem_err_msg = "max_mem_exceeded: estimated final matrix size "
+                                            + fmt_bytes(est_bytes) + " exceeds 125% of max_mem ("
+                                            + fmt_bytes(opts.max_mem) + ")";
+                                        mem_exceeded = true;
+                                        if (opts.disable_mc)
+                                            std::cout << "[max_mem] warning: " << mem_err_msg << " (ignored)\n";
+                                    }
+                                }
+                            }
                         }
                     } catch (const std::exception& e) {
                         results[idx].failed    = true;
@@ -497,6 +556,7 @@ EncodeResult encode(const EncodeOptions& opts)
             for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
             for (auto& t : threads) t.join();
         }
+        if (mem_exceeded.load() && !opts.disable_mc) throw std::runtime_error(mem_err_msg);
         (void)encode_start; // timing available if needed
 
         for (int i = 0; i < total_encode; ++i)
@@ -516,15 +576,23 @@ EncodeResult encode(const EncodeOptions& opts)
             std::cout << "\n";
         }
 
+        // Save column counts before freeing intermediate storage
+        std::vector<size_t> result_col_counts(total_encode, 0);
+        for (int ri = 0; ri < total_encode; ++ri)
+            if (!results[ri].failed) result_col_counts[ri] = results[ri].columns.size();
+
         features.zeros(N, total_cols);
         {
             uint64_t col_offset = 0;
-            for (auto& r : results) {
+            for (int ri = 0; ri < total_encode; ++ri) {
+                auto& r = results[ri];
                 if (r.failed) continue;
-                for (size_t j = 0; j < r.columns.size(); ++j)
-                    for (uint32_t i = 0; i < N; ++i)
-                        features(i, col_offset + j) = static_cast<float>(r.columns[j][i]);
-                col_offset += r.columns.size();
+                size_t ncols = result_col_counts[ri];
+                for (size_t j = 0; j < ncols; ++j)
+                    for (uint32_t si = 0; si < N; ++si)
+                        features(si, col_offset + j) = static_cast<float>(r.columns[j][si]);
+                { decltype(r.columns) tmp; tmp.swap(r.columns); } // free after copy
+                col_offset += ncols;
             }
         }
 
@@ -533,9 +601,10 @@ EncodeResult encode(const EncodeOptions& opts)
         {
             uint64_t offset = 0;
             int col = 0;
-            for (auto& r : results) {
+            for (int ri = 0; ri < total_encode; ++ri) {
+                auto& r = results[ri];
                 if (r.failed) continue;
-                uint64_t ncols = r.columns.size();
+                uint64_t ncols = result_col_counts[ri];
                 alg_table(0, col) = static_cast<double>(offset + 1);
                 alg_table(1, col) = static_cast<double>(offset + ncols);
                 {
@@ -779,7 +848,232 @@ EncodeResult encode(const EncodeOptions& opts)
     result.extra_params       = std::move(extra_params);
     result.datatype           = pre.datatype;
 
+    double matrix_mb = static_cast<double>(
+        static_cast<uint64_t>(N) * total_cols * sizeof(float)) / (1 << 20);
+    std::ostringstream plog_m;
+    plog_m << std::fixed << std::setprecision(2);
+    plog_m << "samples = "   << N          << "\n"
+           << "features = "  << total_cols  << "\n"
+           << "matrix_mb = " << matrix_mb   << "\n";
+    plog.finish(plog_m.str());
     return result;
+
+    } catch (const std::exception& e) {
+        plog.fail(e.what());
+        throw;
+    }
+}
+
+std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
+{
+    // ----------------------------------------------------------------
+    // 1. Read preprocess_config
+    // ----------------------------------------------------------------
+    PreprocessOptions pre = pipeline::read_preprocess_config(opts.output_dir);
+
+    // ----------------------------------------------------------------
+    // 2. Effective min_minor
+    // ----------------------------------------------------------------
+    int min_minor = (opts.min_minor >= 0) ? opts.min_minor : pre.min_minor;
+
+    // ----------------------------------------------------------------
+    // 3. num_threads
+    // ----------------------------------------------------------------
+    unsigned int num_threads = pre.num_threads;
+    if (num_threads == 0) {
+        num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0) num_threads = 1;
+    }
+
+    // ----------------------------------------------------------------
+    // 4. Read hypothesis file
+    // ----------------------------------------------------------------
+    std::vector<std::string> hyp_seq_names;
+    std::vector<float> hyp_values;
+    {
+        std::ifstream hyp_file(opts.hyp_path);
+        if (!hyp_file)
+            throw std::runtime_error("Cannot open hypothesis file: " + opts.hyp_path.string());
+        std::string line;
+        int line_num = 0;
+        while (std::getline(hyp_file, line)) {
+            ++line_num;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            auto delim = line.find('\t');
+            if (delim == std::string::npos) delim = line.find(' ');
+            if (delim == std::string::npos) {
+                std::cerr << "Warning: hypothesis file line " << line_num
+                          << " has no delimiter, skipping: \"" << line << "\"\n";
+                continue;
+            }
+            double val = std::stod(line.substr(delim + 1));
+            if (val == 0.0) continue;
+            hyp_seq_names.push_back(line.substr(0, delim));
+            hyp_values.push_back(static_cast<float>(val));
+        }
+    }
+
+    // --auto-bit-ct: override min_minor as percentage of minority class size
+    if (opts.auto_bit_ct > 0.0) {
+        int pos_count = 0, neg_count = 0;
+        for (float v : hyp_values) {
+            if (v > 0.0f) ++pos_count;
+            else if (v < 0.0f) ++neg_count;
+        }
+        int min_class = std::min(pos_count, neg_count);
+        min_minor = std::max(1, static_cast<int>(std::ceil(opts.auto_bit_ct / 100.0 * min_class)));
+    }
+
+    // ----------------------------------------------------------------
+    // 5. Read list file
+    // ----------------------------------------------------------------
+    fs::path list_path = pre.list_path;
+    fs::path cache_dir = pre.cache_dir;
+
+    std::vector<fs::path> all_fasta_paths;
+    {
+        std::unordered_map<std::string, size_t> stem_to_unique_idx;
+        std::ifstream list_file(list_path);
+        if (!list_file)
+            throw std::runtime_error("Cannot open list file: " + list_path.string());
+        fs::path list_dir = list_path.parent_path();
+        std::string line;
+        while (std::getline(list_file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            std::stringstream ss(line);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.erase(token.begin());
+                while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
+                if (token.empty()) continue;
+                for (char& c : token) if (c == '\\') c = '/';
+                fs::path p = list_dir / token;
+                std::string stem = p.stem().string();
+                if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
+                    stem_to_unique_idx[stem] = all_fasta_paths.size();
+                    all_fasta_paths.push_back(p);
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // 6. Encode per file; record column count, discard data
+    // ----------------------------------------------------------------
+    std::map<std::string, uint64_t> sizes;
+    std::mutex queue_mutex, sizes_mutex;
+
+    if (pre.datatype == "numeric") {
+        // ---- Numeric branch: metadata only, no read_pnf_data ----
+        std::vector<fs::path> pnf_paths;
+        for (auto& tab_path : all_fasta_paths) {
+            fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+            if (!fs::exists(pnf_path)) {
+                std::cerr << "Warning: no .pnf for " << tab_path.filename() << ", skipping\n";
+                continue;
+            }
+            pnf_paths.push_back(pnf_path);
+        }
+        int total_files = static_cast<int>(pnf_paths.size());
+        std::queue<int> work_queue;
+        for (int i = 0; i < total_files; ++i) work_queue.push(i);
+        int done_count = 0;
+
+        auto worker = [&]() {
+            while (true) {
+                int idx;
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex);
+                    if (work_queue.empty()) break;
+                    idx = work_queue.front();
+                    work_queue.pop();
+                }
+                std::string stem = pnf_paths[idx].stem().string();
+                try {
+                    auto meta = numeric::read_pnf_metadata(pnf_paths[idx]);
+                    uint64_t count = 0;
+                    for (auto& feat : meta.feature_labels) {
+                        if (!opts.dropout_labels.count(stem + "_" + feat))
+                            ++count;
+                    }
+                    std::lock_guard<std::mutex> lock(sizes_mutex);
+                    sizes[stem] = count;
+                    ++done_count;
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(sizes_mutex);
+                    ++done_count;
+                    std::cerr << "[" << done_count << "/" << total_files << "] FAIL: "
+                              << pnf_paths[idx].filename().string() << " -> " << e.what() << "\n";
+                }
+            }
+        };
+
+        unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_files));
+        if (tc == 0) tc = 1;
+        std::vector<std::thread> threads;
+        threads.reserve(tc);
+        for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(worker);
+        for (auto& t : threads) t.join();
+
+    } else {
+        // ---- FASTA branch: run encoder, count columns, discard result ----
+        std::vector<fs::path> pff_paths;
+        for (auto& fasta_path : all_fasta_paths) {
+            fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+            if (!fs::exists(pff_path)) {
+                std::cerr << "Warning: no .pff for " << fasta_path.filename() << ", skipping\n";
+                continue;
+            }
+            pff_paths.push_back(pff_path);
+        }
+        int total_encode = static_cast<int>(pff_paths.size());
+        bool skip_x = (pre.datatype == "protein" || pre.datatype == "nucleotide");
+
+        std::queue<int> work_queue;
+        for (int i = 0; i < total_encode; ++i) work_queue.push(i);
+        int done_count = 0;
+
+        auto worker = [&]() {
+            while (true) {
+                int idx;
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex);
+                    if (work_queue.empty()) break;
+                    idx = work_queue.front();
+                    work_queue.pop();
+                }
+                std::string stem = pff_paths[idx].stem().string();
+                try {
+                    auto result = pre.use_dlt
+                        ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor,
+                                                  opts.drop_major, opts.dropout_labels, skip_x)
+                        : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor,
+                                              opts.drop_major, opts.dropout_labels, skip_x);
+                    uint64_t ncols = result.columns.size();
+                    // result (including columns) goes out of scope here
+                    std::lock_guard<std::mutex> lock(sizes_mutex);
+                    sizes[stem] = ncols;
+                    ++done_count;
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lock(sizes_mutex);
+                    ++done_count;
+                    std::cerr << "[" << done_count << "/" << total_encode << "] FAIL: "
+                              << pff_paths[idx].filename().string() << " -> " << e.what() << "\n";
+                }
+            }
+        };
+
+        unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_encode));
+        if (tc == 0) tc = 1;
+        std::vector<std::thread> threads;
+        threads.reserve(tc);
+        for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(worker);
+        for (auto& t : threads) t.join();
+    }
+
+    return sizes;
 }
 
 } // namespace pipeline

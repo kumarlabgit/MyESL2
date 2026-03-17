@@ -2,6 +2,7 @@
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
 #include "newick.hpp"
+#include "process_log.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -168,11 +169,23 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
 
     // --- Phase 1: Conversion ---
     int conv_converted = 0, conv_failed = 0;
+    int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0, total_to_convert = 0;
+
+    process_log::Section plog(resolved.output_dir / "process_log.txt", "preprocess");
+    plog.param("list_path",   resolved.list_path)
+        .param("cache_dir",   resolved.cache_dir)
+        .param("datatype",    resolved.datatype)
+        .param("num_threads", (int)resolved.num_threads)
+        .param("min_minor",   resolved.min_minor)
+        .param("use_dlt",     resolved.use_dlt);
+    if (!resolved.tree_path.empty()) plog.param("tree_path", resolved.tree_path);
+
+    try {
 
     if (resolved.datatype == "numeric") {
         // Numeric branch: list entries are tabular files; cache as .pnf
         std::queue<fs::path> convert_queue;
-        int skipped_done = 0, skipped_error = 0;
+        skipped_done = 0; skipped_error = 0;
         for (auto& tab_path : all_fasta_paths) {
             fs::path pnf_path = resolved.cache_dir / (tab_path.stem().string() + ".pnf");
             fs::path err_path = resolved.cache_dir / (tab_path.stem().string() + ".err");
@@ -187,7 +200,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
             convert_queue.push(tab_path);
         }
 
-        int total_to_convert = static_cast<int>(convert_queue.size());
+        total_to_convert = static_cast<int>(convert_queue.size());
         std::cout << "\n--- Phase 1: Conversion (numeric) ---\n";
         std::cout << "  Cache directory:       " << resolved.cache_dir << "\n";
         std::cout << "  To convert:            " << total_to_convert << "\n";
@@ -245,7 +258,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
     } else {
         // FASTA branch
         std::queue<fs::path> convert_queue;
-        int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0;
+        skipped_done = 0; skipped_error = 0; skipped_mismatch = 0;
         for (auto& fasta_path : all_fasta_paths) {
             fs::path pff_path = resolved.cache_dir / (fasta_path.stem().string() + ".pff");
             fs::path err_path = resolved.cache_dir / (fasta_path.stem().string() + ".err");
@@ -263,7 +276,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
             convert_queue.push(fasta_path);
         }
 
-        int total_to_convert = static_cast<int>(convert_queue.size());
+        total_to_convert = static_cast<int>(convert_queue.size());
         std::cout << "\n--- Phase 1: Conversion ---\n";
         std::cout << "  Cache directory:       " << resolved.cache_dir << "\n";
         std::cout << "  To convert:            " << total_to_convert << "\n";
@@ -335,7 +348,17 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
     }
 
     // --- If no tree_path: done ---
-    if (resolved.tree_path.empty()) return {};
+    if (resolved.tree_path.empty()) {
+        std::ostringstream plog_m;
+        plog_m << "files_to_convert = "       << total_to_convert  << "\n"
+               << "files_converted = "        << conv_converted    << "\n"
+               << "files_skipped_done = "     << skipped_done      << "\n"
+               << "files_skipped_error = "    << skipped_error     << "\n"
+               << "files_skipped_mismatch = " << skipped_mismatch  << "\n"
+               << "files_failed = "           << conv_failed        << "\n";
+        plog.finish(plog_m.str());
+        return {};
+    }
 
     // =========================================================================
     // DrPhylo hypothesis generation
@@ -565,7 +588,20 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         hyp_files.push_back(hyp_file);
     }
 
+    std::ostringstream plog_m;
+    plog_m << "files_to_convert = "       << total_to_convert  << "\n"
+           << "files_converted = "        << conv_converted    << "\n"
+           << "files_skipped_done = "     << skipped_done      << "\n"
+           << "files_skipped_error = "    << skipped_error     << "\n"
+           << "files_skipped_mismatch = " << skipped_mismatch  << "\n"
+           << "files_failed = "           << conv_failed        << "\n";
+    plog.finish(plog_m.str());
     return hyp_files;
+
+    } catch (const std::exception& e) {
+        plog.fail(e.what());
+        throw;
+    }
 }
 
 } // namespace pipeline

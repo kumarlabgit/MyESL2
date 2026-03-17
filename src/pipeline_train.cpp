@@ -1,4 +1,5 @@
 #include "pipeline_train.hpp"
+#include "process_log.hpp"
 #include "regression.hpp"
 #include <iostream>
 #include <fstream>
@@ -95,6 +96,22 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         }
         lambdas = load_lambda_list(gen_path);
     }
+
+    process_log::Section plog(opts.output_dir / "process_log.txt", "train");
+    plog.param("method",    opts.method.empty() ? std::string("(none)") : opts.method)
+        .param("precision", std::string(opts.precision == regression::Precision::FP64 ? "fp64" : "fp32"));
+    if (opts.lambda_grid_set)
+        plog.param("lambda_grid", opts.lambda_grid_specs[0] + " / " + opts.lambda_grid_specs[1]);
+    else if (!opts.lambda_file_path.empty())
+        plog.param("lambda_file", opts.lambda_file_path);
+    else
+        plog.param("lambda", std::to_string(opts.lambda[0]) + " " + std::to_string(opts.lambda[1]));
+    plog.param("lambdas_count", (int)lambdas.size());
+    if (opts.nfolds > 0)      plog.param("nfolds",     opts.nfolds);
+    if (opts.min_groups > 0)  plog.param("min_groups", opts.min_groups);
+    for (auto& [k, v] : opts.params) plog.param("param_" + k, v);
+
+    try {
 
     // Step 4: Print Phase 3 header
     std::cout << "\n--- Phase 3: Regression ---\n";
@@ -485,7 +502,15 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     std::cout << "  Phase 3 (regression): " << regr_elapsed << "s\n";
 
     // Step 12: Return result
+    std::ostringstream plog_m;
+    plog_m << "lambdas_run = " << result.weights_paths.size() << "\n";
+    plog.finish(plog_m.str());
     return result;
+
+    } catch (const std::exception& e) {
+        plog.fail(e.what());
+        throw;
+    }
 }
 
 } // namespace pipeline
