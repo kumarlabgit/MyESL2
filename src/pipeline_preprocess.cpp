@@ -1,4 +1,5 @@
 #include "pipeline_preprocess.hpp"
+#include "pipeline_utils.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
 #include "newick.hpp"
@@ -18,29 +19,6 @@
 #include <unordered_map>
 
 namespace pipeline {
-
-// ---------------------------------------------------------------------------
-// Static helper: parse an INI file for chars= under [section]
-// ---------------------------------------------------------------------------
-static std::unordered_set<char> load_datatype_chars(
-    const fs::path& ini_path, const std::string& section)
-{
-    std::ifstream f(ini_path);
-    std::string line, cur;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line[0] == '[') { cur = line.substr(1, line.find(']') - 1); continue; }
-        if (cur == section) {
-            auto eq = line.find('=');
-            if (eq != std::string::npos && line.substr(0, eq) == "chars") {
-                std::unordered_set<char> s;
-                for (char c : line.substr(eq + 1)) s.insert(c);
-                return s;
-            }
-        }
-    }
-    return {};
-}
 
 // ---------------------------------------------------------------------------
 // write_preprocess_config
@@ -125,7 +103,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
             ini = fs::current_path() / "data_defs.ini";
         if (!fs::exists(ini))
             throw std::runtime_error("data_defs.ini not found");
-        allowed_chars = load_datatype_chars(ini, resolved.datatype);
+        allowed_chars = pipeline_utils::load_datatype_chars(ini, resolved.datatype);
         if (allowed_chars.empty())
             throw std::runtime_error(
                 "No chars defined for '" + resolved.datatype + "' in data_defs.ini");
@@ -209,49 +187,18 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         std::cout << "  Worker threads:        " << resolved.num_threads << "\n\n";
 
         if (total_to_convert > 0) {
-            std::mutex queue_mutex, print_mutex;
-            auto conv_start = std::chrono::steady_clock::now();
-
-            auto conv_worker = [&]() {
-                while (true) {
-                    fs::path tab_path;
-                    {
-                        std::lock_guard<std::mutex> lock(queue_mutex);
-                        if (convert_queue.empty()) break;
-                        tab_path = convert_queue.front();
-                        convert_queue.pop();
-                    }
-                    fs::path pnf_path = resolved.cache_dir / (tab_path.stem().string() + ".pnf");
-                    fs::path err_path = resolved.cache_dir / (tab_path.stem().string() + ".err");
-                    try {
-                        numeric::tabular_to_pnf(tab_path, pnf_path);
-                        std::lock_guard<std::mutex> lock(print_mutex);
-                        ++conv_converted;
-                        std::cout << "[" << conv_converted + conv_failed << "/" << total_to_convert
-                                  << "] OK: " << tab_path.filename() << "\n";
-                    } catch (const std::exception& e) {
-                        std::ofstream err_file(err_path);
-                        if (err_file) err_file << e.what() << "\n";
-                        std::lock_guard<std::mutex> lock(print_mutex);
-                        ++conv_failed;
-                        std::cerr << "[" << conv_converted + conv_failed << "/" << total_to_convert
-                                  << "] FAIL: " << tab_path.filename() << " -> " << e.what() << "\n";
-                    }
-                }
-            };
-
-            unsigned int tc = std::min(resolved.num_threads,
-                                       static_cast<unsigned int>(total_to_convert));
-            std::vector<std::thread> threads;
-            threads.reserve(tc);
-            for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(conv_worker);
-            for (auto& t : threads) t.join();
-
+            auto t0 = std::chrono::steady_clock::now();
+            auto [c, f] = pipeline_utils::run_parallel_conversions(
+                std::move(convert_queue), resolved.cache_dir, ".pnf",
+                resolved.num_threads,
+                [](const fs::path& src, const fs::path& dst) {
+                    numeric::tabular_to_pnf(src, dst);
+                });
+            conv_converted += c; conv_failed += f;
             double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - conv_start).count();
+                std::chrono::steady_clock::now() - t0).count();
             std::cout << "\nConversion done. Converted: " << conv_converted
-                      << ", Failed: " << conv_failed
-                      << " (" << elapsed << "s)\n";
+                      << ", Failed: " << conv_failed << " (" << elapsed << "s)\n";
         } else {
             std::cout << "Nothing to convert.\n";
         }
@@ -286,50 +233,19 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         std::cout << "  Worker threads:        " << resolved.num_threads << "\n\n";
 
         if (total_to_convert > 0) {
-            std::mutex queue_mutex, print_mutex;
-            auto conv_start = std::chrono::steady_clock::now();
-
-            auto conv_worker = [&]() {
-                while (true) {
-                    fs::path fasta_path;
-                    {
-                        std::lock_guard<std::mutex> lock(queue_mutex);
-                        if (convert_queue.empty()) break;
-                        fasta_path = convert_queue.front();
-                        convert_queue.pop();
-                    }
-                    fs::path pff_path = resolved.cache_dir / (fasta_path.stem().string() + ".pff");
-                    fs::path err_path = resolved.cache_dir / (fasta_path.stem().string() + ".err");
-                    try {
-                        fasta::fasta_to_pff(fasta_path, pff_path, resolved.orientation,
-                                            resolved.datatype, allowed_chars);
-                        std::lock_guard<std::mutex> lock(print_mutex);
-                        ++conv_converted;
-                        std::cout << "[" << conv_converted + conv_failed << "/" << total_to_convert
-                                  << "] OK: " << fasta_path.filename() << "\n";
-                    } catch (const std::exception& e) {
-                        std::ofstream err_file(err_path);
-                        if (err_file) err_file << e.what() << "\n";
-                        std::lock_guard<std::mutex> lock(print_mutex);
-                        ++conv_failed;
-                        std::cerr << "[" << conv_converted + conv_failed << "/" << total_to_convert
-                                  << "] FAIL: " << fasta_path.filename() << " -> " << e.what() << "\n";
-                    }
-                }
-            };
-
-            unsigned int tc = std::min(resolved.num_threads,
-                                       static_cast<unsigned int>(total_to_convert));
-            std::vector<std::thread> threads;
-            threads.reserve(tc);
-            for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(conv_worker);
-            for (auto& t : threads) t.join();
-
+            auto t0 = std::chrono::steady_clock::now();
+            auto [c, f] = pipeline_utils::run_parallel_conversions(
+                std::move(convert_queue), resolved.cache_dir, ".pff",
+                resolved.num_threads,
+                [&](const fs::path& src, const fs::path& dst) {
+                    fasta::fasta_to_pff(src, dst, resolved.orientation,
+                                        resolved.datatype, allowed_chars);
+                });
+            conv_converted += c; conv_failed += f;
             double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - conv_start).count();
+                std::chrono::steady_clock::now() - t0).count();
             std::cout << "\nConversion done. Converted: " << conv_converted
-                      << ", Failed: " << conv_failed
-                      << " (" << elapsed << "s)\n";
+                      << ", Failed: " << conv_failed << " (" << elapsed << "s)\n";
         } else {
             std::cout << "Nothing to convert.\n";
         }

@@ -27,6 +27,18 @@
 
 namespace fs = std::filesystem;
 
+static std::unordered_set<std::string> load_dropout_labels(const char* path) {
+    std::ifstream df(path);
+    if (!df) throw std::runtime_error("Cannot open dropout file: " + std::string(path));
+    std::unordered_set<std::string> labels;
+    std::string line;
+    while (std::getline(df, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) labels.insert(line);
+    }
+    return labels;
+}
+
 void print_usage(const char* prog_name) {
     const std::string p = prog_name;
     std::cout <<
@@ -200,10 +212,7 @@ int main(int argc, char* argv[]) {
                         throw std::runtime_error("--class-bal must be up, down, or weighted");
                 }
                 else if (arg == "--dropout"    && i+1<argc) {
-                    std::ifstream df(argv[++i]);
-                    if (!df) throw std::runtime_error("Cannot open dropout file: " + std::string(argv[i]));
-                    std::string line;
-                    while (std::getline(df, line)) { if (!line.empty() && line.back()=='\r') line.pop_back(); if (!line.empty()) enc_opts.dropout_labels.insert(line); }
+                    enc_opts.dropout_labels = load_dropout_labels(argv[++i]);
                     std::cout << "Dropout: " << enc_opts.dropout_labels.size() << " features excluded\n";
                 }
                 else if (arg == "--write-features"           && i+1<argc) enc_opts.write_features_path = argv[++i];
@@ -782,10 +791,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--auto-bit-ct"     && i+1<argc) enc_opts.auto_bit_ct  = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele")            enc_opts.drop_major   = true;
                 else if (arg == "--dropout"         && i+1<argc) {
-                    std::ifstream df(argv[++i]);
-                    if (!df) throw std::runtime_error("Cannot open dropout file: " + std::string(argv[i]));
-                    std::string line;
-                    while (std::getline(df, line)) { if (!line.empty() && line.back()=='\r') line.pop_back(); if (!line.empty()) enc_opts.dropout_labels.insert(line); }
+                    enc_opts.dropout_labels = load_dropout_labels(argv[++i]);
                 }
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }

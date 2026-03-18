@@ -1,4 +1,5 @@
 #include "pipeline_evaluate.hpp"
+#include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
@@ -25,24 +26,30 @@ namespace pipeline {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-static std::unordered_set<char> load_datatype_chars_inline(
-    const fs::path& ini_path, const std::string& section)
+static void write_sps_spp_file(
+    const fs::path& out_path,
+    const std::vector<std::string>& seq_ids,
+    const std::vector<double>& preds,      // linear prediction (intercept already added)
+    const std::vector<double>& responses)  // 0 if unlabelled
 {
-    std::ifstream f(ini_path);
-    std::string line, cur;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line[0] == '[') { cur = line.substr(1, line.find(']') - 1); continue; }
-        if (cur == section) {
-            auto eq = line.find('=');
-            if (eq != std::string::npos && line.substr(0, eq) == "chars") {
-                std::unordered_set<char> s;
-                for (char c : line.substr(eq + 1)) s.insert(c);
-                return s;
-            }
-        }
+    auto expit = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
+    double max_ep_pos = 0.5, min_ep_neg = 0.5;
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        double ep = expit(preds[i]);
+        if (responses[i] > 0.0 && ep > max_ep_pos) max_ep_pos = ep;
+        if (responses[i] < 0.0 && ep < min_ep_neg) min_ep_neg = ep;
     }
-    return {};
+    double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
+    double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
+    std::ofstream sf(out_path);
+    sf << std::fixed << std::setprecision(6) << "SeqID\tResponse\tSPS\tSPP\n";
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        double ep  = expit(preds[i]);
+        double spp = responses[i] > 0.0 ? (ep - 0.5) / norm_pos
+                   : responses[i] < 0.0 ? (0.5 - ep) / norm_neg
+                   : (ep - 0.5) / norm_pos;
+        sf << seq_ids[i] << '\t' << responses[i] << '\t' << preds[i] << '\t' << spp << '\n';
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +323,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             fs::path ini = cache_dir.parent_path() / "data_defs.ini";
             if (!fs::exists(ini)) ini = fs::current_path() / "data_defs.ini";
             if (fs::exists(ini)) {
-                allowed_chars = load_datatype_chars_inline(ini, datatype);
+                allowed_chars = pipeline_utils::load_datatype_chars(ini, datatype);
                 if (allowed_chars.empty())
                     std::cerr << "Warning: No chars defined for '" << datatype
                               << "' in data_defs.ini, using universal\n";
@@ -352,42 +359,12 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             if (!convert_queue.empty()) {
                 int total = static_cast<int>(convert_queue.size());
                 std::cout << "Converting " << total << " alignment(s) to PFF...\n";
-                std::mutex queue_mutex, print_mutex;
-                int converted = 0, failed = 0;
-
-                auto worker = [&]() {
-                    while (true) {
-                        fs::path fasta_path;
-                        {
-                            std::lock_guard<std::mutex> lk(queue_mutex);
-                            if (convert_queue.empty()) break;
-                            fasta_path = convert_queue.front();
-                            convert_queue.pop();
-                        }
-                        fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
-                        fs::path err_path = cache_dir / (fasta_path.stem().string() + ".err");
-                        try {
-                            fasta::fasta_to_pff(fasta_path, pff_path,
-                                pff::Orientation::COLUMN_MAJOR, datatype, allowed_chars);
-                            std::lock_guard<std::mutex> lk(print_mutex);
-                            ++converted;
-                            std::cout << "[" << converted + failed << "/" << total << "] OK: "
-                                      << fasta_path.filename() << "\n";
-                        } catch (const std::exception& e) {
-                            std::ofstream ef(err_path);
-                            if (ef) ef << e.what() << "\n";
-                            std::lock_guard<std::mutex> lk(print_mutex);
-                            ++failed;
-                            std::cerr << "[" << converted + failed << "/" << total << "] FAIL: "
-                                      << fasta_path.filename() << " -> " << e.what() << "\n";
-                        }
-                    }
-                };
-
-                unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total));
-                std::vector<std::thread> threads;
-                for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(worker);
-                for (auto& t : threads) t.join();
+                auto [converted, failed] = pipeline_utils::run_parallel_conversions(
+                    std::move(convert_queue), cache_dir, ".pff", num_threads,
+                    [&](const fs::path& src, const fs::path& dst) {
+                        fasta::fasta_to_pff(src, dst,
+                            pff::Orientation::COLUMN_MAJOR, datatype, allowed_chars);
+                    });
                 std::cout << "Converted: " << converted << ", failed: " << failed << "\n";
             }
         }
@@ -537,39 +514,15 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // --- Write SPS_SPP.txt ---
         fs::path sps_path = out_dir / (stem_base + "_SPS_SPP.txt");
         {
-            auto expit = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
-            double max_expit_pos = 0.5, min_expit_neg = 0.5;
-            if (!true_values.empty()) {
-                for (auto& [species, truth] : true_values) {
-                    auto it = species_sums.find(species);
-                    if (it == species_sums.end()) continue;
-                    double pred = intercept_val + it->second;
-                    double ep = expit(pred);
-                    if (truth > 0.0 && ep > max_expit_pos) max_expit_pos = ep;
-                    if (truth < 0.0 && ep < min_expit_neg) min_expit_neg = ep;
-                }
+            std::vector<std::string> sps_ids;
+            std::vector<double> sps_preds, sps_resps;
+            for (auto& [sp, sum] : species_sums) {
+                sps_ids.push_back(sp);
+                sps_preds.push_back(intercept_val + sum);
+                auto tv = true_values.find(sp);
+                sps_resps.push_back(tv != true_values.end() ? tv->second : 0.0);
             }
-            double norm_pos = std::max(max_expit_pos - 0.5, 1e-9);
-            double norm_neg = std::max(0.5 - min_expit_neg, 1e-9);
-
-            std::ofstream sf(sps_path);
-            sf << std::fixed << std::setprecision(6);
-            sf << "SeqID\tResponse\tSPS\tSPP\n";
-            for (auto& [species, sum] : species_sums) {
-                double pred = intercept_val + sum;
-                double ep = expit(pred);
-                double resp = 0.0;
-                auto tv = true_values.find(species);
-                if (tv != true_values.end()) resp = tv->second;
-                double spp;
-                if (resp > 0.0)
-                    spp = (ep - 0.5) / norm_pos;
-                else if (resp < 0.0)
-                    spp = (0.5 - ep) / norm_neg;
-                else
-                    spp = (ep - 0.5) / norm_pos;
-                sf << species << '\t' << resp << '\t' << pred << '\t' << spp << '\n';
-            }
+            write_sps_spp_file(sps_path, sps_ids, sps_preds, sps_resps);
         }
         std::cout << "SPS/SPP -> " << sps_path.string() << "\n";
 
@@ -840,15 +793,6 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
             agg_pred[i] += lam.predictions[i] / static_cast<double>(M);
 
     // Gene scores: median of non-zero values per (gene, seq) cell
-    auto median_nz = [](std::vector<double> vals) -> double {
-        std::vector<double> nz;
-        for (double x : vals)
-            if (!std::isnan(x) && x != 0.0) nz.push_back(x);
-        if (nz.empty()) return 0.0;
-        std::sort(nz.begin(), nz.end());
-        size_t m = nz.size() / 2;
-        return (nz.size() % 2 == 0) ? (nz[m-1] + nz[m]) / 2.0 : nz[m];
-    };
 
     // Build per-model gene→index map for O(1) lookup
     std::vector<std::unordered_map<std::string, size_t>> lam_gene_maps(M);
@@ -871,7 +815,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
                     vals.push_back(v);
                 }
             }
-            agg_gene[g_out][i] = median_nz(vals);
+            agg_gene[g_out][i] = pipeline_utils::median_nonzero(vals);
         }
     }
 
@@ -914,26 +858,8 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
     // Derive eval_SPS_SPP.txt
     // -------------------------------------------------------------------------
     {
-        auto expit = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
-        double max_ep_pos = 0.5, min_ep_neg = 0.5;
-        for (size_t i = 0; i < N; ++i) {
-            double ep = expit(agg_pred[i]);
-            if (ref.responses[i] > 0.0 && ep > max_ep_pos) max_ep_pos = ep;
-            if (ref.responses[i] < 0.0 && ep < min_ep_neg) min_ep_neg = ep;
-        }
-        double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
-        double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
-        std::ofstream sf(run_dir / "eval_SPS_SPP.txt");
-        sf << std::fixed << std::setprecision(6);
-        sf << "SeqID\tResponse\tSPS\tSPP\n";
-        for (size_t i = 0; i < N; ++i) {
-            double ep  = expit(agg_pred[i]);
-            double spp = ref.responses[i] > 0.0 ? (ep - 0.5) / norm_pos
-                       : ref.responses[i] < 0.0 ? (0.5 - ep) / norm_neg
-                       : (ep - 0.5) / norm_pos;
-            sf << ref.seq_ids[i] << '\t' << ref.responses[i] << '\t'
-               << agg_pred[i] << '\t' << spp << '\n';
-        }
+        std::vector<double> resps_d(ref.responses.begin(), ref.responses.end());
+        write_sps_spp_file(run_dir / "eval_SPS_SPP.txt", ref.seq_ids, agg_pred, resps_d);
     }
 
     // -------------------------------------------------------------------------

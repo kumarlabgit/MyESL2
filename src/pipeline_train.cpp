@@ -1,4 +1,5 @@
 #include "pipeline_train.hpp"
+#include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "regression.hpp"
 #include <iostream>
@@ -381,16 +382,6 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
     // Step 11: Grid median (if lambdas.size() > 1 && nfolds == 0)
     if (lambdas.size() > 1 && opts.nfolds == 0) {
-        // Median of non-zero values only; returns 0 if all values are zero
-        auto median_nonzero = [](std::vector<double>& v) -> double {
-            std::vector<double> nz;
-            for (double x : v) if (x != 0.0) nz.push_back(x);
-            if (nz.empty()) return 0.0;
-            std::sort(nz.begin(), nz.end());
-            size_t m = nz.size() / 2;
-            return (nz.size() % 2 == 0) ? (nz[m - 1] + nz[m]) * 0.5 : nz[m];
-        };
-
         // Read all lambda gss.txt files (only non-zero entries appear in files)
         std::unordered_map<std::string, std::vector<double>> gss_all;
         for (size_t li = 0; li < lambdas.size(); ++li) {
@@ -410,7 +401,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         {
             std::vector<std::pair<double, std::string>> med_gss;
             for (auto& [g, v] : gss_all) {
-                double med = median_nonzero(v);
+                double med = pipeline_utils::median_nonzero(v);
                 if (med != 0.0) med_gss.push_back({med, g});
             }
             std::sort(med_gss.rbegin(), med_gss.rend());
@@ -440,7 +431,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             {
                 std::vector<std::pair<std::string, double>> med_pss;
                 for (auto& [k, v] : pss_all) {
-                    double med = median_nonzero(v);
+                    double med = pipeline_utils::median_nonzero(v);
                     if (med != 0.0) med_pss.push_back({k, med});
                 }
                 std::sort(med_pss.begin(), med_pss.end(),
@@ -486,7 +477,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             mf << std::fixed << std::setprecision(6);
             size_t bss_written = 0;
             for (const auto& label : bss_order) {
-                double med = median_nonzero(bss_all[label]);
+                double med = pipeline_utils::median_nonzero(bss_all[label]);
                 if (med != 0.0) {
                     mf << label << '\t' << med << '\n';
                     ++bss_written;

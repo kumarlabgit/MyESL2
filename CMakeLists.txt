@@ -41,19 +41,26 @@ set(SOURCES
 # Create executable
 add_executable(myesl2 ${SOURCES})
 
-# Link OpenBLAS and LAPACK (libraries bundled in include/)
-target_link_libraries(myesl2 PRIVATE
-    ${PROJECT_SOURCE_DIR}/include/libopenblas.lib
-    ${PROJECT_SOURCE_DIR}/include/liblapack.lib
-)
-
-# Copy DLLs next to the executable so they are found at runtime
-add_custom_command(TARGET myesl2 POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${PROJECT_SOURCE_DIR}/include/libopenblas.dll
-        ${PROJECT_SOURCE_DIR}/include/liblapack.dll
-        $<TARGET_FILE_DIR:myesl2>
-)
+# Link OpenBLAS and LAPACK
+if(WIN32)
+    # Bundled libraries on Windows
+    target_link_libraries(myesl2 PRIVATE
+        ${PROJECT_SOURCE_DIR}/include/libopenblas.lib
+        ${PROJECT_SOURCE_DIR}/include/liblapack.lib
+    )
+    # Copy DLLs next to the executable so they are found at runtime
+    add_custom_command(TARGET myesl2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${PROJECT_SOURCE_DIR}/include/libopenblas.dll
+            ${PROJECT_SOURCE_DIR}/include/liblapack.dll
+            $<TARGET_FILE_DIR:myesl2>
+    )
+else()
+    # System-installed BLAS and LAPACK on Linux/macOS
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+    target_link_libraries(myesl2 PRIVATE ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+endif()
 
 # Compiler warnings
 if(MSVC)
