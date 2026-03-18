@@ -1,0 +1,5 @@
+aln\BUSCOfEOG7008JB.domain.aa.aln.trimmed.fasta
+aln\BUSCOfEOG7008JM.domain.aa.aln.trimmed.fasta
+aln\BUSCOfEOG7008JT.domain.aa.aln.trimmed.fasta
+aln\BUSCOfEOG7008K9.domain.aa.aln.trimmed.fasta
+aln\BUSCOfEOG7034RG.domain.aa.aln.trimmed.fasta
