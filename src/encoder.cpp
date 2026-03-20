@@ -219,4 +219,69 @@ AlignmentResult encode_pff_dlt(
     return result;
 }
 
+AlignmentResult encode_raw_sequences(
+    const std::string& gene_name,
+    const std::vector<std::vector<uint8_t>>& sequences,
+    int min_minor)
+{
+    AlignmentResult result;
+    result.stem = gene_name;
+
+    if (sequences.empty()) return result;
+
+    uint32_t N = static_cast<uint32_t>(sequences.size());
+    uint32_t L = static_cast<uint32_t>(sequences[0].size());
+
+    // Per-position working arrays
+    int counts[256];
+
+    for (uint32_t p = 0; p < L; ++p) {
+        std::memset(counts, 0, sizeof(counts));
+        for (uint32_t i = 0; i < N; ++i)
+            ++counts[sequences[i][p]];
+
+        // Collect non-gap residues
+        int non_gap_total = 0;
+        int max_count = 0;
+        int unique_non_gap = 0;
+        uint8_t residues[256];
+        int n_residues = 0;
+
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            if (c == '-') continue;
+            ++unique_non_gap;
+            non_gap_total += counts[c];
+            if (counts[c] > max_count) max_count = counts[c];
+            residues[n_residues++] = static_cast<uint8_t>(c);
+        }
+
+        // PSC filtering (matches Rust build_gene_feature_columns)
+        if (unique_non_gap < 2) continue;                          // monomorphic
+        if (unique_non_gap == non_gap_total) continue;             // all singletons
+        if (max_count == non_gap_total - 1) continue;              // one minority singleton
+        ++result.var_site_count;
+
+        // min_minor check: total non-major must be >= min_minor
+        if (non_gap_total - max_count < min_minor) continue;
+
+        // Sort residues for deterministic column order
+        std::sort(residues, residues + n_residues);
+
+        for (int ri = 0; ri < n_residues; ++ri) {
+            uint8_t base = residues[ri];
+            if (counts[base] < min_minor) continue;
+
+            std::vector<uint8_t> col(N, 0);
+            for (uint32_t i = 0; i < N; ++i)
+                if (sequences[i][p] == base) col[i] = 1;
+
+            result.columns.push_back(std::move(col));
+            result.map.push_back({p, static_cast<char>(base)});
+        }
+    }
+
+    return result;
+}
+
 } // namespace encoder

@@ -16,6 +16,7 @@ struct AlignmentResult {
     std::vector<std::string> missing_sequences; // "stem\tseq_id" for each missing sequence
     bool failed = false;
     std::string error_msg;
+    size_t var_site_count = 0;  // count of variable sites (for PSC group penalty)
 };
 
 // Encode a single PFF file into a one-hot matrix.
@@ -45,5 +46,14 @@ AlignmentResult encode_pff_dlt(
     const std::unordered_set<std::string>& dropout_labels = {},
     bool skip_x = false
 );
+
+// Encode one gene from in-memory sequences (PSC mode).
+// sequences[i] = sequence bytes for species i (may contain gaps from cancellation)
+// gene_name: used as the stem for feature labels
+// min_minor: minimum non-major, non-gap count to keep a position (default 2)
+AlignmentResult encode_raw_sequences(
+    const std::string& gene_name,
+    const std::vector<std::vector<uint8_t>>& sequences,
+    int min_minor = 2);
 
 } // namespace encoder

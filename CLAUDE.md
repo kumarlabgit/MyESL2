@@ -81,6 +81,21 @@ The main data directory containing:
 
 The example alignment files are protein sequences in FASTA format where each species has one sequence per file. Species names match those in A_B_Hyp.txt. MyESL2 supports any genomic dataset in this format (not limited to fungi).
 
+## Modes
+
+MyESL2 has six main commands: `train`, `evaluate`, `drphylo`, `aim`, `psc`, and `visualize`.
+
+### PSC (Paired Species Contrast)
+
+The `psc` mode detects molecular convergence across species using paired species contrasts. It takes FASTA alignments directly (not PFF) and performs gap cancellation, in-memory feature encoding, sparse group lasso training, and cross-combo gene ranking aggregation.
+
+Key files:
+- `include/pipeline_psc.hpp` - Types and `run_psc()` declaration
+- `src/pipeline_psc.cpp` - Full PSC pipeline implementation
+- `include/encoder.hpp` - `encode_raw_sequences()` for in-memory encoding (used by PSC)
+
+PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newick tree parser (`newick.hpp`) without modifications.
+
 ## Code Architecture
 
 ### PFF (Parsed FASTA File) Format

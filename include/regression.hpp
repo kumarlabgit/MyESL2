@@ -16,6 +16,10 @@ public:
     virtual ~RegressionAnalysis() = default;
     virtual void writeSparseMappedWeightsToStream(std::ofstream& weights_out,
                                                    std::ifstream& feature_map) = 0;
+
+    // Direct parameter access (avoids file-based weight extraction)
+    virtual arma::vec getParameters() const = 0;
+    virtual double getInterceptValue() const = 0;
 };
 
 // Factory: creates the appropriate RegressionAnalysis subclass for the given method.

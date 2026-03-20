@@ -24,6 +24,7 @@
 #include "visualizer.hpp"
 #include "newick.hpp"
 #include "regression.hpp"
+#include "pipeline_psc.hpp"
 
 namespace fs = std::filesystem;
 
@@ -51,6 +52,7 @@ void print_usage(const char* prog_name) {
         "  evaluate    Apply a trained model to new data\n"
         "  drphylo     Per-clade DrPhylo analysis\n"
         "  aim         Iterative AIM feature-selection loop\n"
+        "  psc         Paired Species Contrast analysis\n"
         "  visualize   SVG heatmap from gene_predictions.txt\n"
         "  info        Display PFF file metadata\n\n"
 
@@ -132,6 +134,59 @@ void print_usage(const char* prog_name) {
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
         "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
+
+        "-------------------------------------------\n"
+        "PSC\n"
+        "  " + p + " psc <alignments_dir> <output_dir> [options]\n\n"
+        "  Species contrast source (exactly one required):\n"
+        "    --species-groups <file>       species contrast pairs file\n"
+        "    --response-file <file>        single response matrix\n"
+        "    --response-dir <dir>          directory of response matrices\n"
+        "    --auto-pairs-tree <file>      auto-generate from tree (requires --species-pheno-path)\n\n"
+        "  Lambda grid:\n"
+        "    --initial-lambda1 X           (default: 0.01)\n"
+        "    --final-lambda1 X             (default: 0.99)\n"
+        "    --initial-lambda2 X           (default: 0.01)\n"
+        "    --final-lambda2 X             (default: 0.99)\n"
+        "    --lambda-step X               (default: 0.05)\n"
+        "    --use-logspace                use log10 scale instead of linear\n"
+        "    --num-log-points N            (default: 20)\n\n"
+        "  Group penalty:\n"
+        "    --group-penalty-type <type>   median|linear|sqrt|std (default: median)\n"
+        "    --initial-gp-value X          (default: 1)\n"
+        "    --final-gp-value X            (default: 1)\n"
+        "    --gp-step X                   (default: 1)\n"
+        "    --use-default-gp              use sqrt(n_features) regardless\n\n"
+        "  Gap cancellation:\n"
+        "    --use-uncanceled-alignments   skip gap cancellation\n"
+        "    --cancel-only-partner         only cancel affected pairs\n"
+        "    --cancel-tri-allelic          cancel 3+ unique residue positions\n"
+        "    --nix-full-deletions          remove fully deleted positions\n"
+        "    --outgroup-species <name>     outgroup for ancestral filtering\n"
+        "    --min-pairs N                 (default: 2)\n\n"
+        "  Solver:\n"
+        "    --method <name>               (default: sg_lasso)\n"
+        "    --precision fp32|fp64         (default: fp32)\n"
+        "    --maxiter N                   (default: 100)\n"
+        "    --threads N\n"
+        "    --param <key>=<value>         pass option to solver\n\n"
+        "  Output/prediction:\n"
+        "    --output-base-name <name>     (required)\n"
+        "    --prediction-alignments-dir <dir>\n"
+        "    --species-pheno-path <file>\n"
+        "    --no-pred-output              skip species predictions\n"
+        "    --no-genes-output             skip gene ranks\n"
+        "    --show-selected-sites         output selected sites CSV\n"
+        "    --top-rank-frac X             (default: 0.01)\n"
+        "    --limited-genes-list <file>\n\n"
+        "  Null models:\n"
+        "    --make-null-models            response-flipped null\n"
+        "    --make-pair-randomized-null-models\n"
+        "    --num-randomized-alignments N (default: 10)\n\n"
+        "  Auto-pairs:\n"
+        "    --auto-pairs-method <method>  (default: simple_deterministic)\n"
+        "    --auto-pairs-num-alternates N (default: 0)\n"
+        "    --auto-pairs-max-combinations N (default: 1)\n\n"
 
         "-------------------------------------------\n"
         "VISUALIZE\n"
@@ -774,6 +829,98 @@ int main(int argc, char* argv[]) {
                 for (auto& lbl : accumulated_selected) sf << lbl << '\n';
             }
             std::cout << "[AIM] Done. aim_selected.txt written (" << total_selected << " features)\n";
+
+        // =====================================================================
+        } else if (command == "psc") {
+        // =====================================================================
+            if (argc < 4) {
+                std::cerr << "Error: psc requires <alignments_dir> <output_dir>\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+
+            pipeline::psc::PscOptions psc_opts;
+            psc_opts.alignments_dir = argv[2];
+            psc_opts.output_dir     = argv[3];
+
+            for (int i = 4; i < argc; ++i) {
+                std::string arg = argv[i];
+                // Species contrast source
+                if      (arg == "--species-groups"    && i+1<argc) psc_opts.species_groups_file = argv[++i];
+                else if (arg == "--response-file"     && i+1<argc) psc_opts.response_file       = argv[++i];
+                else if (arg == "--response-dir"      && i+1<argc) psc_opts.response_dir        = argv[++i];
+                else if (arg == "--auto-pairs-tree"   && i+1<argc) psc_opts.auto_pairs_tree     = argv[++i];
+                // Lambda grid
+                else if (arg == "--initial-lambda1"   && i+1<argc) psc_opts.initial_lambda1 = std::stod(argv[++i]);
+                else if (arg == "--final-lambda1"     && i+1<argc) psc_opts.final_lambda1   = std::stod(argv[++i]);
+                else if (arg == "--initial-lambda2"   && i+1<argc) psc_opts.initial_lambda2 = std::stod(argv[++i]);
+                else if (arg == "--final-lambda2"     && i+1<argc) psc_opts.final_lambda2   = std::stod(argv[++i]);
+                else if (arg == "--lambda-step"       && i+1<argc) psc_opts.lambda_step     = std::stod(argv[++i]);
+                else if (arg == "--use-logspace")                   psc_opts.use_logspace    = true;
+                else if (arg == "--num-log-points"    && i+1<argc) psc_opts.num_log_points  = static_cast<size_t>(std::stoi(argv[++i]));
+                // Group penalty
+                else if (arg == "--group-penalty-type" && i+1<argc) psc_opts.group_penalty_type = argv[++i];
+                else if (arg == "--initial-gp-value"  && i+1<argc) psc_opts.initial_gp_value = std::stod(argv[++i]);
+                else if (arg == "--final-gp-value"    && i+1<argc) psc_opts.final_gp_value   = std::stod(argv[++i]);
+                else if (arg == "--gp-step"           && i+1<argc) psc_opts.gp_step          = std::stod(argv[++i]);
+                else if (arg == "--use-default-gp")                 psc_opts.use_default_gp  = true;
+                // Gap cancellation
+                else if (arg == "--use-uncanceled-alignments")      psc_opts.use_uncanceled_alignments = true;
+                else if (arg == "--cancel-only-partner")            psc_opts.cancel_only_partner       = true;
+                else if (arg == "--cancel-tri-allelic")             psc_opts.cancel_tri_allelic        = true;
+                else if (arg == "--nix-full-deletions")             psc_opts.nix_full_deletions        = true;
+                else if (arg == "--outgroup-species"   && i+1<argc) psc_opts.outgroup_species          = argv[++i];
+                else if (arg == "--min-pairs"          && i+1<argc) psc_opts.min_pairs = static_cast<size_t>(std::stoi(argv[++i]));
+                // Solver
+                else if (arg == "--method"             && i+1<argc) psc_opts.method         = argv[++i];
+                else if (arg == "--precision"          && i+1<argc) {
+                    std::string p = argv[++i];
+                    if (p != "fp32" && p != "fp64") throw std::runtime_error("--precision must be fp32 or fp64");
+                    psc_opts.precision_str = p;
+                }
+                else if (arg == "--maxiter"            && i+1<argc) psc_opts.maxiter  = std::stoi(argv[++i]);
+                else if (arg == "--threads"            && i+1<argc) psc_opts.threads  = static_cast<unsigned>(std::stoi(argv[++i]));
+                else if (arg == "--param"              && i+1<argc) {
+                    std::string kv = argv[++i];
+                    auto eq = kv.find('=');
+                    if (eq != std::string::npos)
+                        psc_opts.params[kv.substr(0, eq)] = kv.substr(eq + 1);
+                }
+                // Output/prediction
+                else if (arg == "--output-base-name"          && i+1<argc) psc_opts.output_base_name         = argv[++i];
+                else if (arg == "--prediction-alignments-dir" && i+1<argc) psc_opts.prediction_alignments_dir = argv[++i];
+                else if (arg == "--species-pheno-path"        && i+1<argc) psc_opts.species_pheno_path        = argv[++i];
+                else if (arg == "--no-pred-output")                         psc_opts.no_pred_output            = true;
+                else if (arg == "--no-genes-output")                        psc_opts.no_genes_output           = true;
+                else if (arg == "--show-selected-sites")                    psc_opts.show_selected_sites       = true;
+                else if (arg == "--top-rank-frac"             && i+1<argc) psc_opts.top_rank_frac             = std::stod(argv[++i]);
+                else if (arg == "--limited-genes-list"        && i+1<argc) psc_opts.limited_genes_list        = argv[++i];
+                // Null models
+                else if (arg == "--make-null-models")                        psc_opts.make_null_models                    = true;
+                else if (arg == "--make-pair-randomized-null-models")        psc_opts.make_pair_randomized_null_models    = true;
+                else if (arg == "--num-randomized-alignments" && i+1<argc) psc_opts.num_randomized_alignments = static_cast<size_t>(std::stoi(argv[++i]));
+                // Auto-pairs
+                else if (arg == "--auto-pairs-method"         && i+1<argc) psc_opts.auto_pairs_method          = argv[++i];
+                else if (arg == "--auto-pairs-num-alternates" && i+1<argc) psc_opts.auto_pairs_num_alternates  = std::stoi(argv[++i]);
+                else if (arg == "--auto-pairs-max-combinations" && i+1<argc) psc_opts.auto_pairs_max_combinations = std::stoi(argv[++i]);
+                else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
+            }
+
+            // Validate: exactly one contrast source or auto-pairs
+            int sources = 0;
+            if (!psc_opts.species_groups_file.empty()) ++sources;
+            if (!psc_opts.response_file.empty())       ++sources;
+            if (!psc_opts.response_dir.empty())        ++sources;
+            if (!psc_opts.auto_pairs_tree.empty())     ++sources;
+            if (sources == 0)
+                throw std::runtime_error("PSC requires one of: --species-groups, --response-file, --response-dir, --auto-pairs-tree");
+            if (sources > 1)
+                throw std::runtime_error("PSC: specify only one of --species-groups, --response-file, --response-dir, --auto-pairs-tree");
+
+            if (psc_opts.output_base_name.empty())
+                throw std::runtime_error("PSC requires --output-base-name");
+
+            pipeline::psc::run_psc(psc_opts);
 
         // =====================================================================
         } else if (command == "encode-sizes") {

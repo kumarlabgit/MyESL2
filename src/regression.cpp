@@ -82,6 +82,13 @@ public:
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
     }
+
+    arma::vec getParameters() const override {
+        return arma::conv_to<arma::vec>::from(model_->Parameters());
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
+    }
 };
 
 // ---- SGLassoFP64 wrapper ----------------------------------------------------
@@ -124,6 +131,13 @@ public:
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
     }
+
+    arma::vec getParameters() const override {
+        return model_->Parameters();
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
+    }
 };
 
 // ---- SGLassoLeastRFP32 wrapper ----------------------------------------------
@@ -161,6 +175,13 @@ public:
                                           std::ifstream& map_in) override
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
+    }
+
+    arma::vec getParameters() const override {
+        return arma::conv_to<arma::vec>::from(model_->Parameters());
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
     }
 };
 
@@ -204,6 +225,13 @@ public:
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
     }
+
+    arma::vec getParameters() const override {
+        return model_->Parameters();
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
+    }
 };
 
 // ---- OLSGLassoLeastRFP32 wrapper --------------------------------------------
@@ -243,6 +271,13 @@ public:
                                           std::ifstream& map_in) override
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
+    }
+
+    arma::vec getParameters() const override {
+        return arma::conv_to<arma::vec>::from(model_->Parameters());
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
     }
 };
 
@@ -286,6 +321,13 @@ public:
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
     }
+
+    arma::vec getParameters() const override {
+        return model_->Parameters();
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
+    }
 };
 
 // ---- OLSGLassoLogisticRFP32 wrapper -----------------------------------------
@@ -325,6 +367,13 @@ public:
                                           std::ifstream& map_in) override
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
+    }
+
+    arma::vec getParameters() const override {
+        return arma::conv_to<arma::vec>::from(model_->Parameters());
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
     }
 };
 
@@ -367,6 +416,13 @@ public:
                                           std::ifstream& map_in) override
     {
         model_->writeSparseMappedWeightsToStream(out, map_in);
+    }
+
+    arma::vec getParameters() const override {
+        return model_->Parameters();
+    }
+    double getInterceptValue() const override {
+        return model_->InterceptValue();
     }
 };
 

@@ -287,6 +287,140 @@ Iteration stops when the accuracy threshold is met or `--aim-max-iter` is reache
 
 ---
 
+### `psc` — Paired Species Contrast analysis
+
+Detects molecular convergence across species using paired species contrasts. Takes FASTA alignments directly (no PFF conversion), applies gap cancellation, encodes features in memory, runs sparse group lasso across multiple species contrast combinations, and aggregates gene rankings.
+
+```
+myesl2 psc <alignments_dir> <output_dir> [options]
+```
+
+**Required arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `alignments_dir` | Directory containing FASTA alignment files (.fas/.fasta/.fa/.faa) |
+| `output_dir` | Output directory (created if needed) |
+| `--output-base-name <name>` | Base name for output files |
+
+**Species contrast source (exactly one required):**
+
+| Flag | Description |
+|------|-------------|
+| `--species-groups <file>` | File with alternating convergent/control species lines (one per line, comma-separated for alternates) |
+| `--response-file <file>` | Single response matrix (species,value per line) |
+| `--response-dir <dir>` | Directory of response matrices (one combo per file) |
+| `--auto-pairs-tree <file>` | Auto-generate pairs from Newick tree + phenotypes (requires `--species-pheno-path`) |
+
+**Lambda grid options:**
+
+| Flag | Description |
+|------|-------------|
+| `--initial-lambda1 X` | Start of lambda1 range (default: 0.01) |
+| `--final-lambda1 X` | End of lambda1 range (default: 0.99) |
+| `--initial-lambda2 X` | Start of lambda2 range (default: 0.01) |
+| `--final-lambda2 X` | End of lambda2 range (default: 0.99) |
+| `--lambda-step X` | Step size for linear grid (default: 0.05) |
+| `--use-logspace` | Use log10-spaced grid instead of linear |
+| `--num-log-points N` | Points per dimension in logspace (default: 20) |
+
+**Group penalty options:**
+
+| Flag | Description |
+|------|-------------|
+| `--group-penalty-type <type>` | `median` (default), `linear`, `sqrt`, or `std` |
+| `--initial-gp-value X` | Start of penalty sweep (for `linear` type) |
+| `--final-gp-value X` | End of penalty sweep |
+| `--gp-step X` | Penalty sweep step |
+| `--use-default-gp` | Use sqrt(n_features) regardless of type |
+
+**Gap cancellation options:**
+
+| Flag | Description |
+|------|-------------|
+| `--use-uncanceled-alignments` | Skip gap cancellation entirely |
+| `--cancel-only-partner` | Only cancel the affected pair (not all species) at gapped positions |
+| `--cancel-tri-allelic` | Cancel positions with 3+ unique residues (4-species combos only) |
+| `--nix-full-deletions` | Skip genes where any combo species is missing |
+| `--outgroup-species <name>` | Cancel positions where control species differ from outgroup |
+| `--min-pairs N` | Minimum intact pairs required (default: 2) |
+
+**Solver options:**
+
+| Flag | Description |
+|------|-------------|
+| `--method <name>` | Regression method (default: `sg_lasso`) |
+| `--precision fp32\|fp64` | Arithmetic precision (default: fp32) |
+| `--maxiter N` | Max solver iterations (default: 100) |
+| `--threads N` | Worker threads |
+| `--param <key>=<value>` | Pass option to solver |
+
+**Prediction/output options:**
+
+| Flag | Description |
+|------|-------------|
+| `--prediction-alignments-dir <dir>` | Separate alignments for prediction species |
+| `--species-pheno-path <file>` | Species phenotype file for prediction evaluation |
+| `--no-pred-output` | Skip species prediction output |
+| `--no-genes-output` | Skip gene ranks output |
+| `--show-selected-sites` | Output selected sites CSV |
+| `--top-rank-frac X` | Fraction for "top ranked" threshold (default: 0.01) |
+| `--limited-genes-list <file>` | Only process genes in this list |
+
+**Null model options:**
+
+| Flag | Description |
+|------|-------------|
+| `--make-null-models` | Generate response-flipped null models |
+| `--make-pair-randomized-null-models` | Randomize pairs at each position |
+| `--num-randomized-alignments N` | Number of randomized replicates (default: 10) |
+
+**Auto-pairs options:**
+
+| Flag | Description |
+|------|-------------|
+| `--auto-pairs-method <method>` | Pair selection method (default: `simple_deterministic`) |
+| `--auto-pairs-num-alternates N` | Number of alternate species per pair side (default: 0) |
+| `--auto-pairs-max-combinations N` | Max Cartesian product combos (default: 1) |
+
+**PSC output files:**
+
+```
+output_dir/
+├── <base>_gene_ranks.csv           # Gene rankings (multimatrix: num_combos_ranked, etc.)
+├── <base>_species_predictions.csv  # SPS for prediction species
+└── <base>_selected_sites.csv       # Selected alignment positions (if --show-selected-sites)
+```
+
+**Species groups file format:**
+```
+ConvergentSpecies1              # Line 1: convergent member(s) of pair 1
+ControlSpecies1                 # Line 2: control member(s) of pair 1
+ConvergentSpecies2,AltConv2     # Line 3: convergent member(s) of pair 2 (with alternate)
+ControlSpecies2                 # Line 4: control member(s) of pair 2
+```
+Must have an even number of non-empty lines. Multiple species per line (comma-separated) generates Cartesian product combinations.
+
+**Example:**
+```bash
+# Basic PSC with species groups
+myesl2 psc alignments/ output/ \
+    --species-groups species_pairs.txt \
+    --output-base-name analysis \
+    --use-logspace --num-log-points 10 \
+    --method sg_lasso
+
+# PSC with auto-pairs from phylogenetic tree
+myesl2 psc alignments/ output/ \
+    --auto-pairs-tree tree.nwk \
+    --species-pheno-path phenotypes.csv \
+    --output-base-name autopairs \
+    --use-logspace --num-log-points 10 \
+    --method sg_lasso --show-selected-sites
+```
+
+---
+
 ### `info` — Display PFF file metadata
 
 ```

@@ -55,6 +55,9 @@ class OLSGLassoLeastRFP32
   //! Modify the parameters (the b vector).
   arma::fvec& Parameters() { return parameters; }
 
+  //! Return the intercept value.
+  double InterceptValue() const { return intercept_value; }
+
   //! Return the Tikhonov regularization parameter for ridge regression.
   double* Lambda() { return lambda; }
 
