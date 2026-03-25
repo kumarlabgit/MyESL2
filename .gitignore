@@ -47,6 +47,10 @@ fungi_analysis.exe
 *.dll
 *.lib
 
+# Vendored Armadillo headers (use system install)
+include/armadillo
+include/armadillo_bits/
+
 old_src/
 
 # PFF cache and output directories
