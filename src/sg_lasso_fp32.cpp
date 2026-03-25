@@ -3,6 +3,7 @@
 #include "sg_lasso_helpers.hpp"
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 
 
 SGLassoFP32::SGLassoFP32(const arma::fmat& features,
@@ -194,34 +195,74 @@ arma::frowvec& SGLassoFP32::Train(const arma::fmat& A,
         }
   }
 
-  /*
-   * We want to calculate the a_i coefficients of:
-   * \sum_{i=0}^n (a_i * x_i^i)
-   * In order to get the intercept value, we will add a row of ones.
-   */
-
-  // We store the number of rows and columns of the features.
-  // Reminder: Armadillo stores the data transposed from how we think of it,
-  //           that is, columns are actually rows (see: column major order).
-  const size_t nCols = A.n_rows;
-
-//  arma::mat p = features;
-//  arma::rowvec r = responses;
-
-
-  arma::mat& ind = opts_ind;
-  arma::fcolvec y = responses.t();
-  double* z;
-  z = this->Lambda();
-  double lambda2_max;
   const size_t m = A.n_rows;
   const size_t n = A.n_cols;
-  arma::fcolvec m_ones(m, arma::fill::ones);
-  arma::fcolvec m_zeros(m, arma::fill::zeros);
-  arma::fcolvec n_zeros(n, arma::fill::zeros);
 
+  arma::mat& ind = opts_ind;
+
+  // Pre-compute flattened group structure
+  const int n_groups = static_cast<int>(ind.n_rows);
+  std::vector<double> ind_base_weights(n_groups);
+  std::vector<double> ind_flat((n_groups + 1) * 3);
+  ind_flat[0] = -1.0;  ind_flat[1] = -1.0;  ind_flat[2] = 0.0;
+  for (int r = 0; r < n_groups; ++r) {
+      ind_flat[(r + 1) * 3 + 0] = ind(r, 0);
+      ind_flat[(r + 1) * 3 + 1] = ind(r, 1);
+      ind_flat[(r + 1) * 3 + 2] = ind(r, 2);
+      ind_base_weights[r] = ind(r, 2);
+  }
+  const int ind_flat_nodes = n_groups + 1;
+  auto update_ind_flat = [&](double l1_val, double l2_val) {
+      ind_flat[2] = l1_val;
+      for (int r = 0; r < n_groups; ++r)
+          ind_flat[(r + 1) * 3 + 2] = ind_base_weights[r] * l2_val;
+  };
+  std::vector<double> ind_flat_base(n_groups * 3);
+  for (int r = 0; r < n_groups; ++r) {
+      ind_flat_base[r * 3 + 0] = ind(r, 0);
+      ind_flat_base[r * 3 + 1] = ind(r, 1);
+      ind_flat_base[r * 3 + 2] = ind(r, 2);
+  }
+
+  // ── Native flat-array implementation ─────────────────────────────────────────
+  // A is column-major (Armadillo default): A(i,j) = A_ptr[j*m + i]
+  const float* A_ptr = A.memptr();
+
+  // Helper: out = A * x_in  (m×n × n×1 = m×1)
+  auto matvec = [&](const float* x_in, float* out) {
+    std::memset(out, 0, m * sizeof(float));
+    for (size_t j = 0; j < n; j++) {
+      float xj = x_in[j];
+      const float* col = A_ptr + j * m;
+      for (size_t i = 0; i < m; i++) out[i] += col[i] * xj;
+    }
+  };
+
+  // Helper: out = A^T * b_in  (n×m × m×1 = n×1)
+  auto matvec_t = [&](const float* b_in, float* out) {
+    for (size_t j = 0; j < n; j++) {
+      float sum = 0;
+      const float* col = A_ptr + j * m;
+      for (size_t i = 0; i < m; i++) sum += col[i] * b_in[i];
+      out[j] = sum;
+    }
+  };
+
+  // Helper: float dot product (matches Armadillo's float accumulation)
+  auto dotf = [](const float* a, const float* b, size_t len) -> float {
+    float sum = 0;
+    for (size_t i = 0; i < len; i++) sum += a[i] * b[i];
+    return sum;
+  };
+
+  // Convert responses to flat array
+  std::vector<float> y(m);
+  for (size_t i = 0; i < m; i++) y[i] = responses(i);
+
+  double* z = this->Lambda();
   double lambda1 = z[0];
   double lambda2 = z[1];
+  double lambda2_max;
 
   if (lambda1<0 || lambda2<0)
   {
@@ -233,185 +274,186 @@ arma::frowvec& SGLassoFP32::Train(const arma::fmat& A,
 	throw std::invalid_argument("\n Check opts_ind, expected 3 cols\n");
   }
 
-  //sgLogisticR.m:177-195
-  arma::fcolvec sample_weights(m);
-  arma::uvec p_flag = arma::find(y == 1);
-  arma::uvec not_p_flag = arma::find(y != 1);
+  // Sample weights and class detection
+  std::vector<float> sw(m);
+  int n_pos = 0, n_neg = 0;
+  for (size_t i = 0; i < m; i++) {
+    if (y[i] == 1.0f) n_pos++; else n_neg++;
+  }
+
   double m1, m2;
   if (opts_sWeight.size() == 2)
   {
     std::cout << "Using sample weights of " << opts_sWeight[0] << "(positive) and " << opts_sWeight[1] << "(negative)" << std::endl;
-    m1 = p_flag.n_elem * opts_sWeight[0];
-    m2 = not_p_flag.n_elem * opts_sWeight[1];
-    sample_weights(p_flag).fill(opts_sWeight[0] / (m1 + m2));
-    sample_weights(not_p_flag).fill(opts_sWeight[1] / (m1 + m2));
-
+    double total = n_pos * (double)opts_sWeight[0] + n_neg * (double)opts_sWeight[1];
+    for (size_t i = 0; i < m; i++) {
+      sw[i] = (y[i] == 1.0f) ? (float)(opts_sWeight[0] / total) : (float)(opts_sWeight[1] / total);
+    }
   } else if (opts_sWeight.size() != 0) {
     std::cout << "Invalid sample weights specified, defaulting to unweighted samples." << std::endl;
-    sample_weights.fill(1.0/m);
+    for (size_t i = 0; i < m; i++) sw[i] = 1.0f / m;
   } else {
-  sample_weights.fill(1.0/m);
+    for (size_t i = 0; i < m; i++) sw[i] = 1.0f / m;
   }
 
-//std::cout << "1..." << std::endl;
+  // m1 = sum(sw[positive]) / sum(sw)
+  float sw_pos_sum = 0, sw_total = 0;
+  for (size_t i = 0; i < m; i++) {
+    sw_total += sw[i];
+    if (y[i] == 1.0f) sw_pos_sum += sw[i];
+  }
+  m1 = (double)sw_pos_sum / (double)sw_total;
+  m2 = 1.0 - m1;
 
-  //sgLogisticR.m:200-202
-  arma::fcolvec b(m);
-//std::cout << "p_flag.n_elem:" << p_flag.n_elem << std::endl;
-  //double m1 = static_cast<double>(p_flag.n_elem) / (double)m;
-  m1 = arma::sum(sample_weights(p_flag)) / arma::sum(sample_weights);
-  m2 = 1 - m1;
-
-  //sgLogisticR.m:205-241
-  double* lambda;
+  // Lambda initialization
+  double* lambda_ptr;
+  std::vector<float> b_vec(m);
 
   if (opts_rFlag == 0)
   {
-	  lambda = z;
+	  lambda_ptr = z;
   } else {
 	 if (lambda1<0 || lambda1>1 || lambda2<0 || lambda2>1)
 	 {
 		throw std::invalid_argument("\n opts.rFlag=1, so z should be in [0,1]\n");
 	 }
-	 b(p_flag) = arma::fcolvec(p_flag.n_elem, arma::fill::ones) * m2;   b(not_p_flag) = arma::fcolvec(not_p_flag.n_elem, arma::fill::ones) * (-m1);
-	 b = b % sample_weights;
+	 // b(p_flag) = m2 * sw, b(not_p_flag) = -m1 * sw
+	 for (size_t i = 0; i < m; i++) {
+	   b_vec[i] = (y[i] == 1.0f) ? (float)(m2 * sw[i]) : (float)(-m1 * sw[i]);
+	 }
 
-	 arma::fmat ATb = A.t() * b;
+	 // ATb = A^T * b
+	 std::vector<float> ATb(n);
+	 matvec_t(b_vec.data(), ATb.data());
 
-	 arma::fmat temp = arma::abs(ATb);
+	 // temp = abs(ATb), lambda1_max = max(temp)
+	 std::vector<float> temp(n);
+	 float lambda1_max_f = 0;
+	 for (size_t j = 0; j < n; j++) {
+	   temp[j] = std::abs(ATb[j]);
+	   if (temp[j] > lambda1_max_f) lambda1_max_f = temp[j];
+	 }
 
-	 double lambda1_max = arma::as_scalar(arma::max(temp));
+	 lambda1 = lambda1 * (double)lambda1_max_f;
 
-	 lambda1 = lambda1 * lambda1_max;
+	 // temp = max(temp - lambda1, 0)
+	 for (size_t j = 0; j < n; j++) {
+	   temp[j] = std::max(temp[j] - (float)lambda1, 0.0f);
+	 }
 
-	 temp = arma::max(temp - lambda1, n_zeros);
-
-	 lambda2_max = computeLambda2Max(temp.t(), n, ind, ind.n_rows);
-
+	 lambda2_max = computeLambda2Max_flat(temp.data(), n, ind_flat_base.data(), n_groups);
 	 lambda2 = lambda2 * lambda2_max;
-std::cout << "lambda1_max: " << lambda1_max << " lambda1: " << lambda1 << std::endl;
-std::cout << "lambda2_max: " << lambda2_max << " lambda2: " << lambda2 << std::endl;
   }
 
-  //sgLogisticR.m:243-261
-  arma::fcolvec x(n, arma::fill::zeros);   //x.fill(0);
-//std::cout << "4..." << std::endl;
+  // Initial state
+  std::vector<float> x(n, 0.0f);
   double c = std::log(m1/m2);
+  std::vector<float> Ax(m, 0.0f);  // A * x = 0 initially
 
-
-//std::cout << "A_cols:" << A.n_cols << " A_rows:" << A.n_rows << " x_cols:" << x.n_cols << " x_rows:" << x.n_rows << std::endl;
-
-  //sgLogisticR.m:264-271
-  arma::fmat Ax = A * x;
-
-//std::cout << "Ax_cols:" << Ax.n_cols << " Ax_rows:" << Ax.n_rows << std::endl;
-
-//std::cout << "2..." << std::endl;
-
-  //sgLogisticR.m:277-290
   int bFlag = 0;
   double L = 1.0/m;
 
-  arma::fcolvec weighty = sample_weights % y;
+  // weighty = sw % y
+  std::vector<float> weighty(m);
+  for (size_t i = 0; i < m; i++) weighty[i] = sw[i] * y[i];
 
-  arma::fcolvec xp = x;   arma::fcolvec Axp = Ax;   arma::fcolvec xxp(n, arma::fill::zeros);
-  double cp = c;   double ccp = 0;
+  std::vector<float> xp(n, 0.0f);
+  std::vector<float> Axp(m, 0.0f);
+  std::vector<float> xxp(n, 0.0f);
+  double cp = c, ccp = 0;
+  double alphap = 0, alpha = 1;
 
-  double alphap = 0;   double alpha = 1;
-
-
-  //sgLogisticR.m:292-442
+  // Working vectors
   double beta, sc, gc, fun_s, fun_x, l_sum, r_sum, tree_norm;
-//  arma::mat As;
-  //arma::colvec aa, bb, v, s, prob;
-  arma::fcolvec aa, bb, v, s, prob;
-  arma::rowvec ValueL(opts_maxIter);
-  arma::rowvec funVal(opts_maxIter);
-  //arma::mat ind_work(ind.n_rows + 1, ind.n_cols);
+  std::vector<float> s(n), v(n), As(m), g(n), aa(m), bb(m), prob(m);
+  std::vector<double> ValueL(opts_maxIter);
+  std::vector<double> funVal(opts_maxIter);
 
-//std::cout << "3..." << std::endl;
-
-std::cout << "m:" << m << " n:" << n << std::endl;
-
-  for (int iterStep = 0; iterStep < opts_maxIter; iterStep = iterStep + 1)
+  for (int iterStep = 0; iterStep < opts_maxIter; iterStep++)
   {
-    //sgLogisticR.m:293-304
-//std::cout << "4(" << iterStep << ")..." << std::endl;
-    beta = (alphap - 1)/alpha;   s = x + (xxp * beta);   sc = c + (beta * ccp);
-//std::cout << "sc:" << sc << " c:" << c << " beta:" << beta << " ccp:" << ccp << " m1:" << m1 << " m2:" << m2 << std::endl;
-//std::cout << "4.1..." << std::endl;
-//std::cout << "As_elems:" << As.n_elem << "Ax_elems:" << Ax.n_elem << " Axp_elems:" << Axp.n_elem << " beta:" << beta << std::endl;
-    arma::fmat As = Ax + ((Ax - Axp) * beta);
-//std::cout << "4.2..." << std::endl;
-    aa = -y % (As + sc);
-//std::cout << "4.3..." << std::endl;
-    //sgLogisticR.m:306-316
-    bb = arma::max(aa,m_zeros);
-//std::cout << "5..." << std::endl;
-    fun_s = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb));
-//std::cout << "5.1..." << std::endl;
-    prob = m_ones / (m_ones + arma::exp(aa));
-//std::cout << "5.2..." << std::endl;
-    b = -weighty % (m_ones - prob);
-//std::cout << "5.3..." << std::endl;
-    gc = arma::sum(b);
-//std::cout << "5.4..." << std::endl;
-    //sgLogisticR.m:318-329
-//std::cout << "A_rows:" << A.n_rows << " A_cols:" << A.n_cols << " b_elems:" << b.n_elem << std::endl;
-    arma::fmat g = A.t() * b;
-//std::cout << "5.5..." << std::endl;
-    xp = x;   Axp = Ax;   cp = c;
-//std::cout << "5.6..." << std::endl;
-    //sgLogisticR.m:331-378
-//std::cout << "6..." << std::endl;
+    beta = (alphap - 1)/alpha;
+    for (size_t i = 0; i < n; i++) s[i] = x[i] + xxp[i] * (float)beta;
+    sc = c + beta * ccp;
+
+    // As = Ax + (Ax - Axp) * beta
+    for (size_t i = 0; i < m; i++) As[i] = Ax[i] + (Ax[i] - Axp[i]) * (float)beta;
+
+    // aa = -y % (As + sc)
+    for (size_t i = 0; i < m; i++) aa[i] = -y[i] * (As[i] + (float)sc);
+
+    // bb = max(aa, 0)
+    for (size_t i = 0; i < m; i++) bb[i] = std::max(aa[i], 0.0f);
+
+    // fun_s = sw^T * (log(exp(-bb) + exp(aa - bb)) + bb)
+    {
+      float acc = 0;
+      for (size_t i = 0; i < m; i++) {
+        float val = logf(expf(-bb[i]) + expf(aa[i] - bb[i])) + bb[i];
+        acc += sw[i] * val;
+      }
+      fun_s = (double)acc;
+    }
+
+    // prob = 1 / (1 + exp(aa))
+    for (size_t i = 0; i < m; i++) prob[i] = 1.0f / (1.0f + expf(aa[i]));
+
+    // b = -weighty % (1 - prob)
+    for (size_t i = 0; i < m; i++) b_vec[i] = -weighty[i] * (1.0f - prob[i]);
+
+    // gc = sum(b)
+    {
+      float acc = 0;
+      for (size_t i = 0; i < m; i++) acc += b_vec[i];
+      gc = (double)acc;
+    }
+
+    // g = A^T * b
+    matvec_t(b_vec.data(), g.data());
+
+    // Save
+    std::memcpy(xp.data(), x.data(), n * sizeof(float));
+    std::memcpy(Axp.data(), Ax.data(), m * sizeof(float));
+    cp = c;
+
+    // Line search
     while (true)
     {
-      v = s - g/L; c = sc - gc/L;
-//std::cout << "7..." << std::endl;
-      //sgLogisticR.m:337-338
-      arma::mat ind_work = ind;
-      ind_work.col(2) = ind_work.col(2) * (lambda2/L);
-      arma::rowvec first_row = {-1, -1, lambda1/L};
-      ind_work.insert_rows(0, first_row);
-      //ind_work(0,0) = -1;
-      //ind_work(0,1) = -1;
-      //ind_work(0,2) = lambda1/L;
-      //ind_work.submat(1,0,ind_work.n_rows,1) = ind.cols(0,1);
-      //ind_work(arma::span(1,ind_work.n_rows),2) = ind.col(2) * (lambda2/L);
+      // v = s - g/L;  c = sc - gc/L
+      float invL = (float)(1.0 / L);
+      for (size_t i = 0; i < n; i++) v[i] = s[i] - g[i] * invL;
+      c = sc - gc/L;
 
-//std::cout << "8..." << std::endl;
-      //sgLogisticR.m:340-342
-      x = altra(v, n, ind_work, ind_work.n_rows);
-//      arma::colvec temp_x = altra(v, n, ind_work, ind_work.n_rows);
-//std::cout << "temp_x_rows:" << temp_x.n_rows << " temp_x_cols:" << temp_x.n_cols << " x_rows:" << x.n_rows << " x_cols:" << x.n_cols << std::endl;
-//std::cout << "9..." << std::endl;
-      v = x - s;
-      int nonzero_x_count = 0;
-      for (int i = 0; i < x.n_rows; i = i + 1)
+      // Proximal operator
+      update_ind_flat(lambda1/L, lambda2/L);
+      altra_inplace(x.data(), v.data(), n, ind_flat.data(), ind_flat_nodes);
+
+      // v = x - s (reuse v as difference for r_sum/l_sum)
+      for (size_t i = 0; i < n; i++) v[i] = x[i] - s[i];
+
+      // Ax = A * x
+      matvec(x.data(), Ax.data());
+
+      // aa = -y % (Ax + c)
+      for (size_t i = 0; i < m; i++) aa[i] = -y[i] * (Ax[i] + (float)c);
+
+      // bb = max(aa, 0)
+      for (size_t i = 0; i < m; i++) bb[i] = std::max(aa[i], 0.0f);
+
+      // fun_x = sw^T * (log(exp(-bb) + exp(aa - bb)) + bb)
       {
-		 //std::cout << "aa["<< i << "]:" << aa(i) << " bb[" << i << "]:" << bb(i) << " Ax[" << i << "]:" << Ax(i) << std::endl;
-		 if (x(i) != 0) { nonzero_x_count = nonzero_x_count + 1;}
-	  }
-//std::cout << "nonzero_x_count:" << nonzero_x_count << std::endl;
+        float acc = 0;
+        for (size_t i = 0; i < m; i++) {
+          float val = logf(expf(-bb[i]) + expf(aa[i] - bb[i])) + bb[i];
+          acc += sw[i] * val;
+        }
+        fun_x = (double)acc;
+      }
 
-      //sgLogisticR.m:345-353
-      Ax = A * x;
-//std::cout << "10..." << std::endl;
-      //sgLogisticR.m:356-377
-      aa = -y % (Ax + c);
-//std::cout << "11..." << std::endl;
-      bb = arma::max(aa, m_zeros);
-//std::cout << "aa.n_rows:" << aa.n_rows << " bb.n_rows:" << bb.n_rows << " c:" << c << " sc:" << sc << " gc:" << gc << " L:" << L << std::endl;
-//      for (int i = 0; i <= bb.n_rows; i = i + 1)
-//      {
-//		 std::cout << "aa["<< i << "]:" << aa(i) << " bb[" << i << "]:" << bb(i) << " Ax[" << i << "]:" << Ax(i) << " y[" << i << "]:" << y(i) << std::endl;
-//	  }
-      fun_x = arma::as_scalar(sample_weights.t() * (arma::log(arma::exp(-bb) + arma::exp(aa - bb)) + bb));
-//std::cout << "12..." << std::endl;
-      r_sum = (arma::as_scalar(v.t() * v) + std::pow(c - sc, 2)) / 2;
-      l_sum = fun_x - fun_s - arma::as_scalar(v.t() * g) - (c - sc) * gc;
-//std::cout << "13..." << std::endl;
-//std::cout << "r_sum:" << r_sum << " l_sum:" << l_sum << " L:" << L << " fun_x:" << fun_x << std::endl;
+      // r_sum = (v^T * v + (c - sc)^2) / 2
+      r_sum = ((double)dotf(v.data(), v.data(), n) + std::pow(c - sc, 2)) / 2.0;
+
+      // l_sum = fun_x - fun_s - v^T * g - (c - sc) * gc
+      l_sum = fun_x - fun_s - (double)dotf(v.data(), g.data(), n) - (c - sc) * gc;
 
       if (r_sum <= std::pow(0.1, 20))
       {
@@ -419,7 +461,6 @@ std::cout << "m:" << m << " n:" << n << std::endl;
 	     break;
 	  }
 
-//	  if (l_sum <= r_sum * L) // Changed to epsilon comparison on 4/17/2024 to match windows output
 	  if ((opts_disableEC==0 && (l_sum < r_sum * L || abs(l_sum - (r_sum * L)) < std::pow(0.1, 12)) || opts_disableEC==1 && l_sum <= r_sum * L))
 	  {
 	     break;
@@ -427,38 +468,30 @@ std::cout << "m:" << m << " n:" << n << std::endl;
 	     L = std::max(static_cast<double>(2*L), l_sum/r_sum);
 	  }
     }
-//std::cout << "14..." << std::endl;
-    //sgLogisticR.m:382-401
+
     alphap = alpha;   alpha = (1 + std::pow(4 * alpha * alpha + 1.0, 0.5))/2.0;
 
-    ValueL(iterStep) = L;
+    ValueL[iterStep] = L;
 
-    xxp = x - xp;   ccp = c - cp;
-    funVal(iterStep) = fun_x;
+    // xxp = x - xp;  ccp = c - cp
+    for (size_t i = 0; i < n; i++) xxp[i] = x[i] - xp[i];
+    ccp = c - cp;
 
-    //ind_work(0,0) = -1;
-    //ind_work(0,1) = -1;
-    //ind_work(0,2) = lambda1;
-    //ind_work.submat(1,0,ind_work.n_rows,1) = ind.cols(0,1);
-    //ind_work(arma::span(1,ind_work.n_rows),2) = ind.col(2) * lambda2;
-    arma::mat ind_work = ind;
-    ind_work.col(2) = ind_work.col(2) * (lambda2);
-    arma::rowvec first_row = {-1, -1, lambda1};
-    ind_work.insert_rows(0, first_row);
+    funVal[iterStep] = fun_x;
 
-    tree_norm = treeNorm(x.t(), n, ind_work, ind_work.n_rows);
+    update_ind_flat(lambda1, lambda2);
+    tree_norm = treeNorm_flat(x.data(), n, ind_flat.data(), ind_flat_nodes);
 
-    funVal(iterStep) = fun_x + tree_norm;
+    funVal[iterStep] = fun_x + tree_norm;
 
     if (bFlag) {break;}
 
-    //sgLogisticR.m:403-435
     switch (opts_tFlag)
     {
 	  case 0:
         if (iterStep >=1)
         {
-	      if (std::abs(funVal(iterStep) - funVal(iterStep - 1)) <= opts_tol * funVal(iterStep - 1))
+	      if (std::abs(funVal[iterStep] - funVal[iterStep - 1]) <= opts_tol * funVal[iterStep - 1])
 	      {
 	        bFlag = 1;
 	      }
@@ -473,120 +506,33 @@ std::cout << "m:" << m << " n:" << n << std::endl;
     }
     if (bFlag) {break;}
 
-	//sgLogisticR.m:438-441
 	if ((iterStep+1) % opts_rStartNum == 0)
 	{
-	  alphap = 0;   alpha = 1;   xp = x;   Axp = Ax;   xxp = n_zeros;   L = L/2;
+	  alphap = 0;   alpha = 1;
+	  std::memcpy(xp.data(), x.data(), n * sizeof(float));
+	  std::memcpy(Axp.data(), Ax.data(), m * sizeof(float));
+	  std::memset(xxp.data(), 0, n * sizeof(float));
+	  L = L/2;
 	}
-
   }
 
-  arma::frowvec x_row = x.as_row();
-
-
+  // Write results back to Armadillo members
   std::cout << "Intercept: " << c << std::endl;
   this->intercept_value = c;
 
-//std::cout << "15..." << std::endl;
+  parameters.set_size(n);
+  std::memcpy(parameters.memptr(), x.data(), n * sizeof(float));
 
-  parameters = x_row.t();
   this->nz_gene_count = countNonZeroGenes(parameters, weights);
 
-  return x_row;
-
-
-
-  // Here we add the row of ones to the features.
-  // The intercept is not penalized. Add an "all ones" row to design and set
-  // intercept = false to get a penalized intercept.
-//  if (intercept)
-//  {
-//    p.insert_rows(0, arma::ones<arma::mat>(1, nCols));
-//  }
-
-//  if (weights.n_elem > 0)
-//  {
-//    p = p * diagmat(sqrt(weights));
-//    r = sqrt(weights) % responses;
-//  }
-
-  // Convert to this form:
-  // a * (X X^T) = y X^T.
-  // Then we'll use Armadillo to solve it.
-  // The total runtime of this should be O(d^2 N) + O(d^3) + O(dN).
-  // (assuming the SVD is used to solve it)
-//  arma::mat cov = p * p.t() +
-//      lambda * arma::eye<arma::mat>(p.n_rows, p.n_rows);
-
-//  parameters = arma::solve(cov, p * r.t());
-//  return ComputeError(features, responses);
-
+  // Return value (kept for API compat; callers use Parameters() instead)
+  static thread_local arma::frowvec x_row_ret;
+  x_row_ret = arma::frowvec(x.data(), n);
+  return x_row_ret;
 }
 
 
 
-
-/*
-void SGLassoFP32::Predict(const arma::mat& points,
-    arma::rowvec& predictions) const
-{
-  if (intercept)
-  {
-    // We want to be sure we have the correct number of dimensions in the
-    // dataset.
-    Log::Assert(points.n_rows == parameters.n_rows - 1);
-    // Get the predictions, but this ignores the intercept value
-    // (parameters[0]).
-    predictions = arma::trans(parameters.subvec(1, parameters.n_elem - 1))
-        * points;
-    // Now add the intercept.
-    predictions += parameters(0);
-  }
-  else
-  {
-    // We want to be sure we have the correct number of dimensions in
-    // the dataset.
-    Log::Assert(points.n_rows == parameters.n_rows);
-    predictions = arma::trans(parameters) * points;
-  }
-}
-
-double SGLassoFP32::ComputeError(const arma::mat& features,
-                                      const arma::rowvec& responses) const
-{
-  // Get the number of columns and rows of the dataset.
-  const size_t nCols = features.n_cols;
-  const size_t nRows = features.n_rows;
-
-  // Calculate the differences between actual responses and predicted responses.
-  // We must also add the intercept (parameters(0)) to the predictions.
-  arma::rowvec temp;
-  if (intercept)
-  {
-    // Ensure that we have the correct number of dimensions in the dataset.
-    if (nRows != parameters.n_rows - 1)
-    {
-      Log::Fatal << "The test data must have the same number of columns as the "
-          "training file." << std::endl;
-    }
-    temp = responses - (parameters(0) +
-        arma::trans(parameters.subvec(1, parameters.n_elem - 1)) * features);
-  }
-  else
-  {
-    // Ensure that we have the correct number of dimensions in the dataset.
-    if (nRows != parameters.n_rows)
-    {
-      Log::Fatal << "The test data must have the same number of columns as the "
-          "training file." << std::endl;
-    }
-    temp = responses - arma::trans(parameters) * features;
-  }
-  const double cost = arma::dot(temp, temp) / nCols;
-
-  return cost;
-}
-*/
 
 const arma::fcolvec SGLassoFP32::altra(const arma::fcolvec& v_in,
                             const int n,
@@ -609,21 +555,8 @@ const arma::fcolvec SGLassoFP32::altra(const arma::fcolvec& v_in,
 		}
 	}
 
-//	for(int k=0;k<ind_mat.n_cols*ind_mat.n_rows;k++)
-//	{
-//	    std::cout << "ind[" << k << "]:" << ind[k] << std::endl;
-//	}
-
-
-//std::cout << "Altra 2..." << std::endl;
-    /*
-     * test whether the first node is special
-     */
     if ((int) ind[0]==-1){
 
-        /*
-         *Recheck whether ind[1] equals to zero
-         */
         if ((int) ind[1]!=-1){
             printf("\n Error! \n Check ind");
             exit(1);
@@ -647,15 +580,8 @@ const arma::fcolvec SGLassoFP32::altra(const arma::fcolvec& v_in,
         memcpy(x, v, sizeof(float) * n);
         i=0;
     }
-//std::cout << "Altra 3..." << std::endl;
-    /*
-     * sequentially process each node
-     *
-     */
+
 	for(;i < nodes; i++){
-        /*
-         * compute the L2 norm of this group
-         */
 		twoNorm=0;
 		for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
 			twoNorm += x[j] * x[j];
@@ -665,24 +591,16 @@ const arma::fcolvec SGLassoFP32::altra(const arma::fcolvec& v_in,
         if (twoNorm>lambda){
             ratio=(twoNorm-lambda)/twoNorm;
 
-            /*
-             * shrinkage this group by ratio
-             */
             for(j=(int) ind[3*i]-1;j<(int) ind[3*i+1];j++)
                 x[j]*=ratio;
         }
         else{
-            /*
-             * threshold this group to zero
-             */
             for(j=(int) ind[3*i]-1;j<(int) ind[3*i+1];j++)
                 x[j]=0;
         }
 	}
-//std::cout << "Altra 4..." << std::endl;
 	arma::fcolvec x_col(&x[0], n);
 	free(x);
-//std::cout << "Altra 5..." << std::endl;
 	return x_col;
 }
 
@@ -707,21 +625,10 @@ const double SGLassoFP32::treeNorm(const arma::frowvec& x_in,
 		}
 	}
 
-//	for(int k=0;k<ind_mat.n_cols*ind_mat.n_rows;k++)
-//	{
-//	    std::cout << "ind[" << k << "]:" << ind[k] << std::endl;
-//	}
-
     tree_norm=0;
 
-    /*
-     * test whether the first node is special
-     */
     if ((int) ind[0]==-1){
 
-        /*
-         *Recheck whether ind[1] equals to zero
-         */
         if ((int) ind[1]!=-1){
             printf("\n Error! \n Check ind");
             exit(1);
@@ -741,14 +648,7 @@ const double SGLassoFP32::treeNorm(const arma::frowvec& x_in,
         i=0;
     }
 
-    /*
-     * sequentially process each node
-     *
-     */
 	for(;i < nodes; i++){
-        /*
-         * compute the L2 norm of this group
-         */
 		twoNorm=0;
 		for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
 			twoNorm += x[j] * x[j];
@@ -785,9 +685,6 @@ const double SGLassoFP32::computeLambda2Max(const arma::frowvec& x_in,
 	}
 
     for(i=0;i < nodes; i++){
-        /*
-         * compute the L2 norm of this group
-         */
 		twoNorm=0;
 		for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
 			twoNorm += x[j] * x[j];
@@ -803,3 +700,105 @@ const double SGLassoFP32::computeLambda2Max(const arma::frowvec& x_in,
 }
 
 
+void SGLassoFP32::altra_inplace(float* x, const float* v, int n,
+                                const double* ind, int nodes) const
+{
+    int i, j;
+    double lambda, twoNorm, ratio;
+
+    if ((int) ind[0]==-1){
+        if ((int) ind[1]!=-1){
+            printf("\n Error! \n Check ind");
+            exit(1);
+        }
+        lambda=ind[2];
+        for(j=0;j<n;j++){
+            if (v[j]>lambda)
+                x[j]=v[j]-lambda;
+            else if (v[j]<-lambda)
+                x[j]=v[j]+lambda;
+            else
+                x[j]=0;
+        }
+        i=1;
+    }
+    else{
+        memcpy(x, v, sizeof(float) * n);
+        i=0;
+    }
+
+    for(;i < nodes; i++){
+        twoNorm=0;
+        for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
+            twoNorm += x[j] * x[j];
+        twoNorm=sqrt(twoNorm);
+
+        lambda=ind[3*i+2];
+        if (twoNorm>lambda){
+            ratio=(twoNorm-lambda)/twoNorm;
+            for(j=(int) ind[3*i]-1;j<(int) ind[3*i+1];j++)
+                x[j]*=ratio;
+        }
+        else{
+            for(j=(int) ind[3*i]-1;j<(int) ind[3*i+1];j++)
+                x[j]=0;
+        }
+    }
+}
+
+
+double SGLassoFP32::treeNorm_flat(const float* x, int n,
+                                  const double* ind, int nodes) const
+{
+    double tree_norm = 0;
+    int i, j;
+    double twoNorm, lambda;
+
+    if ((int) ind[0]==-1){
+        if ((int) ind[1]!=-1){
+            printf("\n Error! \n Check ind");
+            exit(1);
+        }
+        lambda=ind[2];
+        for(j=0;j<n;j++){
+            tree_norm+=fabs(x[j]);
+        }
+        tree_norm=tree_norm * lambda;
+        i=1;
+    }
+    else{
+        i=0;
+    }
+
+    for(;i < nodes; i++){
+        twoNorm=0;
+        for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
+            twoNorm += x[j] * x[j];
+        twoNorm=sqrt(twoNorm);
+        lambda=ind[3*i+2];
+        tree_norm=tree_norm + lambda*twoNorm;
+    }
+
+    return tree_norm;
+}
+
+
+double SGLassoFP32::computeLambda2Max_flat(const float* x, int n,
+                                           const double* ind, int nodes) const
+{
+    int i, j;
+    double twoNorm;
+    double lambda2_max = 0;
+
+    for(i=0;i < nodes; i++){
+        twoNorm=0;
+        for(j=(int) ind[3*i]-1;j< (int) ind[3*i+1];j++)
+            twoNorm += x[j] * x[j];
+        twoNorm=sqrt(twoNorm);
+        twoNorm=twoNorm/ind[3*i+2];
+        if (twoNorm > lambda2_max)
+            lambda2_max=twoNorm;
+    }
+
+    return lambda2_max;
+}

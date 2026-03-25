@@ -65,6 +65,13 @@ class SGLassoLeastRFP64
                             const arma::mat& ind_mat,
                             const int nodes) const;
 
+  void altra_inplace(double* x, const double* v, int n,
+                     const double* ind, int nodes) const;
+  double treeNorm_flat(const double* x, int n,
+                       const double* ind, int nodes) const;
+  double computeLambda2Max_flat(const double* x, int n,
+                                const double* ind, int nodes) const;
+
   //! Return the parameters (the b vector).
   const arma::vec& Parameters() const { return parameters; }
   //! Modify the parameters (the b vector).

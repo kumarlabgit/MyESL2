@@ -104,6 +104,13 @@ class SGLassoFP32
                             const arma::mat& ind_mat,
                             const int nodes) const;
 
+  void altra_inplace(float* x, const float* v, int n,
+                     const double* ind, int nodes) const;
+  double treeNorm_flat(const float* x, int n,
+                       const double* ind, int nodes) const;
+  double computeLambda2Max_flat(const float* x, int n,
+                                const double* ind, int nodes) const;
+
   //! Return the parameters (the b vector).
   const arma::fvec& Parameters() const { return parameters; }
   //! Modify the parameters (the b vector).

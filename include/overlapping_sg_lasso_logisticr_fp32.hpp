@@ -37,20 +37,8 @@ class OLSGLassoLogisticRFP32
   void writeModelToXMLStream(std::ofstream& XMLFile);
   void writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap);
 
-  const arma::fcolvec altra(const arma::fcolvec& v_in,
-                            const int n,
-                            const arma::mat& ind_mat,
-                            const int nodes) const;
-
-  const double treeNorm(const arma::frowvec& x,
-                            const int n,
-                            const arma::mat& ind_mat,
-                            const int nodes) const;
-
-  const double computeLambda2Max(const arma::frowvec& x,
-                            const int n,
-                            const arma::mat& ind_mat,
-                            const int nodes) const;
+  double computeLambda2Max_flat(const float* x, int n,
+                                const double* ind, int nodes) const;
 
   //! Return the parameters (the b vector).
   const arma::fvec& Parameters() const { return parameters; }
