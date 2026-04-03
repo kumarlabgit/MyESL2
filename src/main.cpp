@@ -78,6 +78,7 @@ void print_usage(const char* prog_name) {
         "  Encoding:\n"
         "    --auto-bit-ct X              set min_minor = ceil(X% x min_class_size)\n"
         "    --drop-major-allele          exclude major-allele column from FASTA encoder\n"
+        "    --minor-column               add per-gene binary minor allele summary column\n"
         "    --class-bal up|down|weighted balance classes before regression\n"
         "    --dropout <file>             exclude features listed in file from encoding\n"
         "    --write-features <path>      write encoded feature matrix to file\n"
@@ -102,6 +103,7 @@ void print_usage(const char* prog_name) {
         "  " + p + " evaluate <weights.txt> <list.txt> <output_file> [options]\n\n"
         "    --hypothesis <file>     compare predictions to known labels (writes TPR/TNR/FPR/FNR)\n"
         "    --no-visualize          skip automatic SVG generation\n"
+        "    --minor-alleles <file>  minor_alleles.txt from training (auto-detected if omitted)\n"
         "    --cache-dir DIR\n"
         "    --threads N\n"
         "    --datatype <type>\n\n"
@@ -119,7 +121,7 @@ void print_usage(const char* prog_name) {
         "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
-        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele\n"
+        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
         "-------------------------------------------\n"
@@ -132,7 +134,7 @@ void print_usage(const char* prog_name) {
         "    --aim-window N        top-N features considered per iteration (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
-        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele\n"
+        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
         "-------------------------------------------\n"
@@ -261,6 +263,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--min-groups" && i+1<argc) train_opts.min_groups = std::stoi(argv[++i]);
                 else if (arg == "--auto-bit-ct"&& i+1<argc) enc_opts.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts.drop_major = true;
+                else if (arg == "--minor-column") enc_opts.minor_column = true;
                 else if (arg == "--class-bal"  && i+1<argc) {
                     enc_opts.class_bal = argv[++i];
                     if (enc_opts.class_bal != "up" && enc_opts.class_bal != "down" && enc_opts.class_bal != "weighted")
@@ -334,6 +337,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--datatype"   && i+1<argc) { eval_opts.datatype = argv[++i]; if(eval_opts.datatype!="universal"&&eval_opts.datatype!="protein"&&eval_opts.datatype!="nucleotide"&&eval_opts.datatype!="numeric") throw std::runtime_error("Unknown datatype: "+eval_opts.datatype); }
                 else if (arg == "--threads"    && i+1<argc) { eval_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!eval_opts.num_threads) eval_opts.num_threads=1; }
                 else if (arg == "--no-visualize") eval_opts.no_visualize = true;
+                else if (arg == "--minor-alleles" && i+1<argc) eval_opts.minor_alleles_path = argv[++i];
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
 
@@ -421,6 +425,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
                 else if (arg == "--auto-bit-ct"      && i+1<argc) enc_opts_base.auto_bit_ct   = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
+                else if (arg == "--minor-column") enc_opts_base.minor_column = true;
                 else if (arg == "--max-mem"           && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
             }
@@ -469,6 +474,7 @@ int main(int argc, char* argv[]) {
                     eopts.datatype     = pre_cfg.datatype;
                     eopts.num_threads  = pre_cfg.num_threads ? pre_cfg.num_threads : std::thread::hardware_concurrency();
                     eopts.cache_dir    = pre_cfg.cache_dir;
+                    eopts.minor_alleles_path = run_dir / "minor_alleles.txt";
                     pipeline::evaluate(eopts);
                 }
 
@@ -555,6 +561,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--min-groups"     && i+1<argc) train_opts_base.min_groups = std::stoi(argv[++i]);
                 else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
+                else if (arg == "--minor-column") enc_opts_base.minor_column = true;
                 else if (arg == "--auto-bit-ct"    && i+1<argc) enc_opts_base.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--max-mem"         && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
@@ -937,6 +944,7 @@ int main(int argc, char* argv[]) {
                 if      (arg == "--min-minor"       && i+1<argc) enc_opts.min_minor    = std::stoi(argv[++i]);
                 else if (arg == "--auto-bit-ct"     && i+1<argc) enc_opts.auto_bit_ct  = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele")            enc_opts.drop_major   = true;
+                else if (arg == "--minor-column")                  enc_opts.minor_column = true;
                 else if (arg == "--dropout"         && i+1<argc) {
                     enc_opts.dropout_labels = load_dropout_labels(argv[++i]);
                 }

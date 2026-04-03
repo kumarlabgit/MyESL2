@@ -14,6 +14,7 @@ struct AlignmentResult {
     std::vector<std::vector<uint8_t>> columns;  // columns[j][i]: j-th encoded col, i-th sequence
     std::vector<std::pair<uint32_t, char>> map; // (original_pos, allele) per encoded column
     std::vector<std::string> missing_sequences; // "stem\tseq_id" for each missing sequence
+    std::vector<bool> col_is_minor; // parallel to columns: true if column is a non-major allele
     bool failed = false;
     std::string error_msg;
     size_t var_site_count = 0;  // count of variable sites (for PSC group penalty)

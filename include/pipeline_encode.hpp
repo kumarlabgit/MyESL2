@@ -35,6 +35,7 @@ struct EncodeOptions {
     int          min_minor        = -1;    // -1 → use value from preprocess_config
     double       auto_bit_ct      = -1.0;
     bool         drop_major       = false;
+    bool         minor_column     = false;
     std::string  class_bal;       // "", "up", "down", "weighted"
     std::string  write_features_path;
     std::string  write_features_transposed_path;

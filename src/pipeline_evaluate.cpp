@@ -247,14 +247,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // FASTA branch
         // -------------------------------------------------------------------------
 
-        // --- Parse weight labels as <stem>_<pos>_<allele> ---
+        // --- Parse weight labels as <stem>_<pos>_<allele> or <stem>_minor ---
         struct ModelEntry {
             std::string stem;
             uint32_t    pos;
             char        allele;
             double      weight;
         };
+        struct MinorEntry {
+            std::string stem;
+            double      weight;
+        };
         std::vector<ModelEntry> model_entries;
+        std::vector<MinorEntry> minor_entries;
         {
             std::ifstream wf(weights_path);
             if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
@@ -266,6 +271,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 std::string label = line.substr(0, tab);
                 double w = std::stod(line.substr(tab + 1));
                 if (label == "Intercept") { intercept_val = w; continue; }
+                // Check for {stem}_minor label
+                if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
+                    minor_entries.push_back({label.substr(0, label.size() - 6), w});
+                    continue;
+                }
                 size_t us2 = label.rfind('_');
                 if (us2 == std::string::npos || us2 + 1 >= label.size()) continue;
                 char allele = label[us2 + 1];
@@ -279,9 +289,39 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
 
         std::set<std::string> model_stems;
         for (auto& e : model_entries) model_stems.insert(e.stem);
+        for (auto& me : minor_entries) model_stems.insert(me.stem);
         std::cout << "Model: " << model_entries.size() << " weight(s), "
+                  << minor_entries.size() << " minor weight(s), "
                   << "intercept=" << intercept_val << ", "
                   << model_stems.size() << " alignment(s)\n";
+
+        // --- Load minor_alleles.txt if minor entries exist ---
+        std::map<std::string, std::vector<std::pair<uint32_t, char>>> minor_alleles_by_gene;
+        if (!minor_entries.empty()) {
+            fs::path ma_path = opts.minor_alleles_path;
+            if (ma_path.empty())
+                ma_path = weights_path.parent_path() / "minor_alleles.txt";
+            if (!fs::exists(ma_path))
+                ma_path = weights_path.parent_path().parent_path() / "minor_alleles.txt";
+            std::ifstream mf(ma_path);
+            if (!mf) throw std::runtime_error(
+                "minor_alleles.txt required for _minor weights but not found (tried: "
+                + ma_path.string() + ")");
+            std::string mline;
+            while (std::getline(mf, mline)) {
+                if (mline.empty()) continue;
+                size_t us2 = mline.rfind('_');
+                if (us2 == std::string::npos || us2 + 1 >= mline.size()) continue;
+                char allele = mline[us2 + 1];
+                size_t us1 = mline.rfind('_', us2 - 1);
+                if (us1 == std::string::npos) continue;
+                std::string stem = mline.substr(0, us1);
+                uint32_t pos = static_cast<uint32_t>(
+                    std::stoul(mline.substr(us1 + 1, us2 - us1 - 1)));
+                minor_alleles_by_gene[stem].push_back({pos, allele});
+            }
+            std::cout << "Minor alleles: " << minor_alleles_by_gene.size() << " gene(s)\n";
+        }
 
         // --- Load list.txt ---
         std::vector<fs::path> all_fasta_paths;
@@ -370,11 +410,14 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         }
 
         // --- Compute predictions ---
-        // Build gene order from model_entries (first-appearance order)
+        // Build gene order from model_entries and minor_entries (first-appearance order)
         {
             std::set<std::string> seen;
             for (auto& e : model_entries) {
                 if (!seen.count(e.stem)) { eval_gene_order.push_back(e.stem); seen.insert(e.stem); }
+            }
+            for (auto& me : minor_entries) {
+                if (!seen.count(me.stem)) { eval_gene_order.push_back(me.stem); seen.insert(me.stem); }
             }
         }
 
@@ -417,6 +460,50 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                         species_sums[meta.seq_ids[si]] += entry.weight;
                         eval_gene_scores[stem][meta.seq_ids[si]] += entry.weight;
                     }
+                }
+            }
+        }
+
+        // --- Compute minor column predictions ---
+        for (auto& me : minor_entries) {
+            auto alleles_it = minor_alleles_by_gene.find(me.stem);
+            if (alleles_it == minor_alleles_by_gene.end()) continue;
+
+            fs::path pff_path = cache_dir / (me.stem + ".pff");
+            if (!fs::exists(pff_path)) {
+                std::cerr << "Warning: no PFF for " << me.stem << " (minor), skipping\n";
+                continue;
+            }
+
+            auto meta = fasta::read_pff_metadata(pff_path);
+            uint32_t S = meta.num_sequences;
+            uint32_t L = meta.alignment_length;
+
+            std::vector<char> raw(meta.get_data_size());
+            {
+                std::ifstream pf(pff_path, std::ios::binary);
+                pf.seekg(static_cast<std::streamoff>(meta.data_offset));
+                pf.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+            }
+
+            for (auto& id : meta.seq_ids) {
+                species_sums.emplace(id, 0.0);
+                eval_gene_scores[me.stem].emplace(id, 0.0);
+            }
+
+            bool col_major = (meta.orientation == pff::Orientation::COLUMN_MAJOR);
+            for (uint32_t si = 0; si < S; ++si) {
+                bool has_minor = false;
+                for (auto& [pos, allele] : alleles_it->second) {
+                    if (pos >= L) continue;
+                    char c = col_major
+                        ? raw[static_cast<size_t>(pos) * S + si]
+                        : raw[static_cast<size_t>(si) * L + pos];
+                    if (c == allele) { has_minor = true; break; }
+                }
+                if (has_minor) {
+                    species_sums[meta.seq_ids[si]] += me.weight;
+                    eval_gene_scores[me.stem][meta.seq_ids[si]] += me.weight;
                 }
             }
         }

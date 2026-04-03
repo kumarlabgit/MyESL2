@@ -86,6 +86,7 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--threads N` | Number of worker threads for encoding (default: all available cores) |
 | `--dlt` | Use direct lookup table encoder (faster encoding, identical output) |
 | `--drop-major-allele` | Exclude the major allele column from FASTA encoding |
+| `--minor-column` | Add a per-gene binary column indicating presence of any non-major allele |
 | `--class-bal <mode>` | Class balancing before regression: `up`, `down`, or `weighted` |
 | `--dropout <file>` | File listing feature labels to exclude from encoding (one label per line) |
 
@@ -139,6 +140,7 @@ output_dir/
 ├── combined.map                      # All encoded features: Position, Label
 ├── alignment_table.txt               # Gene × sample mapping metadata
 ├── missing_sequences.txt             # Samples absent from one or more alignments
+├── minor_alleles.txt                 # Minor allele labels (only with --minor-column)
 ├── lambda_0/
 │   ├── weights.txt                   # Feature weights + intercept
 │   ├── gss.txt                       # Gene Significance Scores (sum |w| per gene)
@@ -180,6 +182,7 @@ myesl2 evaluate <weights.txt> <list.txt> <output_file> [options]
 | `--datatype <type>` | Must match the datatype used during training |
 | `--threads N` | Worker threads (default: all cores) |
 | `--no-visualize` | Skip automatic SVG heatmap generation |
+| `--minor-alleles <file>` | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
 
 **Outputs:**
 - `<output_file>` — TSV with columns: `SeqID`, `Prediction`, `Probability`, `ClassPrediction` (plus accuracy metrics if `--hypothesis` provided)

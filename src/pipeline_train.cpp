@@ -186,6 +186,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     }
                 }
             } else {
+                // Check for {stem}_minor label (gene-level, no position)
+                if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
+                    std::string stem = label.substr(0, label.size() - 6);
+                    gss[stem] += aw;
+                    continue;
+                }
                 // FASTA: {stem}_{pos}_{allele}
                 size_t us2 = label.rfind('_');
                 if (us2 == std::string::npos || us2 == 0) continue;

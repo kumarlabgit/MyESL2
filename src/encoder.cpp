@@ -93,6 +93,7 @@ AlignmentResult encode_pff(
             }
             result.columns.push_back(std::move(col));
             result.map.push_back({p, allele});
+            result.col_is_minor.push_back(allele != major);
         }
     }
 
@@ -211,9 +212,12 @@ AlignmentResult encode_pff_dlt(
         // Append columns and map entries in column-index order
         for (int j = 0; j < num_cols; ++j)
             result.columns.push_back(std::move(new_cols[j]));
-        for (int c = 0; c < 256; ++c)
-            if (col_idx[c] >= 0)
+        for (int c = 0; c < 256; ++c) {
+            if (col_idx[c] >= 0) {
                 result.map.push_back({p, static_cast<char>(c)});
+                result.col_is_minor.push_back(c != static_cast<int>(major));
+            }
+        }
     }
 
     return result;

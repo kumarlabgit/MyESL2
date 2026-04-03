@@ -96,6 +96,12 @@ Key files:
 
 PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newick tree parser (`newick.hpp`) without modifications.
 
+### Encoding Options
+
+- `--minor-column`: Adds a per-gene binary summary column (`{stem}_minor`) indicating whether each species has any non-major allele in that gene. Writes `minor_alleles.txt` listing which feature labels are minor alleles, used by evaluate to reconstitute the column for new species.
+- `--drop-major-allele`: Excludes the most frequent allele column from FASTA encoding.
+- `--auto-bit-ct X`: Sets `min_minor = ceil(X% × minority_class_size)`.
+
 ## Code Architecture
 
 ### PFF (Parsed FASTA File) Format

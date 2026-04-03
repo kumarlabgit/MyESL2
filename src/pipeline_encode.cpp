@@ -168,6 +168,21 @@ EncodeResult encode(const EncodeOptions& opts)
         return oss.str();
     };
 
+    size_t elem_size = (opts.precision == regression::Precision::FP64) ? 8 : 4;
+
+    // Solver peak memory: feature matrix + FISTA working vectors
+    // Non-overlapping: 10 M-vectors + 6 N-vectors
+    // Overlapping adds: Y, field copies, overlapping() internals
+    auto estimate_peak_mem = [&](uint64_t cols, uint32_t samples) -> uint64_t {
+        uint64_t matrix = cols * samples * elem_size;
+        uint64_t m_work = uint64_t(10) * samples * elem_size;
+        uint64_t n_coeff = is_overlapping
+            ? ((opts.precision == regression::Precision::FP64) ? 132 : 72)
+            : 6 * elem_size;
+        uint64_t n_work = cols * n_coeff;
+        return matrix + m_work + n_work;
+    };
+
     if (pre.datatype == "numeric") {
         // ---- Numeric branch ----
         std::vector<fs::path> pnf_paths;
@@ -213,10 +228,13 @@ EncodeResult encode(const EncodeOptions& opts)
                            done_count * 10 >= next_pct * total_files) {
                         uint64_t est_cols = running_cols * static_cast<uint64_t>(total_files)
                                             / static_cast<uint64_t>(done_count);
-                        uint64_t est_bytes = est_cols * static_cast<uint64_t>(N) * sizeof(float);
+                        uint64_t est_matrix = est_cols * static_cast<uint64_t>(N) * elem_size;
+                        uint64_t est_bytes  = estimate_peak_mem(est_cols, N);
                         if (next_pct == 1) first_estimate = est_bytes;
-                        std::cout << "  [" << (next_pct * 10) << "%] Estimated matrix size: "
-                                  << fmt_bytes(est_bytes) << "\n";
+                        std::cout << "  [" << (next_pct * 10) << "%] Estimated peak memory: "
+                                  << fmt_bytes(est_bytes)
+                                  << " (matrix " << fmt_bytes(est_matrix)
+                                  << ", M=" << N << ", N=" << est_cols << ")\n";
                         ++next_pct;
                     }
                 };
@@ -264,13 +282,14 @@ EncodeResult encode(const EncodeOptions& opts)
                                       << " -> " << F << " features\n";
                             check_milestone();
                             if (opts.max_mem > 0 && !mem_exceeded.load()) {
-                                uint64_t cur_bytes = running_cols * static_cast<uint64_t>(N) * sizeof(float);
-                                if (static_cast<double>(cur_bytes) > static_cast<double>(opts.max_mem) * 0.8) {
-                                    uint64_t est_bytes = static_cast<uint64_t>(
-                                        static_cast<double>(cur_bytes) * total_files / done_count);
-                                    if (static_cast<double>(est_bytes) > static_cast<double>(opts.max_mem) * 1.25) {
-                                        mem_err_msg = "max_mem_exceeded: estimated final matrix size "
-                                            + fmt_bytes(est_bytes) + " exceeds 125% of max_mem ("
+                                uint64_t cur_peak = estimate_peak_mem(running_cols, N);
+                                if (static_cast<double>(cur_peak) > static_cast<double>(opts.max_mem) * 0.8) {
+                                    uint64_t est_cols = running_cols * static_cast<uint64_t>(total_files)
+                                                        / static_cast<uint64_t>(done_count);
+                                    uint64_t est_peak = estimate_peak_mem(est_cols, N);
+                                    if (static_cast<double>(est_peak) > static_cast<double>(opts.max_mem) * 1.25) {
+                                        mem_err_msg = "max_mem_exceeded: estimated peak memory "
+                                            + fmt_bytes(est_peak) + " exceeds 125% of max_mem ("
                                             + fmt_bytes(opts.max_mem) + ")";
                                         mem_exceeded = true;
                                         if (opts.disable_mc)
@@ -309,10 +328,13 @@ EncodeResult encode(const EncodeOptions& opts)
             ++n_aligned;
         }
         {
-            uint64_t actual_bytes = total_cols * static_cast<uint64_t>(N) * sizeof(float);
-            std::cout << "  Matrix size: " << fmt_bytes(actual_bytes) << " actual";
+            uint64_t actual_matrix = total_cols * static_cast<uint64_t>(N) * elem_size;
+            uint64_t actual_peak  = estimate_peak_mem(total_cols, N);
+            std::cout << "  Peak memory: " << fmt_bytes(actual_peak)
+                      << " (matrix " << fmt_bytes(actual_matrix)
+                      << ", M=" << N << ", N=" << total_cols << ")";
             if (first_estimate > 0)
-                std::cout << " (estimated " << fmt_bytes(first_estimate) << " at 10%)";
+                std::cout << " [estimated " << fmt_bytes(first_estimate) << " at 10%]";
             std::cout << "\n";
         }
 
@@ -490,10 +512,13 @@ EncodeResult encode(const EncodeOptions& opts)
                            done_count * 10 >= next_pct * total_encode) {
                         uint64_t est_cols = running_cols * static_cast<uint64_t>(total_encode)
                                             / static_cast<uint64_t>(done_count);
-                        uint64_t est_bytes = est_cols * static_cast<uint64_t>(N) * sizeof(float);
+                        uint64_t est_matrix = est_cols * static_cast<uint64_t>(N) * elem_size;
+                        uint64_t est_bytes  = estimate_peak_mem(est_cols, N);
                         if (next_pct == 1) first_estimate = est_bytes;
-                        std::cout << "  [" << (next_pct * 10) << "%] Estimated matrix size: "
-                                  << fmt_bytes(est_bytes) << "\n";
+                        std::cout << "  [" << (next_pct * 10) << "%] Estimated peak memory: "
+                                  << fmt_bytes(est_bytes)
+                                  << " (matrix " << fmt_bytes(est_matrix)
+                                  << ", M=" << N << ", N=" << est_cols << ")\n";
                         ++next_pct;
                     }
                 };
@@ -520,13 +545,14 @@ EncodeResult encode(const EncodeOptions& opts)
                                       << " -> " << results[idx].columns.size() << " columns\n";
                             check_milestone();
                             if (opts.max_mem > 0 && !mem_exceeded.load()) {
-                                uint64_t cur_bytes = running_cols * static_cast<uint64_t>(N) * sizeof(float);
-                                if (static_cast<double>(cur_bytes) > static_cast<double>(opts.max_mem) * 0.8) {
-                                    uint64_t est_bytes = static_cast<uint64_t>(
-                                        static_cast<double>(cur_bytes) * total_encode / done_count);
-                                    if (static_cast<double>(est_bytes) > static_cast<double>(opts.max_mem) * 1.25) {
-                                        mem_err_msg = "max_mem_exceeded: estimated final matrix size "
-                                            + fmt_bytes(est_bytes) + " exceeds 125% of max_mem ("
+                                uint64_t cur_peak = estimate_peak_mem(running_cols, N);
+                                if (static_cast<double>(cur_peak) > static_cast<double>(opts.max_mem) * 0.8) {
+                                    uint64_t est_cols = running_cols * static_cast<uint64_t>(total_encode)
+                                                        / static_cast<uint64_t>(done_count);
+                                    uint64_t est_peak = estimate_peak_mem(est_cols, N);
+                                    if (static_cast<double>(est_peak) > static_cast<double>(opts.max_mem) * 1.25) {
+                                        mem_err_msg = "max_mem_exceeded: estimated peak memory "
+                                            + fmt_bytes(est_peak) + " exceeds 125% of max_mem ("
                                             + fmt_bytes(opts.max_mem) + ")";
                                         mem_exceeded = true;
                                         if (opts.disable_mc)
@@ -563,23 +589,56 @@ EncodeResult encode(const EncodeOptions& opts)
             for (auto& m : results[i].missing_sequences)
                 all_missing.push_back(m);
 
+        // Build minor columns if --minor-column is set
+        std::vector<std::vector<uint8_t>> minor_cols(total_encode);
+        std::vector<bool> has_minor_col(total_encode, false);
+        if (opts.minor_column) {
+            for (int ri = 0; ri < total_encode; ++ri) {
+                auto& r = results[ri];
+                if (r.failed || r.columns.empty()) continue;
+                bool any_minor = false;
+                for (size_t j = 0; j < r.col_is_minor.size(); ++j) {
+                    if (r.col_is_minor[j]) { any_minor = true; break; }
+                }
+                if (!any_minor) continue;
+                has_minor_col[ri] = true;
+                minor_cols[ri].assign(N, 0);
+                for (size_t j = 0; j < r.columns.size(); ++j) {
+                    if (r.col_is_minor[j]) {
+                        for (uint32_t si = 0; si < N; ++si)
+                            minor_cols[ri][si] |= r.columns[j][si];
+                    }
+                }
+            }
+        }
+
         for (auto& r : results) {
             if (r.failed) { ++failed_count; continue; }
             total_cols += r.columns.size();
             ++n_aligned;
         }
+        // Add minor column counts to total
+        for (int ri = 0; ri < total_encode; ++ri)
+            if (has_minor_col[ri]) ++total_cols;
         {
-            uint64_t actual_bytes = total_cols * static_cast<uint64_t>(N) * sizeof(float);
-            std::cout << "  Matrix size: " << fmt_bytes(actual_bytes) << " actual";
+            uint64_t actual_matrix = total_cols * static_cast<uint64_t>(N) * elem_size;
+            uint64_t actual_peak  = estimate_peak_mem(total_cols, N);
+            std::cout << "  Peak memory: " << fmt_bytes(actual_peak)
+                      << " (matrix " << fmt_bytes(actual_matrix)
+                      << ", M=" << N << ", N=" << total_cols << ")";
             if (first_estimate > 0)
-                std::cout << " (estimated " << fmt_bytes(first_estimate) << " at 10%)";
+                std::cout << " [estimated " << fmt_bytes(first_estimate) << " at 10%]";
             std::cout << "\n";
         }
 
         // Save column counts before freeing intermediate storage
         std::vector<size_t> result_col_counts(total_encode, 0);
-        for (int ri = 0; ri < total_encode; ++ri)
-            if (!results[ri].failed) result_col_counts[ri] = results[ri].columns.size();
+        for (int ri = 0; ri < total_encode; ++ri) {
+            if (!results[ri].failed) {
+                result_col_counts[ri] = results[ri].columns.size();
+                if (has_minor_col[ri]) ++result_col_counts[ri];
+            }
+        }
 
         features.zeros(N, total_cols);
         {
@@ -587,12 +646,20 @@ EncodeResult encode(const EncodeOptions& opts)
             for (int ri = 0; ri < total_encode; ++ri) {
                 auto& r = results[ri];
                 if (r.failed) continue;
-                size_t ncols = result_col_counts[ri];
+                size_t ncols = r.columns.size();
                 for (size_t j = 0; j < ncols; ++j)
                     for (uint32_t si = 0; si < N; ++si)
                         features(si, col_offset + j) = static_cast<float>(r.columns[j][si]);
                 { decltype(r.columns) tmp; tmp.swap(r.columns); } // free after copy
-                col_offset += ncols;
+                if (has_minor_col[ri]) {
+                    for (uint32_t si = 0; si < N; ++si)
+                        features(si, col_offset + ncols) = static_cast<float>(minor_cols[ri][si]);
+                    minor_cols[ri].clear();
+                    minor_cols[ri].shrink_to_fit();
+                    col_offset += ncols + 1;
+                } else {
+                    col_offset += ncols;
+                }
             }
         }
 
@@ -699,11 +766,30 @@ EncodeResult encode(const EncodeOptions& opts)
         {
             std::ofstream combined_map(opts.output_dir / "combined.map");
             combined_map << "Position\tLabel\n";
+            uint64_t map_pos = 0;
+            int ri_idx = 0;
             for (auto& r : results) {
-                if (r.failed) continue;
+                if (r.failed) { ++ri_idx; continue; }
                 all_stems_ordered.push_back(r.stem);
                 for (auto& [pos, allele] : r.map)
-                    combined_map << pos << '\t' << r.stem << '_' << pos << '_' << allele << '\n';
+                    combined_map << map_pos++ << '\t' << r.stem << '_' << pos << '_' << allele << '\n';
+                if (has_minor_col[ri_idx])
+                    combined_map << map_pos++ << '\t' << r.stem << "_minor\n";
+                ++ri_idx;
+            }
+        }
+
+        // Write minor_alleles.txt listing all minor allele feature labels
+        if (opts.minor_column) {
+            std::ofstream ma_file(opts.output_dir / "minor_alleles.txt");
+            for (auto& r : results) {
+                if (r.failed) continue;
+                for (size_t j = 0; j < r.map.size(); ++j) {
+                    if (r.col_is_minor[j]) {
+                        auto& [pos, allele] = r.map[j];
+                        ma_file << r.stem << '_' << pos << '_' << allele << '\n';
+                    }
+                }
             }
         }
     }
@@ -1052,6 +1138,14 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
                         : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor,
                                               opts.drop_major, opts.dropout_labels, skip_x);
                     uint64_t ncols = result.columns.size();
+                    // Add 1 for the minor column if applicable
+                    if (opts.minor_column && ncols > 0) {
+                        bool any_minor = false;
+                        for (size_t j = 0; j < result.col_is_minor.size(); ++j) {
+                            if (result.col_is_minor[j]) { any_minor = true; break; }
+                        }
+                        if (any_minor) ++ncols;
+                    }
                     // result (including columns) goes out of scope here
                     std::lock_guard<std::mutex> lock(sizes_mutex);
                     sizes[stem] = ncols;
