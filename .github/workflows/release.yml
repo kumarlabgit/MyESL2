@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+# Dependency versions are pinned in deps.env at the project root.
+# vcpkg pins OpenBLAS and LAPACK to its current port versions.
+# Armadillo version is read from deps.env for the header download.
+
 jobs:
   build-and-test:
     strategy:
@@ -16,12 +20,15 @@ jobs:
           - os: ubuntu-latest
             artifact: myesl2-linux-x64
             aln_list: Fungi_data/aln_200_linux.txt
+            vcpkg_triplet: x64-linux
           - os: macos-latest
             artifact: myesl2-macos-arm64
             aln_list: Fungi_data/aln_200_linux.txt
+            vcpkg_triplet: arm64-osx
           - os: windows-latest
             artifact: myesl2-windows-x64
             aln_list: Fungi_data/aln_200.txt
+            vcpkg_triplet: x64-windows
 
     runs-on: ${{ matrix.os }}
     name: Build & Test (${{ matrix.os }})
@@ -30,33 +37,62 @@ jobs:
       - uses: actions/checkout@v4
 
       # ── Install dependencies ──────────────────────────────────────
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libarmadillo-dev libopenblas-dev liblapack-dev
-
-      - name: Install dependencies (macOS)
+      - name: Install gfortran (macOS)
         if: runner.os == 'macOS'
-        run: brew install armadillo openblas lapack
+        run: brew install gcc
 
-      - name: Install dependencies (Windows)
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+          key: vcpkg-${{ matrix.vcpkg_triplet }}-openblas-lapack-v1
+
+      - name: Install OpenBLAS and LAPACK via vcpkg
+        shell: bash
+        run: vcpkg install openblas lapack --triplet ${{ matrix.vcpkg_triplet }}
+
+      - name: Install Armadillo headers (pinned version from deps.env)
+        shell: bash
+        run: |
+          source deps.env
+          echo "Installing Armadillo $ARMADILLO_VERSION"
+          curl -L -o armadillo.tar.xz \
+            "https://sourceforge.net/projects/arma/files/armadillo-${ARMADILLO_VERSION}.tar.xz/download"
+          tar xf armadillo.tar.xz
+          cp armadillo-${ARMADILLO_VERSION}/include/armadillo include/armadillo
+          cp -r armadillo-${ARMADILLO_VERSION}/include/armadillo_bits include/armadillo_bits
+
+      # ── Prepare libraries (Windows) ───────────────────────────────
+      - name: Copy vcpkg libs to include/ (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          vcpkg install openblas lapack --triplet x64-windows
-          INSTALLED="$VCPKG_INSTALLATION_ROOT/installed/x64-windows"
-          cp "$INSTALLED/lib/openblas.lib" include/libopenblas.lib
-          cp "$INSTALLED/bin/openblas.dll" include/libopenblas.dll
-          cp "$INSTALLED/lib/lapack.lib"   include/liblapack.lib
-          cp "$INSTALLED/bin/lapack.dll"   include/liblapack.dll
-          curl -L -o armadillo.tar.xz https://sourceforge.net/projects/arma/files/armadillo-14.2.2.tar.xz/download
-          tar xf armadillo.tar.xz
-          cp armadillo-*/include/armadillo include/armadillo
-          cp -r armadillo-*/include/armadillo_bits include/armadillo_bits
+          INSTALLED="$VCPKG_INSTALLATION_ROOT/installed/${{ matrix.vcpkg_triplet }}"
+          echo "=== lib/ ===" && ls "$INSTALLED/lib/"*blas* "$INSTALLED/lib/"*lapack* 2>/dev/null || true
+          echo "=== bin/ ===" && ls "$INSTALLED/bin/"*blas* "$INSTALLED/bin/"*lapack* 2>/dev/null || true
+          cp "$INSTALLED/lib/openblas.lib" include/libopenblas.lib 2>/dev/null \
+            || cp "$INSTALLED/lib/libopenblas.lib" include/libopenblas.lib
+          cp "$INSTALLED/bin/openblas.dll" include/libopenblas.dll 2>/dev/null \
+            || cp "$INSTALLED/bin/libopenblas.dll" include/libopenblas.dll
+          cp "$INSTALLED/lib/lapack.lib" include/liblapack.lib 2>/dev/null \
+            || cp "$INSTALLED/lib/liblapack.lib" include/liblapack.lib
+          cp "$INSTALLED/bin/lapack.dll" include/liblapack.dll 2>/dev/null \
+            || cp "$INSTALLED/bin/liblapack.dll" include/liblapack.dll 2>/dev/null \
+            || echo "Warning: no lapack DLL found (may be static)"
 
       # ── Build ─────────────────────────────────────────────────────
-      - name: Configure
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          INSTALLED="$VCPKG_INSTALLATION_ROOT/installed/${{ matrix.vcpkg_triplet }}"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBLA_VENDOR=OpenBLAS \
+            -DCMAKE_LIBRARY_PATH="$INSTALLED/lib"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
@@ -65,7 +101,11 @@ jobs:
       # ── Regression test ───────────────────────────────────────────
       - name: Run drphylo regression test (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
+          INSTALLED="$VCPKG_INSTALLATION_ROOT/installed/${{ matrix.vcpkg_triplet }}"
+          export LD_LIBRARY_PATH="$INSTALLED/lib:${LD_LIBRARY_PATH:-}"
+          export DYLD_LIBRARY_PATH="$INSTALLED/lib:${DYLD_LIBRARY_PATH:-}"
           ./build/bin/myesl2 drphylo \
             "${{ matrix.aln_list }}" \
             Fungi_data/Fungi_T1_with_ID.nwk \
@@ -90,14 +130,20 @@ jobs:
         shell: bash
         run: bash test/compare_golden.sh ci_output test/golden
 
-      # ── Upload artifact ───────────────────────────────────────────
-      - name: Prepare artifact (Unix)
+      # ── Upload artifacts ──────────────────────────────────────────
+      - name: Prepare binary artifact (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
           mkdir -p artifact
           cp build/bin/myesl2 artifact/${{ matrix.artifact }}
+          INSTALLED="$VCPKG_INSTALLATION_ROOT/installed/${{ matrix.vcpkg_triplet }}"
+          cp "$INSTALLED/lib/"libopenblas*.so* artifact/ 2>/dev/null || true
+          cp "$INSTALLED/lib/"libopenblas*.dylib artifact/ 2>/dev/null || true
+          cp "$INSTALLED/lib/"liblapack*.so* artifact/ 2>/dev/null || true
+          cp "$INSTALLED/lib/"liblapack*.dylib artifact/ 2>/dev/null || true
 
-      - name: Prepare artifact (Windows)
+      - name: Prepare binary artifact (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
@@ -105,7 +151,7 @@ jobs:
           cp build/bin/Release/myesl2.exe artifact/${{ matrix.artifact }}.exe
           cp build/bin/Release/*.dll artifact/ 2>/dev/null || true
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
