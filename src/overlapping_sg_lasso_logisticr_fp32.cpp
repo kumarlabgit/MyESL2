@@ -515,7 +515,7 @@ arma::frowvec& OLSGLassoLogisticRFP32::Train(const arma::fmat& features,
 	     break;
 	  }
 
-	  if ((opts_disableEC==0 && (l_sum < r_sum * L || abs(l_sum - (r_sum * L)) < std::pow(0.1, 12)) || opts_disableEC==1 && l_sum <= r_sum * L))
+	  if ((opts_disableEC==0 && (l_sum < r_sum * L || std::abs(l_sum - (r_sum * L)) < std::pow(0.1, 12)) || opts_disableEC==1 && l_sum <= r_sum * L))
 	  {
 	     break;
 	  } else {
