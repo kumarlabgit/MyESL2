@@ -43,7 +43,7 @@ compare_tsv_floats() {
     result=$(awk -F'\t' -v tol="$TOL" -v lcols="$label_cols" -v desc="$desc" '
     BEGIN { errors = 0 }
     NR == FNR { # golden
-        for (i = 1; i <= NF; i++) gold[NR][i] = $i
+        for (i = 1; i <= NF; i++) gold[NR,i] = $i
         gold_nf[NR] = NF
         next
     }
@@ -55,7 +55,7 @@ compare_tsv_floats() {
             next
         }
         for (i = 1; i <= NF; i++) {
-            g = gold[line][i]
+            g = gold[line,i]
             a = $i
             if (i <= lcols) {
                 # Label column: exact match
