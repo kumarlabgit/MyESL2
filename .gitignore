@@ -47,6 +47,10 @@ fungi_analysis.exe
 *.dll
 *.lib
 
+# Pre-compiled dependencies (tracked despite *.dll and *.lib rules above)
+!deps/
+!deps/**
+
 # Vendored Armadillo headers (use system install)
 include/armadillo
 include/armadillo_bits/
