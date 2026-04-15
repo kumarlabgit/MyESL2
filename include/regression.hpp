@@ -29,6 +29,7 @@ public:
 //   "sg_lasso_leastr"      - SGLassoLeastR     (double, least-squares)
 //   "olsg_lasso_leastr"    - OLSGLassoLeastR   (double, overlapping groups, least-squares)
 //   "olsg_lasso_logisticr" - OLSGLassoLogisticR(double, overlapping groups, logistic)
+//   "gl_logisticr"         - GLLogisticR       (group lasso, logistic)
 //
 // features:  rows=sequences, cols=encoded positions
 // responses: one value per sequence
