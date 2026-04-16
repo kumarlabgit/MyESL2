@@ -1,4 +1,0 @@
-maxIter 100
-tFlag 5
-q 2
-rFlag 1

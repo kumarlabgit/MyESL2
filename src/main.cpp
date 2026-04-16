@@ -72,6 +72,10 @@ void print_usage(const char* prog_name) {
         "    --lambda-grid <s1> <s2>      Cartesian product grid; each spec is min,max,step\n"
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --min-groups N               skip lambdas selecting fewer than N non-zero groups\n"
+        "    --prune-skipped-lambda       with --threads > 1 and --min-groups > 0, after the\n"
+        "                                 parallel grid finishes, delete contents of lambda_N/\n"
+        "                                 dirs that the single-threaded run would have skipped\n"
+        "                                 (preserves dirs as drphylo sentinels)\n"
         "    --param <key>=<value>        pass option to solver\n"
         "      intercept=false            disable intercept term\n"
         "      field=<path>               group-index CSV (overlapping group methods)\n"
@@ -92,7 +96,11 @@ void print_usage(const char* prog_name) {
         "  Common:\n"
         "    --cache-dir DIR              directory for .pff/.pnf cache (default: ./pff_cache)\n"
         "    --min-minor N                min non-major non-indel count to keep a position (default: 1)\n"
-        "    --threads N                  worker threads (default: all cores)\n"
+        "    --threads N                  worker threads for preprocessing and the\n"
+        "                                 lambda grid loop (default: all cores). When >1,\n"
+        "                                 consider OPENBLAS_NUM_THREADS=1 to avoid\n"
+        "                                 nested-parallelism oversubscription in the solver.\n"
+        "                                 Grid-loop parallelism is disabled when --nfolds > 0.\n"
         "    --dlt                        use direct lookup table encoder\n"
         "    --datatype <type>            universal (default), protein, nucleotide, numeric\n"
         "                                 numeric: list file points to whitespace-delimited tabular files\n"
@@ -121,7 +129,8 @@ void print_usage(const char* prog_name) {
         "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
-        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele, --minor-column\n"
+        "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
         "-------------------------------------------\n"
@@ -134,7 +143,8 @@ void print_usage(const char* prog_name) {
         "    --aim-window N        top-N features considered per iteration (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
-        "    --param, --nfolds, --min-groups, --auto-bit-ct, --drop-major-allele, --minor-column\n"
+        "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
         "-------------------------------------------\n"
@@ -247,7 +257,8 @@ int main(int argc, char* argv[]) {
                         pre_opts.datatype != "nucleotide" && pre_opts.datatype != "numeric")
                         throw std::runtime_error("Unknown datatype: " + pre_opts.datatype);
                 }
-                else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; }
+                else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; train_opts.threads = pre_opts.num_threads; }
+                else if (arg == "--prune-skipped-lambda") train_opts.prune_skipped_lambda = true;
                 else if (arg == "--method"     && i+1<argc) train_opts.method = argv[++i];
                 else if (arg == "--precision"  && i+1<argc) {
                     std::string p = argv[++i];
@@ -409,7 +420,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--class-bal"        && i+1<argc) pre_opts.class_bal_phylo = argv[++i];
                 else if (arg == "--hypothesis"       && i+1<argc) { ++i; /* already captured */ }
                 else if (arg == "--datatype"         && i+1<argc) pre_opts.datatype        = argv[++i];
-                else if (arg == "--threads"          && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; }
+                else if (arg == "--threads"          && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
+                else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
                 else if (arg == "--cache-dir"        && i+1<argc) pre_opts.cache_dir       = argv[++i];
                 else if (arg == "--dlt")              pre_opts.use_dlt = true;
                 else if (arg == "--min-minor"        && i+1<argc) pre_opts.min_minor        = std::stoi(argv[++i]);
@@ -548,7 +560,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--aim-window"     && i+1<argc) aim_window     = std::stoi(argv[++i]);
                 else if (arg == "--cache-dir"      && i+1<argc) pre_opts.cache_dir  = argv[++i];
                 else if (arg == "--datatype"       && i+1<argc) pre_opts.datatype   = argv[++i];
-                else if (arg == "--threads"        && i+1<argc) { pre_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; }
+                else if (arg == "--threads"        && i+1<argc) { pre_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
+                else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
                 else if (arg == "--dlt")            pre_opts.use_dlt = true;
                 else if (arg == "--min-minor"      && i+1<argc) pre_opts.min_minor = std::stoi(argv[++i]);
                 else if (arg == "--method"         && i+1<argc) { train_opts_base.method = argv[++i]; has_method = true; }

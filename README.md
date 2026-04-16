@@ -8,15 +8,40 @@ MyESL2 uses Sparse Group Lasso regression to identify genomic features (alignmen
 
 ## Quick Start
 
+### 1. Get a binary
+
+Download the latest release binary for your platform into `./bin/` with the
+provided setup script — no build toolchain required:
+
+```bash
+# Linux x86_64 / macOS arm64
+bash scripts/setup.sh
+```
+
+```powershell
+# Windows x64 (from a PowerShell prompt in the repo root)
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+# or: scripts\setup.bat
+```
+
+The script queries the latest GitHub release, downloads the platform-matching
+executable and its runtime library (`libopenblas.so` / `libopenblas.dylib` /
+`openblas.dll` + `lapack.dll`) into `./bin/`, and copies `data_defs.ini`
+alongside the binary so it works from any working directory. Pass `--tag vX.Y.Z`
+(bash) or `-Tag vX.Y.Z` (PowerShell) to pin a specific release. Prefer to build
+from source? See `CLAUDE.md` → *Building the Project* or the `CMakeLists.txt`.
+
+### 2. Run
+
 ```bash
 # Train a model on FASTA alignments
-myesl2 train alignments.txt labels.txt output_dir/
+./bin/myesl2 train alignments.txt labels.txt output_dir/
 
 # Evaluate a trained model
-myesl2 evaluate output_dir/lambda_0/weights.txt alignments.txt predictions.txt --hypothesis labels.txt
+./bin/myesl2 evaluate output_dir/lambda_0/weights.txt alignments.txt predictions.txt --hypothesis labels.txt
 
 # Visualize results
-myesl2 visualize eval_gene_predictions.txt heatmap.svg
+./bin/myesl2 visualize eval_gene_predictions.txt heatmap.svg
 ```
 
 ---

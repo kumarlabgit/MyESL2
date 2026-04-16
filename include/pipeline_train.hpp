@@ -26,6 +26,15 @@ struct TrainOptions {
     bool        adaptive_sparsification = false;
     std::string adaptive_l1_spec = "0.1,0.3,0.1";    // produces 0.1, 0.2, 0.3
     std::string adaptive_l2_spec = "0.1,0.3,0.1"; // produces 0.1, 0.2, 0.3
+    // Grid-loop multithreading (see pipeline_train.cpp). 0 or 1 = sequential
+    // (classic skip-ahead applies); >1 runs every grid point in parallel
+    // workers and skip-ahead is disabled during the loop.
+    unsigned int threads = 1;
+    // When threads > 1 and min_groups > 0: after all workers finish, walk
+    // the grid in order and delete the contents of lambda_<idx>/ dirs that
+    // single-threaded skip-ahead would have skipped, preserving the dirs
+    // themselves as drphylo aggregation sentinels.
+    bool         prune_skipped_lambda = false;
 };
 
 struct TrainResult {

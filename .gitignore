@@ -57,6 +57,14 @@ include/armadillo_bits/
 
 old_src/
 
+# Release-binary drop zone (populated by scripts/setup.sh|.ps1)
+/bin/
+
+# Local-only test fixtures (tracked: test/compare_golden.sh and test/golden/)
+/test/compare_gl_logisticr.sh
+/test/gl_logisticr_compare.cpp
+/test/gl_logisticr/
+
 # PFF cache and output directories
 bench_protein/
 pff_cache/

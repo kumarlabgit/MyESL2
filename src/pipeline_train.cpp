@@ -8,11 +8,73 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <limits>
 #include <cmath>
 
 namespace pipeline {
+
+namespace {
+
+// Post-hoc emulation of sequential --min-groups skip-ahead.
+//
+// Walks the grid in original λ₁-outer/λ₂-inner order (the harness's natural
+// lambda_list.txt order), maintaining the same `max_lambda2` ratchet and
+// early-break as the sequential loop in train(). For each index, decides
+// whether that point would have been skipped in a single-threaded run; if
+// so, deletes the contents of lambda_<idx>/ (preserving the directory
+// itself as a drphylo aggregation sentinel) and records the index.
+//
+// Preconditions: every actually-solved grid point has its gene_count stored
+// at gene_counts[idx] (>= 0). Indices where gene_counts[idx] < 0 are
+// treated as not-solved (their lambda dir is pruned, matching
+// sequential-mode skipped semantics).
+//
+// Returns the sorted list of pruned indices.
+std::vector<size_t> prune_skipped_lambdas(
+    const std::vector<std::array<double, 2>>& lambdas,
+    const std::vector<int>& gene_counts,
+    const fs::path& output_dir,
+    int min_groups,
+    double min_lambda2)
+{
+    std::vector<size_t> pruned;
+    double max_lambda2 = std::numeric_limits<double>::infinity();
+    bool broke_early = false;
+
+    for (size_t idx = 0; idx < lambdas.size(); ++idx) {
+        const auto& lam = lambdas[idx];
+        const bool would_skip =
+            broke_early
+            || (lam[1] > max_lambda2)
+            || (idx < gene_counts.size() && gene_counts[idx] < 0);
+
+        if (would_skip) {
+            fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+            if (fs::exists(lam_dir) && fs::is_directory(lam_dir)) {
+                std::error_code ec;
+                for (auto& entry : fs::directory_iterator(lam_dir, ec))
+                    fs::remove_all(entry.path(), ec);
+            }
+            pruned.push_back(idx);
+            continue;
+        }
+
+        int gc = (idx < gene_counts.size()) ? gene_counts[idx] : -1;
+        if (gc >= 0 && gc <= min_groups) {
+            if (lam[1] == min_lambda2) broke_early = true;
+            else max_lambda2 = std::min(max_lambda2, lam[1]);
+        }
+    }
+    return pruned;
+}
+
+} // anonymous namespace
 
 TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     // Step 1: Merge enc.extra_params into a local copy of opts.params
@@ -256,133 +318,250 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
     double min_lambda2 = std::numeric_limits<double>::infinity();
     for (auto& lam : lambdas) min_lambda2 = std::min(min_lambda2, lam[1]);
-    double max_lambda2 = std::numeric_limits<double>::infinity();
 
-    // Step 10: Lambda loop
-    for (int idx = 0; idx < (int)lambdas.size(); ++idx) {
-        auto& lam = lambdas[idx];
-        fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
-        fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
+    // Effective thread count for the grid loop. Force single-thread when nfolds>0
+    // (CV + grid + solver threads is three-level nested parallelism — out of scope
+    // for this change).
+    unsigned int n_threads = opts.threads == 0 ? 1 : opts.threads;
+    if (opts.nfolds > 0 && n_threads > 1) {
+        std::cerr << "Note: --threads > 1 ignored when --nfolds > 0 "
+                     "(grid-level parallelism only supported for non-CV mode).\n";
+        n_threads = 1;
+    }
+    if (n_threads > static_cast<unsigned int>(lambdas.size()))
+        n_threads = static_cast<unsigned int>(lambdas.size());
 
-        if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
-            std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
-                      << "] Skipping (gene count threshold)\n";
-            continue;
-        }
+    // Hoist the idempotent "field" param assignment out of the per-point body so
+    // concurrent workers don't race on map insertion. The conditional depends
+    // only on enc + method, so the value would be the same at every grid point.
+    if (enc.is_overlapping
+        && (method == "olsg_lasso_leastr" || method == "olsg_lasso_logisticr")
+        && opts.params.find("field") == opts.params.end()) {
+        opts.params["field"] = enc.field_path.string();
+    }
 
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(4);
+    // Per-grid-index gene_count captured during solve; -1 = not solved / errored.
+    // Used by the parallel post-hoc pruner to replay sequential skip-ahead logic.
+    std::vector<int> gene_counts(lambdas.size(), -1);
 
-        if (enc.is_overlapping
-            && (method == "olsg_lasso_leastr" || method == "olsg_lasso_logisticr")
-            && opts.params.find("field") == opts.params.end()) {
-            opts.params["field"] = enc.field_path.string();
-        }
+    // Step 10: Lambda loop — branches on thread count.
+    if (n_threads <= 1) {
+        // ---- Sequential path (unchanged semantics for golden-output parity) ----
+        double max_lambda2 = std::numeric_limits<double>::infinity();
 
-        if (opts.nfolds == 0) {
-            // Single model
-            auto regr = regression::createRegressionAnalysis(
-                method, features, responses, alg_table.t(), opts.params, lam, opts.precision);
-            {
-                std::ofstream wo(lam_dir / "weights.txt");
-                std::ifstream mi(output_dir / "combined.map");
-                regr->writeSparseMappedWeightsToStream(wo, mi);
+        for (int idx = 0; idx < (int)lambdas.size(); ++idx) {
+            auto& lam = lambdas[idx];
+            fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+            fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
+
+            if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
+                std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
+                          << "] Skipping (gene count threshold)\n";
+                continue;
             }
-            out << "  [" << idx << "] lambda=[" << lam[0] << ","
-                << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
-            int gene_count = compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
-            out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
-            std::cout << out.str();
 
-            result.weights_paths.push_back(lam_dir / "weights.txt");
-            result.lambdas_used.push_back(lam);
+            std::ostringstream out;
+            out << std::fixed << std::setprecision(4);
 
-            if (skip_ahead_valid && opts.min_groups > 0 && gene_count <= opts.min_groups) {
-                if (lam[1] == min_lambda2) break; // even min lambda2 is too sparse
-                max_lambda2 = std::min(max_lambda2, lam[1]);
-            }
-        } else {
-            // K-fold CV
-            std::vector<double> cv_preds(N, 0.0);
-            for (int k = 0; k < opts.nfolds; ++k) {
-                auto regr = regression::createRegressionAnalysisXVal(
-                    method, features, responses, alg_table.t(), opts.params, lam,
-                    xval_idxs, k, opts.precision);
-                fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
+            if (opts.nfolds == 0) {
+                // Single model
+                auto regr = regression::createRegressionAnalysis(
+                    method, features, responses, alg_table.t(), opts.params, lam, opts.precision);
                 {
-                    std::ofstream wo(fw);
+                    std::ofstream wo(lam_dir / "weights.txt");
                     std::ifstream mi(output_dir / "combined.map");
                     regr->writeSparseMappedWeightsToStream(wo, mi);
                 }
+                out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                    << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
+                int gene_count = compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
+                out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
+                std::cout << out.str();
 
-                // Parse fold weights
-                double fold_intercept = 0.0;
-                std::vector<std::pair<uint64_t, double>> fold_weights;
-                {
-                    std::ifstream wf(fw);
-                    std::string line;
-                    while (std::getline(wf, line)) {
-                        if (line.empty()) continue;
-                        auto tab = line.find('\t');
-                        if (tab == std::string::npos) continue;
-                        std::string label = line.substr(0, tab);
-                        double w = std::stod(line.substr(tab + 1));
-                        if (label == "Intercept") { fold_intercept = w; continue; }
-                        auto it = label_to_col.find(label);
-                        if (it != label_to_col.end())
-                            fold_weights.emplace_back(it->second, w);
+                result.weights_paths.push_back(lam_dir / "weights.txt");
+                result.lambdas_used.push_back(lam);
+                gene_counts[idx] = gene_count;
+
+                if (skip_ahead_valid && opts.min_groups > 0 && gene_count <= opts.min_groups) {
+                    if (lam[1] == min_lambda2) break; // even min lambda2 is too sparse
+                    max_lambda2 = std::min(max_lambda2, lam[1]);
+                }
+            } else {
+                // K-fold CV
+                std::vector<double> cv_preds(N, 0.0);
+                for (int k = 0; k < opts.nfolds; ++k) {
+                    auto regr = regression::createRegressionAnalysisXVal(
+                        method, features, responses, alg_table.t(), opts.params, lam,
+                        xval_idxs, k, opts.precision);
+                    fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
+                    {
+                        std::ofstream wo(fw);
+                        std::ifstream mi(output_dir / "combined.map");
+                        regr->writeSparseMappedWeightsToStream(wo, mi);
                     }
+
+                    // Parse fold weights
+                    double fold_intercept = 0.0;
+                    std::vector<std::pair<uint64_t, double>> fold_weights;
+                    {
+                        std::ifstream wf(fw);
+                        std::string line;
+                        while (std::getline(wf, line)) {
+                            if (line.empty()) continue;
+                            auto tab = line.find('\t');
+                            if (tab == std::string::npos) continue;
+                            std::string label = line.substr(0, tab);
+                            double w = std::stod(line.substr(tab + 1));
+                            if (label == "Intercept") { fold_intercept = w; continue; }
+                            auto it = label_to_col.find(label);
+                            if (it != label_to_col.end())
+                                fold_weights.emplace_back(it->second, w);
+                        }
+                    }
+
+                    // Predict held-out
+                    int held_out = 0;
+                    for (uint32_t i = 0; i < N; ++i) {
+                        if (xval_idxs(i) != static_cast<double>(k)) continue;
+                        ++held_out;
+                        double pred = fold_intercept;
+                        for (auto& [col, w] : fold_weights)
+                            pred += w * static_cast<double>(features(i, col));
+                        cv_preds[i] = pred;
+                    }
+
+                    out << "  [" << idx << "] fold " << k
+                        << ": held-out=" << held_out
+                        << ", non-zero weights=" << fold_weights.size() << "\n";
                 }
 
-                // Predict held-out
-                int held_out = 0;
+                // Write cv_predictions.txt
+                {
+                    std::ofstream cv_out(lam_dir / "cv_predictions.txt");
+                    cv_out << std::fixed << std::setprecision(6);
+                    cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
+                    for (uint32_t i = 0; i < N; ++i)
+                        cv_out << enc.seq_names[i] << '\t'
+                               << cv_preds[i] << '\t'
+                               << enc.hyp_values[i] << '\n';
+                }
+
+                // Classification metrics
+                int tp = 0, tn = 0, fp = 0, fn = 0;
                 for (uint32_t i = 0; i < N; ++i) {
-                    if (xval_idxs(i) != static_cast<double>(k)) continue;
-                    ++held_out;
-                    double pred = fold_intercept;
-                    for (auto& [col, w] : fold_weights)
-                        pred += w * static_cast<double>(features(i, col));
-                    cv_preds[i] = pred;
+                    bool pred_pos = cv_preds[i] > 0.0;
+                    bool true_pos = enc.hyp_values[i] > 0.0f;
+                    if      ( true_pos &&  pred_pos) ++tp;
+                    else if (!true_pos && !pred_pos) ++tn;
+                    else if (!true_pos &&  pred_pos) ++fp;
+                    else                              ++fn;
                 }
+                double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
+                double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
+                double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
+                double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
 
-                out << "  [" << idx << "] fold " << k
-                    << ": held-out=" << held_out
-                    << ", non-zero weights=" << fold_weights.size() << "\n";
+                out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                    << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
+                out << "    TP=" << tp << " TN=" << tn
+                    << " FP=" << fp << " FN=" << fn << "\n";
+                out << "    TPR=" << tpr << " TNR=" << tnr
+                    << " FPR=" << fpr << " FNR=" << fnr << "\n";
+                std::cout << out.str();
             }
+        }
+    } else {
+        // ---- Parallel path (nfolds==0 only; no skip-ahead during loop) ----
+        const bool prune_enabled =
+            opts.prune_skipped_lambda && opts.min_groups > 0 && skip_ahead_valid;
+        std::cout << "  Grid loop parallelism: " << n_threads << " worker(s), "
+                  << lambdas.size() << " point(s) — skip-ahead disabled in-loop"
+                  << (prune_enabled ? " (post-hoc prune enabled)\n" : "\n");
+        if (opts.prune_skipped_lambda && !prune_enabled)
+            std::cerr << "Note: --prune-skipped-lambda is a no-op unless --min-groups > 0 "
+                         "and the grid is lambda1-outer/lambda2-inner ordered.\n";
 
-            // Write cv_predictions.txt
-            {
-                std::ofstream cv_out(lam_dir / "cv_predictions.txt");
-                cv_out << std::fixed << std::setprecision(6);
-                cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
-                for (uint32_t i = 0; i < N; ++i)
-                    cv_out << enc.seq_names[i] << '\t'
-                           << cv_preds[i] << '\t'
-                           << enc.hyp_values[i] << '\n';
+        // Pre-create all sentinel dirs up front (avoids directory-create contention).
+        for (size_t idx = 0; idx < lambdas.size(); ++idx)
+            fs::create_directories(output_dir / ("lambda_" + std::to_string(idx)));
+
+        // Pre-sized per-index result slots; workers write without locks.
+        std::vector<fs::path> per_idx_weights(lambdas.size());
+        std::vector<std::array<double, 2>> per_idx_lambdas(lambdas.size());
+        std::vector<char> per_idx_solved(lambdas.size(), 0);
+
+        std::atomic<size_t> next_lambda{0};
+        std::mutex log_mutex;
+        std::mutex err_mutex;
+        std::exception_ptr first_error;
+
+        auto worker = [&]() {
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lk(err_mutex);
+                    if (first_error) break;
+                }
+                size_t idx = next_lambda.fetch_add(1);
+                if (idx >= lambdas.size()) break;
+                try {
+                    const auto& lam = lambdas[idx];
+                    fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(4);
+
+                    auto regr = regression::createRegressionAnalysis(
+                        method, features, responses, alg_table.t(),
+                        opts.params, lam, opts.precision);
+                    fs::path wpath = lam_dir / "weights.txt";
+                    {
+                        std::ofstream wo(wpath);
+                        std::ifstream mi(output_dir / "combined.map");
+                        regr->writeSparseMappedWeightsToStream(wo, mi);
+                    }
+                    out << "  [" << idx << "] lambda=[" << lam[0] << ","
+                        << lam[1] << "] -> " << wpath.string() << "\n";
+                    int gene_count = compute_sig_scores(wpath, lam_dir, out, (int)idx);
+                    out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
+
+                    per_idx_weights[idx] = wpath;
+                    per_idx_lambdas[idx] = lam;
+                    per_idx_solved[idx]  = 1;
+                    gene_counts[idx]     = gene_count;
+
+                    std::lock_guard<std::mutex> lk(log_mutex);
+                    std::cout << out.str();
+                } catch (...) {
+                    std::lock_guard<std::mutex> lk(err_mutex);
+                    if (!first_error) first_error = std::current_exception();
+                }
             }
+        };
 
-            // Classification metrics
-            int tp = 0, tn = 0, fp = 0, fn = 0;
-            for (uint32_t i = 0; i < N; ++i) {
-                bool pred_pos = cv_preds[i] > 0.0;
-                bool true_pos = enc.hyp_values[i] > 0.0f;
-                if      ( true_pos &&  pred_pos) ++tp;
-                else if (!true_pos && !pred_pos) ++tn;
-                else if (!true_pos &&  pred_pos) ++fp;
-                else                              ++fn;
-            }
-            double tpr = (tp + fn) > 0 ? static_cast<double>(tp) / (tp + fn) : 0.0;
-            double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
-            double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
-            double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
+        std::vector<std::thread> workers;
+        workers.reserve(n_threads);
+        for (unsigned i = 0; i < n_threads; ++i)
+            workers.emplace_back(worker);
+        for (auto& t : workers) t.join();
 
-            out << "  [" << idx << "] lambda=[" << lam[0] << ","
-                << lam[1] << "] CV -> " << lam_dir.filename().string() << "/\n";
-            out << "    TP=" << tp << " TN=" << tn
-                << " FP=" << fp << " FN=" << fn << "\n";
-            out << "    TPR=" << tpr << " TNR=" << tnr
-                << " FPR=" << fpr << " FNR=" << fnr << "\n";
-            std::cout << out.str();
+        if (first_error) std::rethrow_exception(first_error);
+
+        // Post-hoc pruning (optional, parallel mode only).
+        std::unordered_set<size_t> pruned_set;
+        if (prune_enabled) {
+            auto pruned = prune_skipped_lambdas(
+                lambdas, gene_counts, output_dir, opts.min_groups, min_lambda2);
+            pruned_set.insert(pruned.begin(), pruned.end());
+            std::cout << "  Pruned " << pruned.size() << " of " << lambdas.size()
+                      << " lambda point(s) to match single-threaded skip-ahead semantics.\n";
+        }
+
+        // Merge into result in grid order, skipping pruned indices.
+        for (size_t idx = 0; idx < lambdas.size(); ++idx) {
+            if (!per_idx_solved[idx]) continue;
+            if (pruned_set.count(idx)) continue;
+            result.weights_paths.push_back(per_idx_weights[idx]);
+            result.lambdas_used.push_back(per_idx_lambdas[idx]);
         }
     }
 

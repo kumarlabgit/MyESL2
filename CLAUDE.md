@@ -102,6 +102,10 @@ PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newi
 - `--drop-major-allele`: Excludes the most frequent allele column from FASTA encoding.
 - `--auto-bit-ct X`: Sets `min_minor = ceil(X% × minority_class_size)`.
 
+### Grid-Loop Threading (train / drphylo / aim / adaptive)
+
+`--threads N` parallelises the lambda grid solver loop in addition to preprocessing/encoding (previously only the preprocess phase was threaded). The `--min-groups` skip-ahead ratchet is disabled while the parallel loop runs (the ratchet relies on sequential gene-count ordering). Pass `--prune-skipped-lambda` to replay the skip-ahead logic after the parallel loop finishes, deleting the contents of `lambda_<idx>/` directories that a single-threaded run would have skipped (the dirs are preserved as sentinels for drphylo aggregation). Grid-loop parallelism is disabled when `--nfolds > 0`. When running `--threads > 1`, set `OPENBLAS_NUM_THREADS=1` to avoid nested parallelism between worker threads and OpenBLAS kernels. `psc` has its own independent grid-loop threading (unchanged by this).
+
 ## Code Architecture
 
 ### PFF (Parsed FASTA File) Format
