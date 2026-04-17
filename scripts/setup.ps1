@@ -45,16 +45,24 @@ Write-Host "  Tag:      $Tag"
 Write-Host ""
 
 $baseUrl = "https://github.com/$Repo/releases/download/$Tag"
-$assets  = @(
+
+# Required assets (fail if missing)
+$requiredAssets = @(
     @{ Asset = "myesl2-windows-x64.exe"; Local = "myesl2.exe"     },
     @{ Asset = "openblas.dll";           Local = "libopenblas.dll" },
     @{ Asset = "lapack.dll";             Local = "liblapack.dll"   }
 )
 
+# Fortran runtime DLLs (required by lapack.dll; older releases may not have them)
+$optionalAssets = @(
+    @{ Asset = "libgfortran-5.dll";      Local = "libgfortran-5.dll"  },
+    @{ Asset = "libgcc_s_seh-1.dll";     Local = "libgcc_s_seh-1.dll" }
+)
+
 # ── Download into bin\ ───────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 
-foreach ($a in $assets) {
+foreach ($a in $requiredAssets) {
     $url  = "$baseUrl/$($a.Asset)"
     $dest = Join-Path $binDir $a.Local
     Write-Host ("  v {0}  ->  bin\{1}" -f $a.Asset, $a.Local)
@@ -65,6 +73,18 @@ foreach ($a in $assets) {
         Write-Error "Download failed: $url`n$_"
         if (Test-Path $dest) { Remove-Item $dest -Force }
         exit 1
+    }
+}
+
+foreach ($a in $optionalAssets) {
+    $url  = "$baseUrl/$($a.Asset)"
+    $dest = Join-Path $binDir $a.Local
+    Write-Host ("  v {0}  ->  bin\{1}" -f $a.Asset, $a.Local)
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing `
+            -Headers @{ "User-Agent" = "myesl2-setup" }
+    } catch {
+        Write-Host "    (not found in release - skipping)"
     }
 }
 

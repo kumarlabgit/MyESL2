@@ -37,14 +37,14 @@ case "$OS" in
         [[ "$ARCH" == "x86_64" ]] \
             || { echo "ERROR: Linux binaries are x86_64 only (got $ARCH)." >&2; exit 1; }
         BINARY_ASSET="myesl2-linux-x64"
-        LIB_ASSETS=("libopenblas.so")
+        LIB_ASSETS=("libopenblas.so" "libgfortran.so.5")
         LOCAL_BIN_NAME="myesl2"
         ;;
     Darwin)
         [[ "$ARCH" == "arm64" ]] \
             || { echo "ERROR: macOS binaries are arm64 (Apple Silicon) only (got $ARCH)." >&2; exit 1; }
         BINARY_ASSET="myesl2-macos-arm64"
-        LIB_ASSETS=("libopenblas.dylib")
+        LIB_ASSETS=("libopenblas.dylib" "libgfortran.5.dylib" "libquadmath.0.dylib")
         LOCAL_BIN_NAME="myesl2"
         ;;
     *)
@@ -79,21 +79,28 @@ BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 mkdir -p "$BIN_DIR"
 
 download() {
-    local asset="$1" dest="$2"
+    local asset="$1" dest="$2" required="${3:-yes}"
     local url="$BASE_URL/$asset"
     echo "  ↓ $asset  →  bin/$(basename "$dest")"
     if ! curl -fsSL -o "$dest" "$url"; then
-        echo "ERROR: download failed: $url" >&2
         rm -f "$dest"
-        exit 1
+        if [[ "$required" == "yes" ]]; then
+            echo "ERROR: download failed: $url" >&2
+            exit 1
+        else
+            echo "    (not found in release — skipping)" >&2
+        fi
     fi
 }
 
 download "$BINARY_ASSET" "$BIN_DIR/$LOCAL_BIN_NAME"
 chmod +x "$BIN_DIR/$LOCAL_BIN_NAME"
 
-for lib in "${LIB_ASSETS[@]}"; do
-    download "$lib" "$BIN_DIR/$lib"
+# First lib (libopenblas) is required; Fortran runtime libs are optional
+# (older releases may not include them).
+download "${LIB_ASSETS[0]}" "$BIN_DIR/${LIB_ASSETS[0]}" yes
+for lib in "${LIB_ASSETS[@]:1}"; do
+    download "$lib" "$BIN_DIR/$lib" optional
 done
 
 # ── Copy data_defs.ini next to the binary ────────────────────────
