@@ -119,12 +119,14 @@ jobs:
           # Fallback: if CMake didn't copy the Fortran runtime, grab from system
           if ! ls artifact/libgfortran* 1>/dev/null 2>&1; then
             if [[ "$(uname -s)" == "Darwin" ]]; then
-              GFORT=$(gfortran --print-file-name=libgfortran.5.dylib 2>/dev/null)
-              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib" >&2; exit 1; }
-              cp "$(realpath "$GFORT")" artifact/libgfortran.5.dylib
-              QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null)
-              [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib" >&2; exit 1; }
-              cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib
+              # Homebrew GCC uses versioned names (gfortran-15, etc.) so search
+              # the lib directory directly instead of relying on `gfortran`.
+              GFORT=$(find /opt/homebrew/lib/gcc -name "libgfortran.5.dylib" 2>/dev/null | head -1)
+              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib in Homebrew GCC" >&2; exit 1; }
+              cp "$GFORT" artifact/libgfortran.5.dylib
+              QUAD=$(find /opt/homebrew/lib/gcc -name "libquadmath.0.dylib" 2>/dev/null | head -1)
+              [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib in Homebrew GCC" >&2; exit 1; }
+              cp "$QUAD" artifact/libquadmath.0.dylib
             else
               GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
                       || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
