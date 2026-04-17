@@ -98,13 +98,17 @@ jobs:
           cp build/bin/libgfortran* artifact/ 2>/dev/null || true
           cp build/bin/libquadmath* artifact/ 2>/dev/null || true
           # Fallback: if CMake didn't copy the Fortran runtime, grab from system
-          if [ ! -f artifact/libgfortran* ] 2>/dev/null; then
-            GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
-                    || gcc --print-file-name=libgfortran.so.5 2>/dev/null || true)
-            [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.so.5 || true
-            # macOS: also grab libquadmath
-            QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null || true)
-            [ -f "$QUAD" ] && cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib || true
+          if ! ls artifact/libgfortran* 1>/dev/null 2>&1; then
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+              GFORT=$(gfortran --print-file-name=libgfortran.5.dylib 2>/dev/null || true)
+              [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.5.dylib || true
+              QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null || true)
+              [ -f "$QUAD" ] && cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib || true
+            else
+              GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
+                      || gcc --print-file-name=libgfortran.so.5 2>/dev/null || true)
+              [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.so.5 || true
+            fi
           fi
 
       - name: Prepare binary artifact (Windows)
