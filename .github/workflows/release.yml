@@ -100,14 +100,17 @@ jobs:
           # Fallback: if CMake didn't copy the Fortran runtime, grab from system
           if ! ls artifact/libgfortran* 1>/dev/null 2>&1; then
             if [[ "$(uname -s)" == "Darwin" ]]; then
-              GFORT=$(gfortran --print-file-name=libgfortran.5.dylib 2>/dev/null || true)
-              [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.5.dylib || true
-              QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null || true)
-              [ -f "$QUAD" ] && cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib || true
+              GFORT=$(gfortran --print-file-name=libgfortran.5.dylib 2>/dev/null)
+              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib" >&2; exit 1; }
+              cp "$(realpath "$GFORT")" artifact/libgfortran.5.dylib
+              QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null)
+              [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib" >&2; exit 1; }
+              cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib
             else
               GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
-                      || gcc --print-file-name=libgfortran.so.5 2>/dev/null || true)
-              [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.so.5 || true
+                      || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
+              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
+              cp "$(realpath "$GFORT")" artifact/libgfortran.so.5
             fi
           fi
 
