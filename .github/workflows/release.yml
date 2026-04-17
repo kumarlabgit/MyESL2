@@ -101,10 +101,10 @@ jobs:
           if [ ! -f artifact/libgfortran* ] 2>/dev/null; then
             GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
                     || gcc --print-file-name=libgfortran.so.5 2>/dev/null || true)
-            [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.so.5
+            [ -f "$GFORT" ] && cp "$(realpath "$GFORT")" artifact/libgfortran.so.5 || true
             # macOS: also grab libquadmath
             QUAD=$(gfortran --print-file-name=libquadmath.0.dylib 2>/dev/null || true)
-            [ -f "$QUAD" ] && cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib
+            [ -f "$QUAD" ] && cp "$(realpath "$QUAD")" artifact/libquadmath.0.dylib || true
           fi
 
       - name: Prepare binary artifact (Windows)
