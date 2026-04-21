@@ -170,17 +170,20 @@ EncodeResult encode(const EncodeOptions& opts)
 
     size_t elem_size = (opts.precision == regression::Precision::FP64) ? 8 : 4;
 
-    // Solver peak memory: feature matrix + FISTA working vectors
-    // Non-overlapping: 10 M-vectors + 6 N-vectors
-    // Overlapping adds: Y, field copies, overlapping() internals
-    auto estimate_peak_mem = [&](uint64_t cols, uint32_t samples) -> uint64_t {
-        uint64_t matrix = cols * samples * elem_size;
-        uint64_t m_work = uint64_t(10) * samples * elem_size;
+    // Peak memory estimate: feature matrix + per-thread FISTA working vectors.
+    // Each concurrent solver thread allocates: 10 sample-length + 6 coef-length vectors.
+    // Concurrent solvers = min(num_threads, lambda_count).
+    unsigned int solver_threads = std::min(num_threads, static_cast<unsigned int>(opts.lambda_count));
+    if (solver_threads == 0) solver_threads = 1;
+    auto solver_per_thread = [&](uint64_t cols, uint32_t samples) -> uint64_t {
         uint64_t n_coeff = is_overlapping
             ? ((opts.precision == regression::Precision::FP64) ? 132 : 72)
             : 6 * elem_size;
-        uint64_t n_work = cols * n_coeff;
-        return matrix + m_work + n_work;
+        return uint64_t(10) * samples * elem_size + cols * n_coeff;
+    };
+    auto estimate_peak_mem = [&](uint64_t cols, uint32_t samples) -> uint64_t {
+        uint64_t matrix = cols * samples * elem_size;
+        return matrix + solver_per_thread(cols, samples) * solver_threads;
     };
 
     if (pre.datatype == "numeric") {
@@ -473,7 +476,7 @@ EncodeResult encode(const EncodeOptions& opts)
         }
 
     } else {
-        // ---- FASTA branch ----
+        // ---- FASTA branch (two-pass encoding) ----
         std::vector<fs::path> pff_paths;
         for (auto& fasta_path : all_fasta_paths) {
             fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
@@ -485,16 +488,16 @@ EncodeResult encode(const EncodeOptions& opts)
         }
         int total_encode = static_cast<int>(pff_paths.size());
 
-        std::cout << "\n--- Phase 2: Encoding ---\n";
+        std::cout << "\n--- Phase 2: Encoding (two-pass) ---\n";
         std::cout << "  Alignments to encode: " << total_encode << "\n";
         std::cout << "  Min-minor threshold:  " << min_minor << "\n";
-        std::cout << "  Worker threads:       " << num_threads << "\n";
-        std::cout << "  Encoder:              " << (pre.use_dlt ? "DLT" : "standard") << "\n\n";
+        std::cout << "  Worker threads:       " << num_threads << "\n\n";
 
         bool skip_x = (pre.datatype == "protein" || pre.datatype == "nucleotide");
 
-        auto encode_start = std::chrono::steady_clock::now();
-        std::vector<encoder::AlignmentResult> results(total_encode);
+        // ======== Pass 1: Count columns and collect metadata ========
+        std::cout << "  Pass 1: counting columns...\n";
+        std::vector<encoder::AlignmentMeta> metas(total_encode);
         uint64_t running_cols = 0;
         uint64_t first_estimate = 0;
         int next_pct = 1;
@@ -506,7 +509,7 @@ EncodeResult encode(const EncodeOptions& opts)
             for (int i = 0; i < total_encode; ++i) work_queue.push(i);
             int done_count = 0;
 
-            auto enc_worker = [&]() {
+            auto count_worker = [&]() {
                 auto check_milestone = [&]() {
                     while (next_pct <= 10 && running_cols > 0 &&
                            done_count * 10 >= next_pct * total_encode) {
@@ -531,18 +534,17 @@ EncodeResult encode(const EncodeOptions& opts)
                         work_queue.pop();
                     }
                     try {
-                        results[idx] = pre.use_dlt
-                            ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor,
-                                                      opts.drop_major, opts.dropout_labels, skip_x)
-                            : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor,
-                                                  opts.drop_major, opts.dropout_labels, skip_x);
+                        metas[idx] = encoder::count_pff_columns(
+                            pff_paths[idx], hyp_seq_names, min_minor,
+                            opts.drop_major, opts.dropout_labels, skip_x, opts.minor_column);
                         {
                             std::lock_guard<std::mutex> lock(print_mutex);
                             ++done_count;
-                            running_cols += results[idx].columns.size();
+                            size_t ncols = metas[idx].num_cols + (metas[idx].has_minor_col ? 1 : 0);
+                            running_cols += ncols;
                             std::cout << "[" << done_count << "/" << total_encode << "] "
                                       << pff_paths[idx].filename().string()
-                                      << " -> " << results[idx].columns.size() << " columns\n";
+                                      << " -> " << metas[idx].num_cols << " columns\n";
                             check_milestone();
                             if (opts.max_mem > 0 && !mem_exceeded.load()) {
                                 uint64_t cur_peak = estimate_peak_mem(running_cols, N);
@@ -562,9 +564,9 @@ EncodeResult encode(const EncodeOptions& opts)
                             }
                         }
                     } catch (const std::exception& e) {
-                        results[idx].failed    = true;
-                        results[idx].error_msg = e.what();
-                        results[idx].stem      = pff_paths[idx].stem().string();
+                        metas[idx].failed    = true;
+                        metas[idx].error_msg = e.what();
+                        metas[idx].stem      = pff_paths[idx].stem().string();
                         std::lock_guard<std::mutex> lock(print_mutex);
                         ++done_count;
                         std::cerr << "[" << done_count << "/" << total_encode << "] FAIL: "
@@ -579,47 +581,26 @@ EncodeResult encode(const EncodeOptions& opts)
             if (tc == 0) tc = 1;
             std::vector<std::thread> threads;
             threads.reserve(tc);
-            for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(enc_worker);
+            for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(count_worker);
             for (auto& t : threads) t.join();
         }
         if (mem_exceeded.load() && !opts.disable_mc) throw std::runtime_error(mem_err_msg);
-        (void)encode_start; // timing available if needed
 
+        // Collect missing sequences
         for (int i = 0; i < total_encode; ++i)
-            for (auto& m : results[i].missing_sequences)
+            for (auto& m : metas[i].missing_sequences)
                 all_missing.push_back(m);
 
-        // Build minor columns if --minor-column is set
-        std::vector<std::vector<uint8_t>> minor_cols(total_encode);
-        std::vector<bool> has_minor_col(total_encode, false);
-        if (opts.minor_column) {
-            for (int ri = 0; ri < total_encode; ++ri) {
-                auto& r = results[ri];
-                if (r.failed || r.columns.empty()) continue;
-                bool any_minor = false;
-                for (size_t j = 0; j < r.col_is_minor.size(); ++j) {
-                    if (r.col_is_minor[j]) { any_minor = true; break; }
-                }
-                if (!any_minor) continue;
-                has_minor_col[ri] = true;
-                minor_cols[ri].assign(N, 0);
-                for (size_t j = 0; j < r.columns.size(); ++j) {
-                    if (r.col_is_minor[j]) {
-                        for (uint32_t si = 0; si < N; ++si)
-                            minor_cols[ri][si] |= r.columns[j][si];
-                    }
-                }
-            }
-        }
-
-        for (auto& r : results) {
-            if (r.failed) { ++failed_count; continue; }
-            total_cols += r.columns.size();
+        // Compute total columns and per-gene column counts
+        std::vector<size_t> result_col_counts(total_encode, 0);
+        for (int ri = 0; ri < total_encode; ++ri) {
+            if (metas[ri].failed) { ++failed_count; continue; }
+            size_t ncols = metas[ri].num_cols + (metas[ri].has_minor_col ? 1 : 0);
+            result_col_counts[ri] = ncols;
+            total_cols += ncols;
             ++n_aligned;
         }
-        // Add minor column counts to total
-        for (int ri = 0; ri < total_encode; ++ri)
-            if (has_minor_col[ri]) ++total_cols;
+
         {
             uint64_t actual_matrix = total_cols * static_cast<uint64_t>(N) * elem_size;
             uint64_t actual_peak  = estimate_peak_mem(total_cols, N);
@@ -631,46 +612,111 @@ EncodeResult encode(const EncodeOptions& opts)
             std::cout << "\n";
         }
 
-        // Save column counts before freeing intermediate storage
-        std::vector<size_t> result_col_counts(total_encode, 0);
-        for (int ri = 0; ri < total_encode; ++ri) {
-            if (!results[ri].failed) {
-                result_col_counts[ri] = results[ri].columns.size();
-                if (has_minor_col[ri]) ++result_col_counts[ri];
+        // Write combined.map and minor_alleles.txt BEFORE allocating features
+        // (this lets us free map data before the big matrix allocation)
+        {
+            std::ofstream combined_map(opts.output_dir / "combined.map");
+            combined_map << "Position\tLabel\n";
+            uint64_t map_pos = 0;
+            for (int ri = 0; ri < total_encode; ++ri) {
+                auto& meta = metas[ri];
+                if (meta.failed) continue;
+                all_stems_ordered.push_back(meta.stem);
+                for (auto& [pos, allele] : meta.map)
+                    combined_map << map_pos++ << '\t' << meta.stem << '_' << pos << '_' << allele << '\n';
+                if (meta.has_minor_col)
+                    combined_map << map_pos++ << '\t' << meta.stem << "_minor\n";
             }
         }
 
-        features.zeros(N, total_cols);
-        {
-            uint64_t col_offset = 0;
-            for (int ri = 0; ri < total_encode; ++ri) {
-                auto& r = results[ri];
-                if (r.failed) continue;
-                size_t ncols = r.columns.size();
-                for (size_t j = 0; j < ncols; ++j)
-                    for (uint32_t si = 0; si < N; ++si)
-                        features(si, col_offset + j) = static_cast<float>(r.columns[j][si]);
-                { decltype(r.columns) tmp; tmp.swap(r.columns); } // free after copy
-                if (has_minor_col[ri]) {
-                    for (uint32_t si = 0; si < N; ++si)
-                        features(si, col_offset + ncols) = static_cast<float>(minor_cols[ri][si]);
-                    minor_cols[ri].clear();
-                    minor_cols[ri].shrink_to_fit();
-                    col_offset += ncols + 1;
-                } else {
-                    col_offset += ncols;
+        if (opts.minor_column) {
+            std::ofstream ma_file(opts.output_dir / "minor_alleles.txt");
+            for (auto& meta : metas) {
+                if (meta.failed) continue;
+                for (size_t j = 0; j < meta.map.size(); ++j) {
+                    if (meta.col_is_minor[j]) {
+                        auto& [pos, allele] = meta.map[j];
+                        ma_file << meta.stem << '_' << pos << '_' << allele << '\n';
+                    }
                 }
             }
         }
 
+        // Compute per-gene column offsets in the features matrix
+        std::vector<uint64_t> col_offsets(total_encode, 0);
+        {
+            uint64_t offset = 0;
+            for (int ri = 0; ri < total_encode; ++ri) {
+                col_offsets[ri] = offset;
+                if (!metas[ri].failed)
+                    offset += result_col_counts[ri];
+            }
+        }
+
+        // Free map/col_is_minor data (no longer needed) before big allocation
+        for (auto& meta : metas) {
+            { decltype(meta.map) tmp; tmp.swap(meta.map); }
+            { decltype(meta.col_is_minor) tmp; tmp.swap(meta.col_is_minor); }
+            { decltype(meta.missing_sequences) tmp; tmp.swap(meta.missing_sequences); }
+        }
+
+        // ======== Pass 2: Encode directly into features matrix ========
+        std::cout << "  Pass 2: encoding into matrix...\n";
+        features.zeros(N, total_cols);
+        {
+            std::mutex queue_mutex, print_mutex;
+            std::queue<int> work_queue;
+            for (int i = 0; i < total_encode; ++i) {
+                if (!metas[i].failed) work_queue.push(i);
+            }
+            int done_count = 0;
+            int total_pass2 = static_cast<int>(work_queue.size());
+
+            auto encode_worker = [&]() {
+                while (true) {
+                    int idx;
+                    {
+                        std::lock_guard<std::mutex> lock(queue_mutex);
+                        if (work_queue.empty()) break;
+                        idx = work_queue.front();
+                        work_queue.pop();
+                    }
+                    try {
+                        encoder::encode_pff_into(
+                            features, col_offsets[idx],
+                            pff_paths[idx], hyp_seq_names, min_minor,
+                            opts.drop_major, opts.dropout_labels, skip_x,
+                            opts.minor_column, metas[idx].has_minor_col);
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> lock(print_mutex);
+                        std::cerr << "  Pass 2 FAIL: " << pff_paths[idx].filename().string()
+                                  << " -> " << e.what() << "\n";
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(print_mutex);
+                        ++done_count;
+                        if (done_count % 1000 == 0 || done_count == total_pass2)
+                            std::cout << "  [pass 2] " << done_count << "/" << total_pass2 << " encoded\n";
+                    }
+                }
+            };
+
+            unsigned int tc = std::min(num_threads, static_cast<unsigned int>(total_pass2));
+            if (tc == 0) tc = 1;
+            std::vector<std::thread> threads;
+            threads.reserve(tc);
+            for (unsigned int i = 0; i < tc; ++i) threads.emplace_back(encode_worker);
+            for (auto& t : threads) t.join();
+        }
+
+        // Build alignment table and group table
         std::cout << "\nWriting alignment table...\n";
         alg_table.zeros(3, n_aligned);
         {
             uint64_t offset = 0;
             int col = 0;
             for (int ri = 0; ri < total_encode; ++ri) {
-                auto& r = results[ri];
-                if (r.failed) continue;
+                if (metas[ri].failed) continue;
                 uint64_t ncols = result_col_counts[ri];
                 alg_table(0, col) = static_cast<double>(offset + 1);
                 alg_table(1, col) = static_cast<double>(offset + ncols);
@@ -688,9 +734,9 @@ EncodeResult encode(const EncodeOptions& opts)
         {
             std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> stem_to_cols;
             int col = 0;
-            for (auto& r : results) {
-                if (r.failed) continue;
-                stem_to_cols[r.stem] = {
+            for (auto& meta : metas) {
+                if (meta.failed) continue;
+                stem_to_cols[meta.stem] = {
                     static_cast<uint64_t>(alg_table(0, col)),
                     static_cast<uint64_t>(alg_table(1, col))
                 };
@@ -761,36 +807,6 @@ EncodeResult encode(const EncodeOptions& opts)
             for (auto& m : all_missing) missing_file << m << '\n';
             std::cout << "Missing sequences: " << all_missing.size()
                       << " -> " << (opts.output_dir / "missing_sequences.txt").string() << "\n";
-        }
-
-        {
-            std::ofstream combined_map(opts.output_dir / "combined.map");
-            combined_map << "Position\tLabel\n";
-            uint64_t map_pos = 0;
-            int ri_idx = 0;
-            for (auto& r : results) {
-                if (r.failed) { ++ri_idx; continue; }
-                all_stems_ordered.push_back(r.stem);
-                for (auto& [pos, allele] : r.map)
-                    combined_map << map_pos++ << '\t' << r.stem << '_' << pos << '_' << allele << '\n';
-                if (has_minor_col[ri_idx])
-                    combined_map << map_pos++ << '\t' << r.stem << "_minor\n";
-                ++ri_idx;
-            }
-        }
-
-        // Write minor_alleles.txt listing all minor allele feature labels
-        if (opts.minor_column) {
-            std::ofstream ma_file(opts.output_dir / "minor_alleles.txt");
-            for (auto& r : results) {
-                if (r.failed) continue;
-                for (size_t j = 0; j < r.map.size(); ++j) {
-                    if (r.col_is_minor[j]) {
-                        auto& [pos, allele] = r.map[j];
-                        ma_file << r.stem << '_' << pos << '_' << allele << '\n';
-                    }
-                }
-            }
         }
     }
 

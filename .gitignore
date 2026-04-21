@@ -51,9 +51,6 @@ fungi_analysis.exe
 !deps/
 !deps/**
 
-# Vendored Armadillo headers (use system install)
-include/armadillo
-include/armadillo_bits/
 
 old_src/
 

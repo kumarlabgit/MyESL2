@@ -1,6 +1,7 @@
 #include "encoder.hpp"
 #include "fasta_parser.hpp"
 
+#include <armadillo>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -286,6 +287,252 @@ AlignmentResult encode_raw_sequences(
     }
 
     return result;
+}
+
+// ---- Two-pass encoding implementation ----
+
+AlignmentMeta count_pff_columns(
+    const std::filesystem::path& pff_path,
+    const std::vector<std::string>& hyp_seq_names,
+    int min_minor,
+    bool drop_major,
+    const std::unordered_set<std::string>& dropout_labels,
+    bool skip_x,
+    bool minor_column)
+{
+    AlignmentMeta meta;
+    meta.stem = pff_path.stem().string();
+
+    auto metadata = fasta::read_pff_metadata(pff_path);
+
+    std::unordered_map<std::string, uint32_t> pff_id_to_idx;
+    pff_id_to_idx.reserve(metadata.seq_ids.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(metadata.seq_ids.size()); ++i)
+        pff_id_to_idx[metadata.seq_ids[i]] = i;
+
+    uint32_t N = static_cast<uint32_t>(hyp_seq_names.size());
+    std::vector<int> seq_mapping(N, -1);
+    for (uint32_t i = 0; i < N; ++i) {
+        auto it = pff_id_to_idx.find(hyp_seq_names[i]);
+        if (it != pff_id_to_idx.end())
+            seq_mapping[i] = static_cast<int>(it->second);
+        else
+            meta.missing_sequences.push_back(meta.stem + "\t" + hyp_seq_names[i]);
+    }
+
+    uint32_t S = metadata.num_sequences;
+    uint32_t L = metadata.alignment_length;
+    std::vector<char> raw(metadata.get_data_size());
+    {
+        std::ifstream file(pff_path, std::ios::binary);
+        file.seekg(static_cast<std::streamoff>(metadata.data_offset));
+        file.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+
+    std::array<bool, 256> is_skip{};
+    is_skip[static_cast<uint8_t>('-')] = true;
+    is_skip[static_cast<uint8_t>('?')] = true;
+    if (skip_x) is_skip[static_cast<uint8_t>('X')] = true;
+
+    int counts[256];
+    int8_t col_idx[256];
+
+    for (uint32_t p = 0; p < L; ++p) {
+        std::memset(counts, 0, sizeof(counts));
+        for (uint32_t i = 0; i < N; ++i) {
+            if (seq_mapping[i] < 0) continue;
+            auto c = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+            if (is_skip[c]) continue;
+            ++counts[c];
+        }
+
+        int major_count = 0;
+        uint8_t major = 0;
+        int num_alleles = 0;
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            ++num_alleles;
+            if (counts[c] > major_count) {
+                major_count = counts[c];
+                major = static_cast<uint8_t>(c);
+            }
+        }
+
+        if (num_alleles < 2) continue;
+
+        int non_major = 0;
+        for (int c = 0; c < 256; ++c)
+            if (c != static_cast<int>(major)) non_major += counts[c];
+
+        if (non_major < min_minor) continue;
+
+        std::memset(col_idx, -1, sizeof(col_idx));
+        int8_t next_col = 0;
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            if (drop_major && c == static_cast<int>(major)) continue;
+            if (counts[c] < min_minor) continue;
+            if (!dropout_labels.empty()) {
+                std::string lbl = meta.stem + "_" + std::to_string(p) + "_" + static_cast<char>(c);
+                if (dropout_labels.count(lbl)) continue;
+            }
+            col_idx[c] = next_col++;
+        }
+
+        int num_cols = static_cast<int>(next_col);
+        if (num_cols == 0) continue;
+
+        // Record map entries and minor flags (same order as DLT encoder)
+        for (int c = 0; c < 256; ++c) {
+            if (col_idx[c] >= 0) {
+                meta.map.push_back({p, static_cast<char>(c)});
+                meta.col_is_minor.push_back(c != static_cast<int>(major));
+            }
+        }
+    }
+
+    meta.num_cols = meta.map.size();
+
+    // Determine if this gene will have a minor column
+    if (minor_column && meta.num_cols > 0) {
+        for (size_t j = 0; j < meta.col_is_minor.size(); ++j) {
+            if (meta.col_is_minor[j]) { meta.has_minor_col = true; break; }
+        }
+    }
+
+    return meta;
+}
+
+
+bool encode_pff_into(
+    arma::fmat& features,
+    uint64_t col_offset,
+    const std::filesystem::path& pff_path,
+    const std::vector<std::string>& hyp_seq_names,
+    int min_minor,
+    bool drop_major,
+    const std::unordered_set<std::string>& dropout_labels,
+    bool skip_x,
+    bool minor_column,
+    bool has_minor_col)
+{
+    std::string stem = pff_path.stem().string();
+
+    auto metadata = fasta::read_pff_metadata(pff_path);
+
+    std::unordered_map<std::string, uint32_t> pff_id_to_idx;
+    pff_id_to_idx.reserve(metadata.seq_ids.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(metadata.seq_ids.size()); ++i)
+        pff_id_to_idx[metadata.seq_ids[i]] = i;
+
+    uint32_t N = static_cast<uint32_t>(hyp_seq_names.size());
+    std::vector<int> seq_mapping(N, -1);
+    for (uint32_t i = 0; i < N; ++i) {
+        auto it = pff_id_to_idx.find(hyp_seq_names[i]);
+        if (it != pff_id_to_idx.end())
+            seq_mapping[i] = static_cast<int>(it->second);
+    }
+
+    uint32_t S = metadata.num_sequences;
+    uint32_t L = metadata.alignment_length;
+    std::vector<char> raw(metadata.get_data_size());
+    {
+        std::ifstream file(pff_path, std::ios::binary);
+        file.seekg(static_cast<std::streamoff>(metadata.data_offset));
+        file.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+
+    std::array<bool, 256> is_skip{};
+    is_skip[static_cast<uint8_t>('-')] = true;
+    is_skip[static_cast<uint8_t>('?')] = true;
+    if (skip_x) is_skip[static_cast<uint8_t>('X')] = true;
+
+    int counts[256];
+    int8_t col_idx[256];
+
+    // Track minor column (OR of all minor allele columns)
+    std::vector<uint8_t> minor_buf;
+    if (has_minor_col) minor_buf.assign(N, 0);
+
+    uint64_t cur_col = col_offset;
+
+    for (uint32_t p = 0; p < L; ++p) {
+        std::memset(counts, 0, sizeof(counts));
+        for (uint32_t i = 0; i < N; ++i) {
+            if (seq_mapping[i] < 0) continue;
+            auto c = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+            if (is_skip[c]) continue;
+            ++counts[c];
+        }
+
+        int major_count = 0;
+        uint8_t major = 0;
+        int num_alleles = 0;
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            ++num_alleles;
+            if (counts[c] > major_count) {
+                major_count = counts[c];
+                major = static_cast<uint8_t>(c);
+            }
+        }
+
+        if (num_alleles < 2) continue;
+
+        int non_major = 0;
+        for (int c = 0; c < 256; ++c)
+            if (c != static_cast<int>(major)) non_major += counts[c];
+
+        if (non_major < min_minor) continue;
+
+        std::memset(col_idx, -1, sizeof(col_idx));
+        int8_t next_col = 0;
+        for (int c = 0; c < 256; ++c) {
+            if (counts[c] == 0) continue;
+            if (drop_major && c == static_cast<int>(major)) continue;
+            if (counts[c] < min_minor) continue;
+            if (!dropout_labels.empty()) {
+                std::string lbl = stem + "_" + std::to_string(p) + "_" + static_cast<char>(c);
+                if (dropout_labels.count(lbl)) continue;
+            }
+            col_idx[c] = next_col++;
+        }
+
+        int num_cols = static_cast<int>(next_col);
+        if (num_cols == 0) continue;
+
+        // Encode sequences directly into features matrix
+        for (uint32_t i = 0; i < N; ++i) {
+            if (seq_mapping[i] < 0) continue;
+            auto c = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+            int8_t ci = col_idx[c];
+            if (ci >= 0) features(i, cur_col + ci) = 1.0f;
+        }
+
+        // Update minor column buffer
+        if (has_minor_col) {
+            for (int c = 0; c < 256; ++c) {
+                if (col_idx[c] >= 0 && c != static_cast<int>(major)) {
+                    // This column is a minor allele — OR its presence into minor_buf
+                    for (uint32_t i = 0; i < N; ++i) {
+                        if (seq_mapping[i] < 0) continue;
+                        auto ch = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+                        if (ch == static_cast<uint8_t>(c)) minor_buf[i] = 1;
+                    }
+                }
+            }
+        }
+
+        cur_col += num_cols;
+    }
+
+    // Write minor column
+    if (has_minor_col) {
+        for (uint32_t i = 0; i < N; ++i)
+            features(i, cur_col) = static_cast<float>(minor_buf[i]);
+    }
+
+    return true;
 }
 
 } // namespace encoder

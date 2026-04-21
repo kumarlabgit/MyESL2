@@ -7,6 +7,9 @@
 #include <utility>
 #include <vector>
 
+// Forward declare arma::fmat to avoid pulling in full Armadillo header
+namespace arma { template<typename eT> class Mat; typedef Mat<float> fmat; }
+
 namespace encoder {
 
 struct AlignmentResult {
@@ -18,6 +21,18 @@ struct AlignmentResult {
     bool failed = false;
     std::string error_msg;
     size_t var_site_count = 0;  // count of variable sites (for PSC group penalty)
+};
+
+// Lightweight result from pass-1 of two-pass encoding: metadata only, no column data.
+struct AlignmentMeta {
+    std::string stem;
+    size_t num_cols = 0;
+    std::vector<std::pair<uint32_t, char>> map; // (original_pos, allele) per encoded column
+    std::vector<std::string> missing_sequences;
+    std::vector<bool> col_is_minor;
+    bool has_minor_col = false;  // true if any col_is_minor entry is true
+    bool failed = false;
+    std::string error_msg;
 };
 
 // Encode a single PFF file into a one-hot matrix.
@@ -56,5 +71,37 @@ AlignmentResult encode_raw_sequences(
     const std::string& gene_name,
     const std::vector<std::vector<uint8_t>>& sequences,
     int min_minor = 2);
+
+// ---- Two-pass encoding (eliminates intermediate column storage) ----
+
+// Pass 1: Count columns and collect metadata (map, col_is_minor, missing).
+// No column data is allocated — only the lightweight AlignmentMeta is returned.
+AlignmentMeta count_pff_columns(
+    const std::filesystem::path& pff_path,
+    const std::vector<std::string>& hyp_seq_names,
+    int min_minor,
+    bool drop_major = false,
+    const std::unordered_set<std::string>& dropout_labels = {},
+    bool skip_x = false,
+    bool minor_column = false
+);
+
+// Pass 2: Re-read PFF and encode directly into a pre-allocated features matrix.
+// Writes columns starting at features(0, col_offset).
+// If minor_column is true and the gene has minor alleles, writes an extra column at
+// col_offset + num_regular_cols containing the OR of all minor-allele columns.
+// Returns false on failure (same gene that would set failed=true in pass 1).
+bool encode_pff_into(
+    arma::fmat& features,
+    uint64_t col_offset,
+    const std::filesystem::path& pff_path,
+    const std::vector<std::string>& hyp_seq_names,
+    int min_minor,
+    bool drop_major = false,
+    const std::unordered_set<std::string>& dropout_labels = {},
+    bool skip_x = false,
+    bool minor_column = false,
+    bool has_minor_col = false
+);
 
 } // namespace encoder

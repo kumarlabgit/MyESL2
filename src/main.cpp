@@ -306,6 +306,26 @@ int main(int argc, char* argv[]) {
             if (train_opts.nfolds > 0 && train_opts.method.empty())
                 throw std::runtime_error("--nfolds requires --method");
 
+            // Compute lambda count for peak memory estimation
+            if (train_opts.lambda_grid_set) {
+                auto count_steps = [](const std::string& spec) -> uint32_t {
+                    double vmin, vmax, vstep; char c1, c2;
+                    std::istringstream ss(spec);
+                    if (!(ss >> vmin >> c1 >> vmax >> c2 >> vstep) || vstep <= 0) return 1;
+                    uint32_t n = 0;
+                    for (double v = vmin; v <= vmax + vstep * 1e-9; v += vstep) ++n;
+                    return n ? n : 1;
+                };
+                enc_opts.lambda_count = count_steps(train_opts.lambda_grid_specs[0])
+                                      * count_steps(train_opts.lambda_grid_specs[1]);
+            } else if (!train_opts.lambda_file_path.empty()) {
+                std::ifstream lf(train_opts.lambda_file_path);
+                uint32_t n = 0; std::string line;
+                while (std::getline(lf, line))
+                    if (!line.empty() && line[0] != '#') ++n;
+                enc_opts.lambda_count = n ? n : 1;
+            }
+
             pipeline::preprocess(pre_opts);
             try {
                 auto enc = pipeline::encode(enc_opts);
@@ -445,6 +465,26 @@ int main(int argc, char* argv[]) {
                 enc_opts_base.disable_mc = true;
             if (!min_groups_set) train_opts_base.min_groups = 3;
 
+            // Lambda count for peak memory estimation
+            if (train_opts_base.lambda_grid_set) {
+                auto count_steps = [](const std::string& spec) -> uint32_t {
+                    double vmin, vmax, vstep; char c1, c2;
+                    std::istringstream ss(spec);
+                    if (!(ss >> vmin >> c1 >> vmax >> c2 >> vstep) || vstep <= 0) return 1;
+                    uint32_t n = 0;
+                    for (double v = vmin; v <= vmax + vstep * 1e-9; v += vstep) ++n;
+                    return n ? n : 1;
+                };
+                enc_opts_base.lambda_count = count_steps(train_opts_base.lambda_grid_specs[0])
+                                           * count_steps(train_opts_base.lambda_grid_specs[1]);
+            } else if (!train_opts_base.lambda_file_path.empty()) {
+                std::ifstream lf(train_opts_base.lambda_file_path);
+                uint32_t n = 0; std::string line;
+                while (std::getline(lf, line))
+                    if (!line.empty() && line[0] != '#') ++n;
+                enc_opts_base.lambda_count = n ? n : 1;
+            }
+
             fs::create_directories(output_dir);
 
             // Determine actual class_bal for encode
@@ -583,6 +623,26 @@ int main(int argc, char* argv[]) {
                 enc_opts_base.disable_mc = true;
             if (!has_lambda) { train_opts_base.lambda_grid_specs[0]="0.1,0.9,0.1"; train_opts_base.lambda_grid_specs[1]="0.0001,0.0002,0.0001"; train_opts_base.lambda_grid_set=true; }
             if (!has_method) train_opts_base.method = "sg_lasso";
+
+            // Lambda count for peak memory estimation
+            if (train_opts_base.lambda_grid_set) {
+                auto count_steps = [](const std::string& spec) -> uint32_t {
+                    double vmin, vmax, vstep; char c1, c2;
+                    std::istringstream ss(spec);
+                    if (!(ss >> vmin >> c1 >> vmax >> c2 >> vstep) || vstep <= 0) return 1;
+                    uint32_t n = 0;
+                    for (double v = vmin; v <= vmax + vstep * 1e-9; v += vstep) ++n;
+                    return n ? n : 1;
+                };
+                enc_opts_base.lambda_count = count_steps(train_opts_base.lambda_grid_specs[0])
+                                           * count_steps(train_opts_base.lambda_grid_specs[1]);
+            } else if (!train_opts_base.lambda_file_path.empty()) {
+                std::ifstream lf(train_opts_base.lambda_file_path);
+                uint32_t n = 0; std::string line;
+                while (std::getline(lf, line))
+                    if (!line.empty() && line[0] != '#') ++n;
+                enc_opts_base.lambda_count = n ? n : 1;
+            }
 
             // Read hypothesis
             std::vector<std::string> hyp_species;
