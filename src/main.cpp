@@ -112,6 +112,8 @@ void print_usage(const char* prog_name) {
         "    --hypothesis <file>     compare predictions to known labels (writes TPR/TNR/FPR/FNR)\n"
         "    --no-visualize          skip automatic SVG generation\n"
         "    --minor-alleles <file>  minor_alleles.txt from training (auto-detected if omitted)\n"
+        "    --gene-limit N          max genes displayed in auto-generated SVG (default: 100)\n"
+        "    --species-limit N       max species displayed in auto-generated SVG (default: 100)\n"
         "    --cache-dir DIR\n"
         "    --threads N\n"
         "    --datatype <type>\n\n"
@@ -127,6 +129,8 @@ void print_usage(const char* prog_name) {
         "    --hypothesis <file>          run a single hypothesis instead of tree clades\n"
         "    --grid-rmse-cutoff X         exclude lambda results above RMSE threshold (default: 100)\n"
         "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
+        "    --gene-limit N               max genes displayed in aggregated eval.svg (default: 100)\n"
+        "    --species-limit N            max species displayed in aggregated eval.svg (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
         "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
@@ -369,6 +373,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--threads"    && i+1<argc) { eval_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!eval_opts.num_threads) eval_opts.num_threads=1; }
                 else if (arg == "--no-visualize") eval_opts.no_visualize = true;
                 else if (arg == "--minor-alleles" && i+1<argc) eval_opts.minor_alleles_path = argv[++i];
+                else if (arg == "--gene-limit"    && i+1<argc) eval_opts.gene_limit    = std::stoi(argv[++i]);
+                else if (arg == "--species-limit" && i+1<argc) eval_opts.species_limit = std::stoi(argv[++i]);
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
 
@@ -431,6 +437,8 @@ int main(int argc, char* argv[]) {
 
             double grid_rmse_cutoff = 100.0;
             double grid_acc_cutoff  = 0.0;
+            int    viz_gene_limit    = 100;
+            int    viz_species_limit = 100;
             bool min_groups_set = false;
 
             for (int i = extra_start; i < argc; ++i) {
@@ -455,6 +463,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--min-groups"       && i+1<argc) { train_opts_base.min_groups=std::stoi(argv[++i]); min_groups_set=true; }
                 else if (arg == "--grid-rmse-cutoff" && i+1<argc) grid_rmse_cutoff = std::stod(argv[++i]);
                 else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
+                else if (arg == "--gene-limit"       && i+1<argc) viz_gene_limit    = std::stoi(argv[++i]);
+                else if (arg == "--species-limit"    && i+1<argc) viz_species_limit = std::stoi(argv[++i]);
                 else if (arg == "--auto-bit-ct"      && i+1<argc) enc_opts_base.auto_bit_ct   = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
                 else if (arg == "--minor-column") enc_opts_base.minor_column = true;
@@ -530,7 +540,8 @@ int main(int argc, char* argv[]) {
                     pipeline::evaluate(eopts);
                 }
 
-                auto agg = pipeline::evaluate_drphylo_aggregate(run_dir, grid_rmse_cutoff, grid_acc_cutoff);
+                auto agg = pipeline::evaluate_drphylo_aggregate(run_dir, grid_rmse_cutoff, grid_acc_cutoff,
+                                                                viz_gene_limit, viz_species_limit);
                 hss_summary.push_back({label, agg.hss});
                 std::cout << label << ": HSS=" << agg.hss << "\n";
             };

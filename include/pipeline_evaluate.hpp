@@ -37,6 +37,9 @@ struct EvaluateOptions {
     fs::path     minor_alleles_path; // optional: path to minor_alleles.txt from training
     // AIM feature ranking: if aim_window > 0, read ranked features from weights_path parent dir
     int          aim_window      = 0;
+    // Visualization pass-through (used when no_visualize == false)
+    int          gene_limit      = 100;
+    int          species_limit   = 100;
 };
 
 // Direct evaluate: run prediction from weights_path + list_path.
@@ -58,6 +61,8 @@ struct DrPhyloAggResult {
 DrPhyloAggResult evaluate_drphylo_aggregate(
     const fs::path& run_dir,
     double          grid_rmse_cutoff,
-    double          grid_acc_cutoff);
+    double          grid_acc_cutoff,
+    int             gene_limit    = 100,
+    int             species_limit = 100);
 
 } // namespace pipeline

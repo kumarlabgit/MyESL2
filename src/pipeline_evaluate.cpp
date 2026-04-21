@@ -619,6 +619,8 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             try {
                 viz::VizOptions vopt;
                 vopt.m_grid = opts.m_grid;
+                vopt.gene_limit    = opts.gene_limit;
+                vopt.species_limit = opts.species_limit;
                 auto gpt = viz::read_gene_predictions(gene_pred_path);
                 viz::write_svg(gpt, svg_path, vopt);
                 std::cout << "Visualization -> " << svg_path.string() << "\n";
@@ -749,7 +751,9 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
 DrPhyloAggResult evaluate_drphylo_aggregate(
     const fs::path& run_dir,
     double          grid_rmse_cutoff,
-    double          grid_acc_cutoff)
+    double          grid_acc_cutoff,
+    int             gene_limit,
+    int             species_limit)
 {
     DrPhyloAggResult result;
 
@@ -958,6 +962,8 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
             auto gpt = viz::read_gene_predictions(gp_out);
             viz::VizOptions vopt;
             vopt.m_grid = true;
+            vopt.gene_limit    = gene_limit;
+            vopt.species_limit = species_limit;
             viz::write_svg(gpt, svg_out, vopt);
             std::cout << "Visualization -> " << svg_out.string() << "\n";
         } catch (const std::exception& ve) {
