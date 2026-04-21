@@ -13,6 +13,13 @@
 #include <numeric>
 #include <limits>
 #include <armadillo>
+#ifdef __linux__
+#include <malloc.h>          // malloc_trim
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>   // malloc_zone_pressure_relief
+#elif defined(_WIN32)
+#include <malloc.h>          // _heapmin
+#endif
 #include "pipeline_preprocess.hpp"
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
@@ -341,6 +348,15 @@ int main(int argc, char* argv[]) {
             } catch (const std::runtime_error& e) {
                 if (std::string_view(e.what()).starts_with("max_mem_exceeded")
                     && train_opts.adaptive_sparsification) {
+                    // The failed encode allocated a partial matrix; release those
+                    // pages back to the OS before the adaptive path starts.
+#ifdef __linux__
+                    malloc_trim(0);
+#elif defined(__APPLE__)
+                    malloc_zone_pressure_relief(NULL, 0);
+#elif defined(_WIN32)
+                    _heapmin();
+#endif
                     std::cout << "[adaptive] max_mem exceeded — starting adaptive sparsification\n";
                     pipeline::adaptive_train(enc_opts, train_opts);
                 } else {

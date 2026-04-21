@@ -9,6 +9,13 @@
 #include <unordered_map>
 #include <cmath>
 #include <iostream>
+#ifdef __linux__
+#include <malloc.h>          // malloc_trim
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>   // malloc_zone_pressure_relief
+#elif defined(_WIN32)
+#include <malloc.h>          // _heapmin
+#endif
 
 namespace pipeline {
 
@@ -111,6 +118,18 @@ static std::string fmt_mb(uint64_t bytes)
     return oss.str();
 }
 
+// Ask the platform allocator to return freed pages to the OS.
+static void release_freed_heap()
+{
+#ifdef __linux__
+    malloc_trim(0);
+#elif defined(__APPLE__)
+    malloc_zone_pressure_relief(NULL, 0);
+#elif defined(_WIN32)
+    _heapmin();
+#endif
+}
+
 } // anonymous namespace
 
 void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opts)
@@ -141,9 +160,22 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
         throw std::runtime_error("adaptive_sparsification: no genes with cached PFF found");
 
     // ----------------------------------------------------------------
-    // 3c. Chunk the list at max_mem/2
+    // 3c. Chunk the list so each combo (two chunks) fits in max_mem
+    //     including solver working-vector overhead.
     // ----------------------------------------------------------------
-    uint64_t target = enc_opts.max_mem / 2;
+    size_t elem_size = (enc_opts.precision == regression::Precision::FP64) ? 8 : 4;
+    unsigned int solver_threads = std::min(train_opts.threads,
+        static_cast<unsigned int>(enc_opts.lambda_count));
+    if (solver_threads == 0) solver_threads = 1;
+
+    // Per-column cost: matrix (N × elem) + solver coefficient vectors (solver_threads × 6 × elem)
+    uint64_t per_col = uint64_t(N) * elem_size + uint64_t(solver_threads) * 6 * elem_size;
+    // Fixed solver overhead: 10 sample-length vectors per solver thread
+    uint64_t solver_fixed = uint64_t(solver_threads) * 10 * N * elem_size;
+    // Each combo merges two chunks; peak = 2×chunk_cost + solver_fixed ≤ max_mem
+    uint64_t target = (enc_opts.max_mem > solver_fixed)
+        ? (enc_opts.max_mem - solver_fixed) / 2
+        : 0;
 
     using StemEntry = std::pair<std::string, fs::path>;
     std::vector<std::vector<StemEntry>> chunks;
@@ -151,7 +183,7 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
     uint64_t cur_bytes = 0;
 
     for (auto& entry : ordered) {
-        uint64_t cost = sizes.at(entry.first) * static_cast<uint64_t>(N) * sizeof(float);
+        uint64_t cost = sizes.at(entry.first) * per_col;
         if (!cur_chunk.empty() && cur_bytes + cost > target) {
             chunks.push_back(std::move(cur_chunk));
             cur_chunk.clear();
@@ -223,6 +255,10 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
                 std::cerr << "[adaptive] warning: no gss_median.txt for combo_"
                           << i << "_" << j << "\n";
             }
+
+            // Release freed heap pages back to the OS so the next combo
+            // (or final sublist) can use the physical memory.
+            release_freed_heap();
         }
     }
 
@@ -235,9 +271,11 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
         ranked.emplace_back(score, stem);
     std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b){ return a.first > b.first; });
 
-    // Greedy pick within max_mem
+    // Greedy pick within max_mem (accounting for solver overhead)
     std::vector<StemEntry> chosen_stems;
     uint64_t total_bytes = 0;
+    uint64_t final_budget = (enc_opts.max_mem > solver_fixed)
+        ? enc_opts.max_mem - solver_fixed : 0;
 
     // Build a map from stem → original path for fast lookup
     std::unordered_map<std::string, fs::path> stem_to_path;
@@ -246,8 +284,8 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
 
     for (auto& [score, stem] : ranked) {
         if (!sizes.count(stem)) continue;
-        uint64_t cost = sizes.at(stem) * static_cast<uint64_t>(N) * sizeof(float);
-        if (total_bytes + cost <= enc_opts.max_mem) {
+        uint64_t cost = sizes.at(stem) * per_col;
+        if (total_bytes + cost <= final_budget) {
             chosen_stems.emplace_back(stem, stem_to_path[stem]);
             total_bytes += cost;
         }
