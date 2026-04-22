@@ -1,6 +1,7 @@
 
 #include "sg_lasso_fp32.hpp"
 #include "sg_lasso_helpers.hpp"
+#include "pipeline_utils.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -368,6 +369,15 @@ arma::frowvec& SGLassoFP32::Train(const arma::fmat& A,
   std::vector<float> s(n), v(n), As(m), g(n), aa(m), bb(m), prob(m);
   std::vector<double> ValueL(opts_maxIter);
   std::vector<double> funVal(opts_maxIter);
+
+  {
+    static std::once_flag rss_flag;
+    std::call_once(rss_flag, [&](){
+        std::cout << "  [solver] m=" << m << " n=" << n
+                  << " vectors: 6×n×4=" << (6*n*4/1048576) << "MB, 10×m×4=" << (10*m*4/1048576) << "MB\n";
+        pipeline_utils::log_rss("solver: all vectors allocated (first thread)");
+    });
+  }
 
   for (int iterStep = 0; iterStep < opts_maxIter; iterStep++)
   {

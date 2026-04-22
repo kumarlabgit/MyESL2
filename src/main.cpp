@@ -13,18 +13,12 @@
 #include <numeric>
 #include <limits>
 #include <armadillo>
-#ifdef __linux__
-#include <malloc.h>          // malloc_trim
-#elif defined(__APPLE__)
-#include <malloc/malloc.h>   // malloc_zone_pressure_relief
-#elif defined(_WIN32)
-#include <malloc.h>          // _heapmin
-#endif
 #include "pipeline_preprocess.hpp"
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
 #include "pipeline_evaluate.hpp"
 #include "pipeline_adaptive.hpp"
+#include "pipeline_utils.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
 #include "pff_format.hpp"
@@ -217,7 +211,7 @@ void print_usage(const char* prog_name) {
         "    --gene-limit N        max genes displayed\n"
         "    --species-limit N     max species displayed\n"
         "    --ssq-threshold X     hide genes with sum-squared score below X\n"
-        "    --m-grid              draw monochrome grid lines\n\n"
+        "    --m-grid              DrPhylo mode: show only positive-class samples\n\n"
 
         "-------------------------------------------\n"
         "INFO\n"
@@ -348,15 +342,9 @@ int main(int argc, char* argv[]) {
             } catch (const std::runtime_error& e) {
                 if (std::string_view(e.what()).starts_with("max_mem_exceeded")
                     && train_opts.adaptive_sparsification) {
-                    // The failed encode allocated a partial matrix; release those
-                    // pages back to the OS before the adaptive path starts.
-#ifdef __linux__
-                    malloc_trim(0);
-#elif defined(__APPLE__)
-                    malloc_zone_pressure_relief(NULL, 0);
-#elif defined(_WIN32)
-                    _heapmin();
-#endif
+                    // The failed encode's metadata pages are still retained by
+                    // glibc; release them before the adaptive path starts.
+                    pipeline_utils::release_freed_heap();
                     std::cout << "[adaptive] max_mem exceeded — starting adaptive sparsification\n";
                     pipeline::adaptive_train(enc_opts, train_opts);
                 } else {

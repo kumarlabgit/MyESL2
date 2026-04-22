@@ -1,5 +1,6 @@
 #include "pipeline_encode.hpp"
 #include "pipeline_preprocess.hpp"
+#include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "encoder.hpp"
 #include "numeric_parser.hpp"
@@ -170,20 +171,30 @@ EncodeResult encode(const EncodeOptions& opts)
 
     size_t elem_size = (opts.precision == regression::Precision::FP64) ? 8 : 4;
 
-    // Peak memory estimate: feature matrix + per-thread FISTA working vectors.
-    // Each concurrent solver thread allocates: 10 sample-length + 6 coef-length vectors.
-    // Concurrent solvers = min(num_threads, lambda_count).
+    // Peak memory estimate: feature matrix + per-thread solver vectors +
+    // label_to_col map (unordered_map in pipeline_train) + baseline.
+    //
+    // Per solver thread at peak:
+    //   8 coef-length vectors: 6 FISTA working + 1 x_row_ret (thread_local)
+    //                          + 1 parameters (SGLassoFP32 member)
+    //   10 sample-length vectors
+    //
+    // label_to_col: ~160 bytes per feature column (node + heap string + bucket).
+    // Baseline: ~30 MB (executable, libs, stacks, pass-2 arena retention).
     unsigned int solver_threads = std::min(num_threads, static_cast<unsigned int>(opts.lambda_count));
     if (solver_threads == 0) solver_threads = 1;
     auto solver_per_thread = [&](uint64_t cols, uint32_t samples) -> uint64_t {
         uint64_t n_coeff = is_overlapping
             ? ((opts.precision == regression::Precision::FP64) ? 132 : 72)
-            : 6 * elem_size;
+            : 8 * elem_size;
         return uint64_t(10) * samples * elem_size + cols * n_coeff;
     };
+    constexpr uint64_t label_to_col_per_entry = 160;
+    constexpr uint64_t baseline_bytes = uint64_t(30) << 20; // 30 MB
     auto estimate_peak_mem = [&](uint64_t cols, uint32_t samples) -> uint64_t {
         uint64_t matrix = cols * samples * elem_size;
-        return matrix + solver_per_thread(cols, samples) * solver_threads;
+        return matrix + solver_per_thread(cols, samples) * solver_threads
+             + cols * label_to_col_per_entry + baseline_bytes;
     };
 
     if (pre.datatype == "numeric") {
@@ -290,9 +301,9 @@ EncodeResult encode(const EncodeOptions& opts)
                                     uint64_t est_cols = running_cols * static_cast<uint64_t>(total_files)
                                                         / static_cast<uint64_t>(done_count);
                                     uint64_t est_peak = estimate_peak_mem(est_cols, N);
-                                    if (static_cast<double>(est_peak) > static_cast<double>(opts.max_mem) * 1.25) {
+                                    if (est_peak > opts.max_mem) {
                                         mem_err_msg = "max_mem_exceeded: estimated peak memory "
-                                            + fmt_bytes(est_peak) + " exceeds 125% of max_mem ("
+                                            + fmt_bytes(est_peak) + " exceeds max_mem ("
                                             + fmt_bytes(opts.max_mem) + ")";
                                         mem_exceeded = true;
                                         if (opts.disable_mc)
@@ -552,9 +563,9 @@ EncodeResult encode(const EncodeOptions& opts)
                                     uint64_t est_cols = running_cols * static_cast<uint64_t>(total_encode)
                                                         / static_cast<uint64_t>(done_count);
                                     uint64_t est_peak = estimate_peak_mem(est_cols, N);
-                                    if (static_cast<double>(est_peak) > static_cast<double>(opts.max_mem) * 1.25) {
+                                    if (est_peak > opts.max_mem) {
                                         mem_err_msg = "max_mem_exceeded: estimated peak memory "
-                                            + fmt_bytes(est_peak) + " exceeds 125% of max_mem ("
+                                            + fmt_bytes(est_peak) + " exceeds max_mem ("
                                             + fmt_bytes(opts.max_mem) + ")";
                                         mem_exceeded = true;
                                         if (opts.disable_mc)
@@ -585,6 +596,7 @@ EncodeResult encode(const EncodeOptions& opts)
             for (auto& t : threads) t.join();
         }
         if (mem_exceeded.load() && !opts.disable_mc) throw std::runtime_error(mem_err_msg);
+        pipeline_utils::log_rss("after pass 1");
 
         // Collect missing sequences
         for (int i = 0; i < total_encode; ++i)
@@ -659,10 +671,16 @@ EncodeResult encode(const EncodeOptions& opts)
             { decltype(meta.col_is_minor) tmp; tmp.swap(meta.col_is_minor); }
             { decltype(meta.missing_sequences) tmp; tmp.swap(meta.missing_sequences); }
         }
+        // Return freed metadata pages to OS before the large matrix allocation.
+        // Without this, glibc retains the freed pages and the matrix lands on
+        // top of them, inflating RSS by the size of the metadata (~7 GB at 40k genes).
+        pipeline_utils::release_freed_heap();
+        pipeline_utils::log_rss("after free metadata + malloc_trim");
 
         // ======== Pass 2: Encode directly into features matrix ========
         std::cout << "  Pass 2: encoding into matrix...\n";
         features.zeros(N, total_cols);
+        pipeline_utils::log_rss("after matrix allocation");
         {
             std::mutex queue_mutex, print_mutex;
             std::queue<int> work_queue;

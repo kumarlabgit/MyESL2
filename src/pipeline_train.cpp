@@ -191,6 +191,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     auto regr_start = std::chrono::steady_clock::now();
 
     // Step 5: Read combined.map to build label_to_col map
+    pipeline_utils::log_rss("train: before label_to_col");
     std::unordered_map<std::string, uint64_t> label_to_col;
     {
         std::ifstream map_f(output_dir / "combined.map");
@@ -204,6 +205,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             label_to_col[line.substr(tab + 1)] = col++;
         }
     }
+    pipeline_utils::log_rss("train: after label_to_col");
 
     // Step 6: Build xval_idxs if nfolds > 0
     arma::rowvec xval_idxs(N);
@@ -343,6 +345,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     // Per-grid-index gene_count captured during solve; -1 = not solved / errored.
     // Used by the parallel post-hoc pruner to replay sequential skip-ahead logic.
     std::vector<int> gene_counts(lambdas.size(), -1);
+
+    pipeline_utils::log_rss("train: before lambda loop");
 
     // Step 10: Lambda loop — branches on thread count.
     if (n_threads <= 1) {
@@ -543,6 +547,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         for (unsigned i = 0; i < n_threads; ++i)
             workers.emplace_back(worker);
         for (auto& t : workers) t.join();
+        pipeline_utils::log_rss("train: after all lambda pairs");
 
         if (first_error) std::rethrow_exception(first_error);
 

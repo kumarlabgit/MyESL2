@@ -3,19 +3,13 @@
 #include "pipeline_preprocess.hpp"
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
+#include "pipeline_utils.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <unordered_map>
 #include <cmath>
 #include <iostream>
-#ifdef __linux__
-#include <malloc.h>          // malloc_trim
-#elif defined(__APPLE__)
-#include <malloc/malloc.h>   // malloc_zone_pressure_relief
-#elif defined(_WIN32)
-#include <malloc.h>          // _heapmin
-#endif
 
 namespace pipeline {
 
@@ -118,18 +112,6 @@ static std::string fmt_mb(uint64_t bytes)
     return oss.str();
 }
 
-// Ask the platform allocator to return freed pages to the OS.
-static void release_freed_heap()
-{
-#ifdef __linux__
-    malloc_trim(0);
-#elif defined(__APPLE__)
-    malloc_zone_pressure_relief(NULL, 0);
-#elif defined(_WIN32)
-    _heapmin();
-#endif
-}
-
 } // anonymous namespace
 
 void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opts)
@@ -168,23 +150,50 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
         static_cast<unsigned int>(enc_opts.lambda_count));
     if (solver_threads == 0) solver_threads = 1;
 
-    // Per-column cost: matrix (N × elem) + solver coefficient vectors (solver_threads × 6 × elem)
-    uint64_t per_col = uint64_t(N) * elem_size + uint64_t(solver_threads) * 6 * elem_size;
-    // Fixed solver overhead: 10 sample-length vectors per solver thread
-    uint64_t solver_fixed = uint64_t(solver_threads) * 10 * N * elem_size;
-    // Each combo merges two chunks; peak = 2×chunk_cost + solver_fixed ≤ max_mem
-    uint64_t target = (enc_opts.max_mem > solver_fixed)
-        ? (enc_opts.max_mem - solver_fixed) / 2
+    // Per-column cost: matrix (N × elem) + solver vectors (8 per thread × elem)
+    //                  + label_to_col map (~160 bytes per feature entry).
+    //
+    // The 8 coef-length vectors per solver thread:
+    //   6 FISTA working vectors (freed after each Train() call)
+    //   1 x_row_ret: static thread_local, persists across lambda pairs
+    //   1 parameters: SGLassoFP32 member, alive during write/compute phase
+    //
+    // label_to_col: unordered_map<string, uint64_t> in pipeline_train.cpp maps
+    // every feature label to its column index. Measured ~134 bytes/entry; 160
+    // provides headroom for longer labels and glibc arena fragmentation.
+    constexpr uint64_t label_to_col_per_entry = 160;
+    uint64_t per_col = uint64_t(N) * elem_size
+                     + uint64_t(solver_threads) * 8 * elem_size
+                     + label_to_col_per_entry;
+    // Fixed overhead: 10 sample-length vectors per solver thread + baseline
+    // (executable, libs, stacks, pass-2 arena retention ≈ 30 MB).
+    constexpr uint64_t baseline_bytes = uint64_t(30) << 20; // 30 MB
+    uint64_t fixed = uint64_t(solver_threads) * 10 * N * elem_size + baseline_bytes;
+    // Each combo merges two chunks; peak = 2×chunk_cost + fixed ≤ max_mem
+    uint64_t target = (enc_opts.max_mem > fixed)
+        ? (enc_opts.max_mem - fixed) / 2
         : 0;
 
     using StemEntry = std::pair<std::string, fs::path>;
     std::vector<std::vector<StemEntry>> chunks;
+
+    // Compute total cost to determine equal-sized chunks.
+    uint64_t total_cost = 0;
+    for (auto& entry : ordered)
+        total_cost += sizes.at(entry.first) * per_col;
+
+    // Number of chunks: at least ceil(total_cost / target), minimum 1.
+    uint64_t num_chunks = (target > 0 && total_cost > target)
+        ? (total_cost + target - 1) / target
+        : 1;
+    // Equal-sized target: total_cost / num_chunks (≤ original target).
+    uint64_t equal_target = total_cost / num_chunks;
+
     std::vector<StemEntry> cur_chunk;
     uint64_t cur_bytes = 0;
-
     for (auto& entry : ordered) {
         uint64_t cost = sizes.at(entry.first) * per_col;
-        if (!cur_chunk.empty() && cur_bytes + cost > target) {
+        if (!cur_chunk.empty() && cur_bytes + cost > equal_target) {
             chunks.push_back(std::move(cur_chunk));
             cur_chunk.clear();
             cur_bytes = 0;
@@ -258,7 +267,7 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
 
             // Release freed heap pages back to the OS so the next combo
             // (or final sublist) can use the physical memory.
-            release_freed_heap();
+            pipeline_utils::release_freed_heap();
         }
     }
 
@@ -271,11 +280,11 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
         ranked.emplace_back(score, stem);
     std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b){ return a.first > b.first; });
 
-    // Greedy pick within max_mem (accounting for solver overhead)
+    // Greedy pick within max_mem (accounting for solver + process overhead)
     std::vector<StemEntry> chosen_stems;
     uint64_t total_bytes = 0;
-    uint64_t final_budget = (enc_opts.max_mem > solver_fixed)
-        ? enc_opts.max_mem - solver_fixed : 0;
+    uint64_t final_budget = (enc_opts.max_mem > fixed)
+        ? enc_opts.max_mem - fixed : 0;
 
     // Build a map from stem → original path for fast lookup
     std::unordered_map<std::string, fs::path> stem_to_path;
@@ -315,7 +324,12 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
     final_pre.list_path = final_list;
     pipeline::write_preprocess_config(enc_opts.output_dir, final_pre);
 
-    auto enc_final = pipeline::encode(enc_opts);
+    // Disable max_mem for the final encode — the adaptive greedy selection
+    // already guaranteed the sublist fits.  The encode's linear extrapolation
+    // can slightly overestimate at the boundary and reject a valid sublist.
+    EncodeOptions enc_final_opts = enc_opts;
+    enc_final_opts.max_mem = 0;
+    auto enc_final = pipeline::encode(enc_final_opts);
     pipeline::train(enc_final, train_opts);
 
     } catch (const std::exception& e) {

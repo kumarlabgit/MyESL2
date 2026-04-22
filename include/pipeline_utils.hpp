@@ -11,10 +11,65 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <malloc.h>          // malloc_trim
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>   // malloc_zone_pressure_relief
+#elif defined(_WIN32)
+#include <malloc.h>          // _heapmin
+#endif
 
 namespace fs = std::filesystem;
 
 namespace pipeline_utils {
+
+// Read current VmRSS from /proc/self/status (Linux only).
+// Returns RSS in bytes; 0 on failure or non-Linux.
+inline uint64_t current_rss_bytes()
+{
+#ifdef __linux__
+    std::ifstream f("/proc/self/status");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 6, "VmRSS:") == 0) {
+            // Format: "VmRSS:    1234 kB"
+            uint64_t kb = 0;
+            for (char c : line) if (c >= '0' && c <= '9') kb = kb * 10 + (c - '0');
+            return kb * 1024;
+        }
+    }
+#endif
+    return 0;
+}
+
+inline std::string fmt_rss(uint64_t bytes)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << bytes / double(uint64_t(1) << 30) << " GiB";
+    return oss.str();
+}
+
+inline void log_rss(const char* label)
+{
+    uint64_t rss = current_rss_bytes();
+    if (rss > 0)
+        std::cout << "  [RSS] " << label << ": " << fmt_rss(rss) << "\n";
+}
+
+// Ask the platform allocator to return freed pages to the OS.
+// glibc (Linux) retains freed heap pages by default; without this call,
+// RSS stays high even after large allocations are freed, which can cause
+// OOM when the next large allocation lands on top of the retained pages.
+inline void release_freed_heap()
+{
+#ifdef __linux__
+    malloc_trim(0);
+#elif defined(__APPLE__)
+    malloc_zone_pressure_relief(NULL, 0);
+#elif defined(_WIN32)
+    _heapmin();
+#endif
+}
 
 // ---- INI reader: returns chars= value for [section] ----
 inline std::unordered_set<char> load_datatype_chars(
