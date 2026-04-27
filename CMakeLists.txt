@@ -54,6 +54,10 @@ if(UNIX AND NOT APPLE)
     # Use RPATH (not RUNPATH) so $ORIGIN resolves transitively for
     # indirect deps like libgfortran.so.5 (needed by libopenblas).
     target_link_options(myesl2 PRIVATE "LINKER:--disable-new-dtags")
+    # Statically link libstdc++ and libgcc so binaries built with a newer
+    # GCC do not require matching GLIBCXX_*/GCC_* symbols on the deploy
+    # host (e.g. older HPC clusters). Glibc itself remains dynamic.
+    target_link_options(myesl2 PRIVATE -static-libstdc++ -static-libgcc)
 elseif(APPLE)
     set_target_properties(myesl2 PROPERTIES
         INSTALL_RPATH "@executable_path"
