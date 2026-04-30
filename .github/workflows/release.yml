@@ -87,42 +87,48 @@ jobs:
         run: bash test/compare_golden.sh ci_output test/golden
 
       # ── Upload artifacts ──────────────────────────────────────────
-      - name: Prepare binary artifact (Unix)
+      # Each platform's binary + bundled runtime libraries are packaged
+      # into a single archive so the released assets don't collide across
+      # builds (e.g. linux-x64 vs linux-x64-portable both shipping
+      # libopenblas.so). setup.sh / setup.ps1 download the archive and
+      # extract it into ./bin/.
+      - name: Prepare binary archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p artifact
-          cp build/bin/myesl2 artifact/${{ matrix.artifact }}
-          # Bundle shared libs next to the binary
-          cp build/bin/libopenblas* artifact/ 2>/dev/null || true
-          cp build/bin/libgfortran* artifact/ 2>/dev/null || true
-          cp build/bin/libquadmath* artifact/ 2>/dev/null || true
+          stage=$(mktemp -d)
+          cp build/bin/myesl2 "$stage/myesl2"
+          cp build/bin/libopenblas* "$stage/" 2>/dev/null || true
+          cp build/bin/libgfortran* "$stage/" 2>/dev/null || true
+          cp build/bin/libquadmath* "$stage/" 2>/dev/null || true
           # Fallback: if CMake didn't copy the Fortran runtime, grab from system
-          if ! ls artifact/libgfortran* 1>/dev/null 2>&1; then
+          if ! ls "$stage"/libgfortran* 1>/dev/null 2>&1; then
             if [[ "$(uname -s)" == "Darwin" ]]; then
-              # Homebrew GCC uses versioned names (gfortran-15, etc.) so search
-              # the lib directory directly instead of relying on `gfortran`.
               GFORT=$(find /opt/homebrew/lib/gcc -name "libgfortran.5.dylib" 2>/dev/null | head -1)
               [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$GFORT" artifact/libgfortran.5.dylib
+              cp "$GFORT" "$stage/libgfortran.5.dylib"
               QUAD=$(find /opt/homebrew/lib/gcc -name "libquadmath.0.dylib" 2>/dev/null | head -1)
               [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$QUAD" artifact/libquadmath.0.dylib
+              cp "$QUAD" "$stage/libquadmath.0.dylib"
             else
               GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
                       || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
               [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
-              cp "$(realpath "$GFORT")" artifact/libgfortran.so.5
+              cp "$(realpath "$GFORT")" "$stage/libgfortran.so.5"
             fi
           fi
+          mkdir -p artifact
+          tar -czf "artifact/${{ matrix.artifact }}.tar.gz" -C "$stage" .
 
-      - name: Prepare binary artifact (Windows)
+      - name: Prepare binary archive (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          stage=$(mktemp -d)
+          cp build/bin/Release/myesl2.exe "$stage/myesl2.exe"
+          cp build/bin/Release/*.dll "$stage/" 2>/dev/null || true
           mkdir -p artifact
-          cp build/bin/Release/myesl2.exe artifact/${{ matrix.artifact }}.exe
-          cp build/bin/Release/*.dll artifact/ 2>/dev/null || true
+          (cd "$stage" && 7z a -tzip "$OLDPWD/artifact/${{ matrix.artifact }}.zip" .)
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -215,13 +221,15 @@ jobs:
 
       # Files in build/ are root-owned (created inside the container) but
       # remain world-readable, so cp on the host runner works fine.
-      - name: Prepare binary artifact
+      - name: Prepare binary archive
         shell: bash
         run: |
+          stage=$(mktemp -d)
+          cp build/bin/myesl2 "$stage/myesl2"
+          cp build/bin/libopenblas* "$stage/" 2>/dev/null || true
+          cp build/bin/libgfortran* "$stage/" 2>/dev/null || true
           mkdir -p artifact
-          cp build/bin/myesl2 artifact/myesl2-linux-x64-portable
-          cp build/bin/libopenblas* artifact/ 2>/dev/null || true
-          cp build/bin/libgfortran* artifact/ 2>/dev/null || true
+          tar -czf artifact/myesl2-linux-x64-portable.tar.gz -C "$stage" .
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

@@ -44,49 +44,27 @@ if (-not $Tag) {
 Write-Host "  Tag:      $Tag"
 Write-Host ""
 
-$baseUrl = "https://github.com/$Repo/releases/download/$Tag"
+$baseUrl       = "https://github.com/$Repo/releases/download/$Tag"
+$archiveAsset  = "myesl2-windows-x64.zip"
+$archiveUrl    = "$baseUrl/$archiveAsset"
 
-# Required assets (fail if missing)
-$requiredAssets = @(
-    @{ Asset = "myesl2-windows-x64.exe"; Local = "myesl2.exe"     },
-    @{ Asset = "openblas.dll";           Local = "libopenblas.dll" },
-    @{ Asset = "lapack.dll";             Local = "liblapack.dll"   }
-)
-
-# Fortran runtime DLLs (required by lapack.dll; older releases may not have them)
-$optionalAssets = @(
-    @{ Asset = "libgfortran-5.dll";      Local = "libgfortran-5.dll"  },
-    @{ Asset = "libgcc_s_seh-1.dll";     Local = "libgcc_s_seh-1.dll" }
-)
-
-# ── Download into bin\ ───────────────────────────────────────────
+# ── Download archive and extract into bin\ ──────────────────────
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 
-foreach ($a in $requiredAssets) {
-    $url  = "$baseUrl/$($a.Asset)"
-    $dest = Join-Path $binDir $a.Local
-    Write-Host ("  v {0}  ->  bin\{1}" -f $a.Asset, $a.Local)
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing `
-            -Headers @{ "User-Agent" = "myesl2-setup" }
-    } catch {
-        Write-Error "Download failed: $url`n$_"
-        if (Test-Path $dest) { Remove-Item $dest -Force }
-        exit 1
-    }
+$tmpZip = Join-Path ([System.IO.Path]::GetTempPath()) "myesl2-$([System.Guid]::NewGuid()).zip"
+Write-Host ("  v {0}" -f $archiveAsset)
+try {
+    Invoke-WebRequest -Uri $archiveUrl -OutFile $tmpZip -UseBasicParsing `
+        -Headers @{ "User-Agent" = "myesl2-setup" }
+} catch {
+    Write-Error "Download failed: $archiveUrl`n$_"
+    if (Test-Path $tmpZip) { Remove-Item $tmpZip -Force }
+    exit 1
 }
 
-foreach ($a in $optionalAssets) {
-    $url  = "$baseUrl/$($a.Asset)"
-    $dest = Join-Path $binDir $a.Local
-    Write-Host ("  v {0}  ->  bin\{1}" -f $a.Asset, $a.Local)
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing `
-            -Headers @{ "User-Agent" = "myesl2-setup" }
-    } catch {
-        Write-Host "    (not found in release - skipping)"
-    }
-}
+Write-Host "  -> extracting into bin\"
+Expand-Archive -Path $tmpZip -DestinationPath $binDir -Force
+Remove-Item $tmpZip -Force
 
 # Copy data_defs.ini next to the binary so `.\bin\myesl2.exe ...` works
 # from any working directory (myesl2.exe checks its own directory first).

@@ -36,15 +36,32 @@ case "$OS" in
     Linux)
         [[ "$ARCH" == "x86_64" ]] \
             || { echo "ERROR: Linux binaries are x86_64 only (got $ARCH)." >&2; exit 1; }
-        BINARY_ASSET="myesl2-linux-x64"
-        LIB_ASSETS=("libopenblas.so" "libgfortran.so.5")
+        # The standard linux-x64 artifact is built on ubuntu-latest, which
+        # currently ships glibc 2.35. Hosts with older glibc (e.g. RHEL 7's
+        # 2.17) need the portable artifact built inside manylinux2014.
+        STANDARD_GLIBC_MIN="2.35"
+        HOST_GLIBC=$(ldd --version 2>/dev/null | head -1 \
+            | grep -oE '[0-9]+\.[0-9]+' | tail -1)
+        if [[ -z "$HOST_GLIBC" ]]; then
+            echo "WARNING: could not detect host glibc version; assuming portable build is needed." >&2
+            USE_PORTABLE=1
+        elif [[ "$(printf '%s\n%s\n' "$STANDARD_GLIBC_MIN" "$HOST_GLIBC" | sort -V | head -1)" != "$STANDARD_GLIBC_MIN" ]]; then
+            echo "  Host glibc $HOST_GLIBC < $STANDARD_GLIBC_MIN; using portable artifact."
+            USE_PORTABLE=1
+        else
+            USE_PORTABLE=0
+        fi
+        if [[ "$USE_PORTABLE" == "1" ]]; then
+            ARCHIVE_ASSET="myesl2-linux-x64-portable.tar.gz"
+        else
+            ARCHIVE_ASSET="myesl2-linux-x64.tar.gz"
+        fi
         LOCAL_BIN_NAME="myesl2"
         ;;
     Darwin)
         [[ "$ARCH" == "arm64" ]] \
             || { echo "ERROR: macOS binaries are arm64 (Apple Silicon) only (got $ARCH)." >&2; exit 1; }
-        BINARY_ASSET="myesl2-macos-arm64"
-        LIB_ASSETS=("libopenblas.dylib" "libgfortran.5.dylib" "libquadmath.0.dylib")
+        ARCHIVE_ASSET="myesl2-macos-arm64.tar.gz"
         LOCAL_BIN_NAME="myesl2"
         ;;
     *)
@@ -75,33 +92,22 @@ echo ""
 
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 
-# ── Download binary + libs into ./bin/ ───────────────────────────
+# ── Download archive and extract into ./bin/ ─────────────────────
 mkdir -p "$BIN_DIR"
 
-download() {
-    local asset="$1" dest="$2" required="${3:-yes}"
-    local url="$BASE_URL/$asset"
-    echo "  ↓ $asset  →  bin/$(basename "$dest")"
-    if ! curl -fsSL -o "$dest" "$url"; then
-        rm -f "$dest"
-        if [[ "$required" == "yes" ]]; then
-            echo "ERROR: download failed: $url" >&2
-            exit 1
-        else
-            echo "    (not found in release — skipping)" >&2
-        fi
-    fi
-}
+ARCHIVE_URL="$BASE_URL/$ARCHIVE_ASSET"
+TMP_ARCHIVE=$(mktemp -t myesl2.XXXXXX.tar.gz)
+trap 'rm -f "$TMP_ARCHIVE"' EXIT
 
-download "$BINARY_ASSET" "$BIN_DIR/$LOCAL_BIN_NAME"
+echo "  ↓ $ARCHIVE_ASSET"
+if ! curl -fsSL -o "$TMP_ARCHIVE" "$ARCHIVE_URL"; then
+    echo "ERROR: download failed: $ARCHIVE_URL" >&2
+    exit 1
+fi
+
+echo "  ⇒ extracting into bin/"
+tar -xzf "$TMP_ARCHIVE" -C "$BIN_DIR"
 chmod +x "$BIN_DIR/$LOCAL_BIN_NAME"
-
-# First lib (libopenblas) is required; Fortran runtime libs are optional
-# (older releases may not include them).
-download "${LIB_ASSETS[0]}" "$BIN_DIR/${LIB_ASSETS[0]}" yes
-for lib in "${LIB_ASSETS[@]:1}"; do
-    download "$lib" "$BIN_DIR/$lib" optional
-done
 
 # ── Copy data_defs.ini next to the binary ────────────────────────
 # The binary looks up data_defs.ini in its own directory first; placing
