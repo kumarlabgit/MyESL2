@@ -186,14 +186,15 @@ jobs:
           make install PREFIX=/work/openblas-install
           popd
           # Overwrite the vendored deps so the existing CMakeLists.txt
-          # target_link_libraries path resolves to the portable copy. We
-          # remove the host-side files first and rebuild the layout
-          # explicitly (real .so.0 + relative symlink) instead of relying
-          # on `cp -P` interactions with the bind-mounted host directory.
-          REAL_SO=$(find /work/openblas-install/lib -maxdepth 1 \
-            -name 'libopenblas.so*' -type f | head -1)
+          # target_link_libraries path resolves to the portable copy.
+          # OpenBLAS' multi-threaded build installs the real .so under a
+          # name like libopenblasp-r0.3.29.so with libopenblas.so and
+          # libopenblas.so.0 as symlinks to it, so we follow the .so
+          # symlink to whatever the real file is rather than relying on a
+          # name pattern.
+          REAL_SO=$(readlink -f /work/openblas-install/lib/libopenblas.so)
           [ -f "$REAL_SO" ] || {
-            echo "ERROR: no real libopenblas.so* found in install dir" >&2
+            echo "ERROR: libopenblas.so does not resolve to a real file" >&2
             ls -la /work/openblas-install/lib/ >&2
             exit 1
           }
