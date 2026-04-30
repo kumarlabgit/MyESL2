@@ -108,7 +108,16 @@ elseif(APPLE)
     endforeach()
 else()
     set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps/linux-x64)
-    target_link_libraries(myesl2 PRIVATE ${DEPS_DIR}/libopenblas.so)
+    # std::thread / pthread_create must be on the link line explicitly:
+    # the manylinux2014 toolchain uses --no-copy-dt-needed-entries, so it
+    # won't auto-pull libpthread in just because libopenblas.so depends
+    # on it. The Ubuntu runner toolchain happens to be permissive enough
+    # to let it through, but linking Threads::Threads is correct on both.
+    find_package(Threads REQUIRED)
+    target_link_libraries(myesl2 PRIVATE
+        ${DEPS_DIR}/libopenblas.so
+        Threads::Threads
+    )
     # Copy both libopenblas.so and libopenblas.so.0 (the SONAME the linker
     # actually looks for at runtime) so $ORIGIN resolution works.
     add_custom_command(TARGET myesl2 POST_BUILD
