@@ -134,24 +134,31 @@ jobs:
   # Builds inside manylinux2014 (CentOS 7, glibc 2.17) and rebuilds
   # OpenBLAS from source so the resulting bundle runs on any Linux
   # with glibc ≥ 2.17. Runs in parallel with the matrix job above.
+  #
+  # NOTE: We can't use the `container:` GH Actions field here. The runner
+  # would then inject its Node 20 binary into the container, but Node 20
+  # is built against glibc ≥ 2.27 and won't load on glibc 2.17, so even
+  # actions/checkout fails. Instead we keep the job on ubuntu-latest
+  # (where checkout/upload-artifact work) and shell into manylinux2014
+  # via a single `docker run` for the actual build.
   build-linux-portable:
     runs-on: ubuntu-latest
     name: Build & Test (linux-x64-portable, glibc 2.17)
-    container:
-      image: quay.io/pypa/manylinux2014_x86_64:latest
 
     steps:
       - uses: actions/checkout@v4
 
-      # actions/checkout drops the workspace owned by root inside the
-      # container; without this, git refuses to operate on it.
-      - name: Trust workspace as a git repo
-        run: git config --global --add safe.directory '*'
-
-      - name: Install Armadillo headers (pinned version from deps.env)
-        shell: bash
+      - name: Build, test, and verify inside manylinux2014 container
         run: |
+          docker run --rm -i \
+            -v "$PWD:/work" -w /work \
+            quay.io/pypa/manylinux2014_x86_64:latest \
+            bash <<'INNER'
+          set -euxo pipefail
+          git config --global --add safe.directory '*'
           source deps.env
+
+          # ── Armadillo headers (pinned in deps.env) ──
           echo "Installing Armadillo $ARMADILLO_VERSION"
           curl -L -o armadillo.tar.xz \
             "https://sourceforge.net/projects/arma/files/armadillo-${ARMADILLO_VERSION}.tar.xz/download"
@@ -159,50 +166,33 @@ jobs:
           cp armadillo-${ARMADILLO_VERSION}/include/armadillo include/armadillo
           cp -r armadillo-${ARMADILLO_VERSION}/include/armadillo_bits include/armadillo_bits
 
-      # Build OpenBLAS from source inside the manylinux container so the
-      # resulting libopenblas.so.0 only references GLIBC ≤ 2.17. Match the
-      # flags of the vendored build (DYNAMIC_ARCH, NO_AFFINITY) for
-      # behavioural parity with the non-portable Linux artifact.
-      - name: Build OpenBLAS from source (matching deps.env version)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          source deps.env
+          # ── OpenBLAS from source ──
+          # Match the vendored binary's build flags (DYNAMIC_ARCH, NO_AFFINITY)
+          # so behaviour matches the non-portable Linux artifact.
           echo "Building OpenBLAS $OPENBLAS_VERSION"
           curl -L -o openblas.tar.gz \
             "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}.tar.gz"
           tar xf openblas.tar.gz
           pushd OpenBLAS-${OPENBLAS_VERSION}
           make -j"$(nproc)" \
-            DYNAMIC_ARCH=1 \
-            NO_AFFINITY=1 \
-            USE_THREAD=1 \
-            NUM_THREADS=64 \
+            DYNAMIC_ARCH=1 NO_AFFINITY=1 USE_THREAD=1 NUM_THREADS=64 \
             CC=gcc FC=gfortran
-          make install PREFIX="${GITHUB_WORKSPACE}/openblas-install"
+          make install PREFIX=/work/openblas-install
           popd
           # Overwrite the vendored deps so the existing CMakeLists.txt
           # target_link_libraries path resolves to the portable copy.
-          cp -P "${GITHUB_WORKSPACE}/openblas-install/lib/libopenblas.so"* deps/linux-x64/
+          cp -P /work/openblas-install/lib/libopenblas.so* deps/linux-x64/
 
-      - name: Source libgfortran.so.5 from manylinux toolchain
-        shell: bash
-        run: |
-          set -euxo pipefail
+          # ── libgfortran.so.5 from the container's GCC ──
           GFORT=$(gcc --print-file-name=libgfortran.so.5)
           [ -f "$GFORT" ] || { echo "ERROR: libgfortran.so.5 not found in manylinux container" >&2; exit 1; }
           cp "$(realpath "$GFORT")" deps/linux-x64/libgfortran.so.5
 
-      - name: Configure
-        shell: bash
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          # ── Configure + build myesl2 ──
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
 
-      - name: Build
-        run: cmake --build build --config Release
-
-      - name: Run drphylo regression test
-        shell: bash
-        run: |
+          # ── Regression test ──
           ./build/bin/myesl2 drphylo \
             Fungi_data/aln_200_linux.txt \
             Fungi_data/Fungi_T1_with_ID.nwk \
@@ -210,17 +200,9 @@ jobs:
             --clade-list Fungi_data/clade_multiple.txt \
             --lambda-grid "0.1,0.2,0.1" "0.1,0.2,0.1" \
             --threads 1
+          bash test/compare_golden.sh ci_output test/golden
 
-      - name: Compare against golden files
-        shell: bash
-        run: bash test/compare_golden.sh ci_output test/golden
-
-      # Guard against future regressions: fail the job if anything in the
-      # bundle starts requiring a glibc newer than RHEL 7's 2.17.
-      - name: Verify all bundled binaries are glibc-2.17 compatible
-        shell: bash
-        run: |
-          set -euxo pipefail
+          # ── Guardrail: fail if anything pulls in glibc > 2.17 ──
           MAX=$(objdump -T build/bin/myesl2 build/bin/libopenblas.so.0 build/bin/libgfortran.so.5 \
                 | grep -oE 'GLIBC_[0-9.]+' | sort -V -u | tail -1)
           echo "Max GLIBC required across binary + bundled libs: $MAX"
@@ -229,7 +211,10 @@ jobs:
             echo "ERROR: bundle requires $MAX, exceeds RHEL 7 baseline (GLIBC_2.17)" >&2
             exit 1
           fi
+          INNER
 
+      # Files in build/ are root-owned (created inside the container) but
+      # remain world-readable, so cp on the host runner works fine.
       - name: Prepare binary artifact
         shell: bash
         run: |
