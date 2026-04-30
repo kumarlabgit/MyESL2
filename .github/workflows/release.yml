@@ -130,9 +130,123 @@ jobs:
           name: ${{ matrix.artifact }}
           path: artifact/
 
+  # ── Portable Linux build (glibc 2.17, RHEL 7 / older HPC) ──────
+  # Builds inside manylinux2014 (CentOS 7, glibc 2.17) and rebuilds
+  # OpenBLAS from source so the resulting bundle runs on any Linux
+  # with glibc ≥ 2.17. Runs in parallel with the matrix job above.
+  build-linux-portable:
+    runs-on: ubuntu-latest
+    name: Build & Test (linux-x64-portable, glibc 2.17)
+    container:
+      image: quay.io/pypa/manylinux2014_x86_64:latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions/checkout drops the workspace owned by root inside the
+      # container; without this, git refuses to operate on it.
+      - name: Trust workspace as a git repo
+        run: git config --global --add safe.directory '*'
+
+      - name: Install Armadillo headers (pinned version from deps.env)
+        shell: bash
+        run: |
+          source deps.env
+          echo "Installing Armadillo $ARMADILLO_VERSION"
+          curl -L -o armadillo.tar.xz \
+            "https://sourceforge.net/projects/arma/files/armadillo-${ARMADILLO_VERSION}.tar.xz/download"
+          tar xf armadillo.tar.xz
+          cp armadillo-${ARMADILLO_VERSION}/include/armadillo include/armadillo
+          cp -r armadillo-${ARMADILLO_VERSION}/include/armadillo_bits include/armadillo_bits
+
+      # Build OpenBLAS from source inside the manylinux container so the
+      # resulting libopenblas.so.0 only references GLIBC ≤ 2.17. Match the
+      # flags of the vendored build (DYNAMIC_ARCH, NO_AFFINITY) for
+      # behavioural parity with the non-portable Linux artifact.
+      - name: Build OpenBLAS from source (matching deps.env version)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          source deps.env
+          echo "Building OpenBLAS $OPENBLAS_VERSION"
+          curl -L -o openblas.tar.gz \
+            "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}.tar.gz"
+          tar xf openblas.tar.gz
+          pushd OpenBLAS-${OPENBLAS_VERSION}
+          make -j"$(nproc)" \
+            DYNAMIC_ARCH=1 \
+            NO_AFFINITY=1 \
+            USE_THREAD=1 \
+            NUM_THREADS=64 \
+            CC=gcc FC=gfortran
+          make install PREFIX="${GITHUB_WORKSPACE}/openblas-install"
+          popd
+          # Overwrite the vendored deps so the existing CMakeLists.txt
+          # target_link_libraries path resolves to the portable copy.
+          cp -P "${GITHUB_WORKSPACE}/openblas-install/lib/libopenblas.so"* deps/linux-x64/
+
+      - name: Source libgfortran.so.5 from manylinux toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          GFORT=$(gcc --print-file-name=libgfortran.so.5)
+          [ -f "$GFORT" ] || { echo "ERROR: libgfortran.so.5 not found in manylinux container" >&2; exit 1; }
+          cp "$(realpath "$GFORT")" deps/linux-x64/libgfortran.so.5
+
+      - name: Configure
+        shell: bash
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Run drphylo regression test
+        shell: bash
+        run: |
+          ./build/bin/myesl2 drphylo \
+            Fungi_data/aln_200_linux.txt \
+            Fungi_data/Fungi_T1_with_ID.nwk \
+            ci_output \
+            --clade-list Fungi_data/clade_multiple.txt \
+            --lambda-grid "0.1,0.2,0.1" "0.1,0.2,0.1" \
+            --threads 1
+
+      - name: Compare against golden files
+        shell: bash
+        run: bash test/compare_golden.sh ci_output test/golden
+
+      # Guard against future regressions: fail the job if anything in the
+      # bundle starts requiring a glibc newer than RHEL 7's 2.17.
+      - name: Verify all bundled binaries are glibc-2.17 compatible
+        shell: bash
+        run: |
+          set -euxo pipefail
+          MAX=$(objdump -T build/bin/myesl2 build/bin/libopenblas.so.0 build/bin/libgfortran.so.5 \
+                | grep -oE 'GLIBC_[0-9.]+' | sort -V -u | tail -1)
+          echo "Max GLIBC required across binary + bundled libs: $MAX"
+          HIGHEST=$(printf 'GLIBC_2.17\n%s\n' "$MAX" | sort -V | tail -1)
+          if [[ "$HIGHEST" != "GLIBC_2.17" ]]; then
+            echo "ERROR: bundle requires $MAX, exceeds RHEL 7 baseline (GLIBC_2.17)" >&2
+            exit 1
+          fi
+
+      - name: Prepare binary artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp build/bin/myesl2 artifact/myesl2-linux-x64-portable
+          cp build/bin/libopenblas* artifact/ 2>/dev/null || true
+          cp build/bin/libgfortran* artifact/ 2>/dev/null || true
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: myesl2-linux-x64-portable
+          path: artifact/
+
   # ── Publish release ─────────────────────────────────────────────
   publish:
-    needs: build-and-test
+    needs: [build-and-test, build-linux-portable]
     runs-on: ubuntu-latest
     name: Publish Release
 
@@ -148,5 +262,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/myesl2-linux-x64/*
+            artifacts/myesl2-linux-x64-portable/*
             artifacts/myesl2-macos-arm64/*
             artifacts/myesl2-windows-x64/*
