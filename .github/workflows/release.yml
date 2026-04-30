@@ -186,8 +186,21 @@ jobs:
           make install PREFIX=/work/openblas-install
           popd
           # Overwrite the vendored deps so the existing CMakeLists.txt
-          # target_link_libraries path resolves to the portable copy.
-          cp -P /work/openblas-install/lib/libopenblas.so* deps/linux-x64/
+          # target_link_libraries path resolves to the portable copy. We
+          # remove the host-side files first and rebuild the layout
+          # explicitly (real .so.0 + relative symlink) instead of relying
+          # on `cp -P` interactions with the bind-mounted host directory.
+          REAL_SO=$(find /work/openblas-install/lib -maxdepth 1 \
+            -name 'libopenblas.so*' -type f | head -1)
+          [ -f "$REAL_SO" ] || {
+            echo "ERROR: no real libopenblas.so* found in install dir" >&2
+            ls -la /work/openblas-install/lib/ >&2
+            exit 1
+          }
+          rm -f deps/linux-x64/libopenblas.so deps/linux-x64/libopenblas.so.0
+          cp "$REAL_SO" deps/linux-x64/libopenblas.so.0
+          ln -sf libopenblas.so.0 deps/linux-x64/libopenblas.so
+          ls -la deps/linux-x64/
 
           # ── libgfortran.so.5 from the container's GCC ──
           GFORT=$(gcc --print-file-name=libgfortran.so.5)
