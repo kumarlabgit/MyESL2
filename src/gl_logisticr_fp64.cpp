@@ -24,6 +24,7 @@
 #include "gl_logisticr_fp64.hpp"
 #include "eppVector.hpp"
 #include "sg_lasso_helpers.hpp"
+#include "cblas_decl.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,26 +35,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-
-// Direct OpenBLAS cblas_dgemv declaration. Phase A's Armadillo-backed solver
-// goes through op_times → gemv → blas::gemv → Fortran dgemv_ for every matvec.
-// OpenBLAS's internal matvec kernels pick SIMD-friendly accumulation patterns
-// that don't match a plain column-order j-loop, so a raw C++ matvec diverges
-// from Phase A by a few ULPs per call and the line search eventually flips a
-// break decision (observed at lambda=0.9 on the test dataset). Calling
-// cblas_dgemv routes Phase B through the exact same OpenBLAS kernels as Phase
-// A, preserving bit-identity at zero wrapper cost. OpenBLAS is already linked
-// (see deps/linux-x64/libopenblas.so), so no new dependency is introduced.
-extern "C" {
-    void cblas_dgemv(int order, int trans, int M, int N, double alpha,
-                     const double* A, int lda, const double* X, int incX,
-                     double beta, double* Y, int incY);
-}
-// CBLAS enum values from OpenBLAS's cblas.h — copied inline so we don't need
-// to include cblas.h (which may not be on the include path for all builds).
-static constexpr int GL_CBLAS_COL_MAJOR = 102;
-static constexpr int GL_CBLAS_NO_TRANS  = 111;
-static constexpr int GL_CBLAS_TRANS     = 112;
 
 
 GLLogisticRFP64::GLLogisticRFP64(const arma::mat& features,
@@ -259,14 +240,14 @@ arma::rowvec GLLogisticRFP64::Train(const arma::mat& A,
 
     // matvec: out = A * x_in  via cblas_dgemv (y = alpha*A*x + beta*y)
     auto matvec = [&](const double* x_in, double* out) {
-        cblas_dgemv(GL_CBLAS_COL_MAJOR, GL_CBLAS_NO_TRANS,
+        cblas_dgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
                     M_int, N_int, 1.0, A_ptr, M_int,
                     x_in, 1, 0.0, out, 1);
     };
 
     // matvec_t: out = A^T * b_in  via cblas_dgemv with CblasTrans
     auto matvec_t = [&](const double* b_in, double* out) {
-        cblas_dgemv(GL_CBLAS_COL_MAJOR, GL_CBLAS_TRANS,
+        cblas_dgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
                     M_int, N_int, 1.0, A_ptr, M_int,
                     b_in, 1, 0.0, out, 1);
     };

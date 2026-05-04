@@ -2,6 +2,7 @@
 #include "overlapping_sg_lasso_leastr_fp32.hpp"
 #include "overlapping_fp32.hpp"
 #include "sg_lasso_helpers.hpp"
+#include "cblas_decl.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -229,23 +230,19 @@ arma::frowvec& OLSGLassoLeastRFP32::Train(const arma::fmat& features,
 
   // ── Native flat-array implementation (float) ──────────────────────────────────
   const float* A_ptr = A.memptr();
+  const int M_int = static_cast<int>(m);
+  const int N_int = static_cast<int>(n);
 
   auto matvec = [&](const float* x_in, float* out) {
-    std::memset(out, 0, m * sizeof(float));
-    for (size_t j = 0; j < n; j++) {
-      float xj = x_in[j];
-      const float* col = A_ptr + j * m;
-      for (size_t i = 0; i < m; i++) out[i] += col[i] * xj;
-    }
+    cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
+                M_int, N_int, 1.0f, A_ptr, M_int,
+                x_in, 1, 0.0f, out, 1);
   };
 
   auto matvec_t = [&](const float* b_in, float* out) {
-    for (size_t j = 0; j < n; j++) {
-      float sum = 0;
-      const float* col = A_ptr + j * m;
-      for (size_t i = 0; i < m; i++) sum += col[i] * b_in[i];
-      out[j] = sum;
-    }
+    cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
+                M_int, N_int, 1.0f, A_ptr, M_int,
+                b_in, 1, 0.0f, out, 1);
   };
 
   auto dotf = [](const float* a, const float* b, size_t len) -> double {

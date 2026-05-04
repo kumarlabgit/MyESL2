@@ -23,6 +23,7 @@
 #include "gl_logisticr_fp32.hpp"
 #include "eppVector.hpp"
 #include "sg_lasso_helpers.hpp"
+#include "cblas_decl.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -33,17 +34,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-
-// Direct OpenBLAS cblas_sgemv declaration. See src/gl_logisticr_fp64.cpp for
-// the rationale for calling BLAS directly instead of a hand-written matvec.
-extern "C" {
-    void cblas_sgemv(int order, int trans, int M, int N, float alpha,
-                     const float* A, int lda, const float* X, int incX,
-                     float beta, float* Y, int incY);
-}
-static constexpr int GL32_CBLAS_COL_MAJOR = 102;
-static constexpr int GL32_CBLAS_NO_TRANS  = 111;
-static constexpr int GL32_CBLAS_TRANS     = 112;
 
 
 GLLogisticRFP32::GLLogisticRFP32(const arma::fmat& features,
@@ -228,13 +218,13 @@ arma::frowvec GLLogisticRFP32::Train(const arma::fmat& A,
     const int N_int = static_cast<int>(n);
 
     auto matvec = [&](const float* x_in, float* out) {
-        cblas_sgemv(GL32_CBLAS_COL_MAJOR, GL32_CBLAS_NO_TRANS,
+        cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
                     M_int, N_int, 1.0f, A_ptr, M_int,
                     x_in, 1, 0.0f, out, 1);
     };
 
     auto matvec_t = [&](const float* b_in, float* out) {
-        cblas_sgemv(GL32_CBLAS_COL_MAJOR, GL32_CBLAS_TRANS,
+        cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
                     M_int, N_int, 1.0f, A_ptr, M_int,
                     b_in, 1, 0.0f, out, 1);
     };

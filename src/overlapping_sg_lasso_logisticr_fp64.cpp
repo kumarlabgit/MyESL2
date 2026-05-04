@@ -1,6 +1,7 @@
 
 #include "overlapping_sg_lasso_logisticr_fp64.hpp"
 #include "overlapping_fp64.hpp"
+#include "cblas_decl.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -229,23 +230,19 @@ arma::rowvec& OLSGLassoLogisticRFP64::Train(const arma::mat& features,
 
   // ── Native flat-array implementation ─────────────────────────────────────────
   const double* A_ptr = A.memptr();
+  const int M_int = static_cast<int>(m);
+  const int N_int = static_cast<int>(n);
 
   auto matvec = [&](const double* x_in, double* out) {
-    std::memset(out, 0, m * sizeof(double));
-    for (size_t j = 0; j < n; j++) {
-      double xj = x_in[j];
-      const double* col = A_ptr + j * m;
-      for (size_t i = 0; i < m; i++) out[i] += col[i] * xj;
-    }
+    cblas_dgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
+                M_int, N_int, 1.0, A_ptr, M_int,
+                x_in, 1, 0.0, out, 1);
   };
 
   auto matvec_t = [&](const double* b_in, double* out) {
-    for (size_t j = 0; j < n; j++) {
-      double sum = 0;
-      const double* col = A_ptr + j * m;
-      for (size_t i = 0; i < m; i++) sum += col[i] * b_in[i];
-      out[j] = sum;
-    }
+    cblas_dgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
+                M_int, N_int, 1.0, A_ptr, M_int,
+                b_in, 1, 0.0, out, 1);
   };
 
   auto dotf = [](const double* a, const double* b, size_t len) -> double {
