@@ -256,10 +256,27 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         };
         struct MinorEntry {
             std::string stem;
+            uint32_t    pos;
+            double      weight;
+        };
+        struct TieredMinorEntry {
+            std::string stem;
+            uint32_t    pos;
+            float       threshold;
             double      weight;
         };
         std::vector<ModelEntry> model_entries;
         std::vector<MinorEntry> minor_entries;
+        std::vector<TieredMinorEntry> tiered_minor_entries;
+
+        // Tiered minor suffix table for weight label matching
+        static const std::pair<std::string, float> tier_suffixes[] = {
+            {"_tminor_0pct",   0.0f},
+            {"_tminor_0.1pct", 0.001f},
+            {"_tminor_1pct",   0.01f},
+            {"_tminor_5pct",   0.05f},
+        };
+
         {
             std::ifstream wf(weights_path);
             if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
@@ -271,11 +288,35 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 std::string label = line.substr(0, tab);
                 double w = std::stod(line.substr(tab + 1));
                 if (label == "Intercept") { intercept_val = w; continue; }
-                // Check for {stem}_minor label
+                // Check for {stem}_{pos}_minor label
                 if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
-                    minor_entries.push_back({label.substr(0, label.size() - 6), w});
+                    std::string stem_pos = label.substr(0, label.size() - 6);
+                    size_t us = stem_pos.rfind('_');
+                    if (us != std::string::npos && us + 1 < stem_pos.size()) {
+                        std::string stem = stem_pos.substr(0, us);
+                        uint32_t pos = static_cast<uint32_t>(std::stoul(stem_pos.substr(us + 1)));
+                        minor_entries.push_back({stem, pos, w});
+                    }
                     continue;
                 }
+                // Check for tiered minor labels: {stem}_{pos}_tminor_*pct
+                bool is_tiered = false;
+                for (auto& [suffix, threshold] : tier_suffixes) {
+                    if (label.size() > suffix.size() &&
+                        label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                        std::string stem_pos = label.substr(0, label.size() - suffix.size());
+                        size_t us = stem_pos.rfind('_');
+                        if (us != std::string::npos && us + 1 < stem_pos.size()) {
+                            std::string stem = stem_pos.substr(0, us);
+                            uint32_t pos = static_cast<uint32_t>(std::stoul(stem_pos.substr(us + 1)));
+                            tiered_minor_entries.push_back({stem, pos, threshold, w});
+                        }
+                        is_tiered = true;
+                        break;
+                    }
+                }
+                if (is_tiered) continue;
+
                 size_t us2 = label.rfind('_');
                 if (us2 == std::string::npos || us2 + 1 >= label.size()) continue;
                 char allele = label[us2 + 1];
@@ -290,8 +331,10 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         std::set<std::string> model_stems;
         for (auto& e : model_entries) model_stems.insert(e.stem);
         for (auto& me : minor_entries) model_stems.insert(me.stem);
+        for (auto& te : tiered_minor_entries) model_stems.insert(te.stem);
         std::cout << "Model: " << model_entries.size() << " weight(s), "
                   << minor_entries.size() << " minor weight(s), "
+                  << tiered_minor_entries.size() << " tiered minor weight(s), "
                   << "intercept=" << intercept_val << ", "
                   << model_stems.size() << " alignment(s)\n";
 
@@ -321,6 +364,38 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 minor_alleles_by_gene[stem].push_back({pos, allele});
             }
             std::cout << "Minor alleles: " << minor_alleles_by_gene.size() << " gene(s)\n";
+        }
+
+        // --- Load tiered_minor_alleles.txt if tiered entries exist ---
+        // Map: stem -> [(pos, allele, freq), ...]
+        std::map<std::string, std::vector<std::tuple<uint32_t, char, float>>> tiered_alleles_by_gene;
+        if (!tiered_minor_entries.empty()) {
+            fs::path tma_path = opts.tiered_minor_alleles_path;
+            if (tma_path.empty())
+                tma_path = weights_path.parent_path() / "tiered_minor_alleles.txt";
+            if (!fs::exists(tma_path))
+                tma_path = weights_path.parent_path().parent_path() / "tiered_minor_alleles.txt";
+            std::ifstream tf(tma_path);
+            if (!tf) throw std::runtime_error(
+                "tiered_minor_alleles.txt required for _tminor weights but not found (tried: "
+                + tma_path.string() + ")");
+            std::string tline;
+            while (std::getline(tf, tline)) {
+                if (tline.empty()) continue;
+                // Format: stem\tpos\tallele\tfreq
+                size_t t1 = tline.find('\t');
+                if (t1 == std::string::npos) continue;
+                size_t t2 = tline.find('\t', t1 + 1);
+                if (t2 == std::string::npos) continue;
+                size_t t3 = tline.find('\t', t2 + 1);
+                if (t3 == std::string::npos) continue;
+                std::string stem = tline.substr(0, t1);
+                uint32_t pos = static_cast<uint32_t>(std::stoul(tline.substr(t1 + 1, t2 - t1 - 1)));
+                char allele = tline[t2 + 1];
+                float freq = std::stof(tline.substr(t3 + 1));
+                tiered_alleles_by_gene[stem].push_back({pos, allele, freq});
+            }
+            std::cout << "Tiered minor alleles: " << tiered_alleles_by_gene.size() << " gene(s)\n";
         }
 
         // --- Load list.txt ---
@@ -419,6 +494,9 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             for (auto& me : minor_entries) {
                 if (!seen.count(me.stem)) { eval_gene_order.push_back(me.stem); seen.insert(me.stem); }
             }
+            for (auto& te : tiered_minor_entries) {
+                if (!seen.count(te.stem)) { eval_gene_order.push_back(te.stem); seen.insert(te.stem); }
+            }
         }
 
         std::map<std::string, std::vector<size_t>> stem_entry_indices;
@@ -464,14 +542,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             }
         }
 
-        // --- Compute minor column predictions ---
-        for (auto& me : minor_entries) {
-            auto alleles_it = minor_alleles_by_gene.find(me.stem);
+        // --- Compute minor column predictions (per-position) ---
+        // Group by stem to avoid redundant PFF loads
+        std::map<std::string, std::vector<size_t>> minor_by_stem;
+        for (size_t i = 0; i < minor_entries.size(); ++i)
+            minor_by_stem[minor_entries[i].stem].push_back(i);
+
+        for (auto& [stem, entry_indices] : minor_by_stem) {
+            auto alleles_it = minor_alleles_by_gene.find(stem);
             if (alleles_it == minor_alleles_by_gene.end()) continue;
 
-            fs::path pff_path = cache_dir / (me.stem + ".pff");
+            fs::path pff_path = cache_dir / (stem + ".pff");
             if (!fs::exists(pff_path)) {
-                std::cerr << "Warning: no PFF for " << me.stem << " (minor), skipping\n";
+                std::cerr << "Warning: no PFF for " << stem << " (minor), skipping\n";
                 continue;
             }
 
@@ -488,22 +571,83 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
 
             for (auto& id : meta.seq_ids) {
                 species_sums.emplace(id, 0.0);
-                eval_gene_scores[me.stem].emplace(id, 0.0);
+                eval_gene_scores[stem].emplace(id, 0.0);
             }
 
             bool col_major = (meta.orientation == pff::Orientation::COLUMN_MAJOR);
-            for (uint32_t si = 0; si < S; ++si) {
-                bool has_minor = false;
-                for (auto& [pos, allele] : alleles_it->second) {
-                    if (pos >= L) continue;
-                    char c = col_major
-                        ? raw[static_cast<size_t>(pos) * S + si]
-                        : raw[static_cast<size_t>(si) * L + pos];
-                    if (c == allele) { has_minor = true; break; }
+
+            for (size_t idx : entry_indices) {
+                auto& me = minor_entries[idx];
+                if (me.pos >= L) continue;
+                for (uint32_t si = 0; si < S; ++si) {
+                    bool has_minor = false;
+                    for (auto& [apos, allele] : alleles_it->second) {
+                        if (apos != me.pos) continue;
+                        char c = col_major
+                            ? raw[static_cast<size_t>(me.pos) * S + si]
+                            : raw[static_cast<size_t>(si) * L + me.pos];
+                        if (c == allele) { has_minor = true; break; }
+                    }
+                    if (has_minor) {
+                        species_sums[meta.seq_ids[si]] += me.weight;
+                        eval_gene_scores[stem][meta.seq_ids[si]] += me.weight;
+                    }
                 }
-                if (has_minor) {
-                    species_sums[meta.seq_ids[si]] += me.weight;
-                    eval_gene_scores[me.stem][meta.seq_ids[si]] += me.weight;
+            }
+        }
+
+        // --- Compute tiered minor column predictions (per-position) ---
+        // Group by stem to avoid redundant PFF loads
+        std::map<std::string, std::vector<size_t>> tiered_by_stem;
+        for (size_t ti = 0; ti < tiered_minor_entries.size(); ++ti)
+            tiered_by_stem[tiered_minor_entries[ti].stem].push_back(ti);
+
+        for (auto& [stem, entry_indices] : tiered_by_stem) {
+            auto alleles_it = tiered_alleles_by_gene.find(stem);
+            if (alleles_it == tiered_alleles_by_gene.end()) continue;
+
+            fs::path pff_path = cache_dir / (stem + ".pff");
+            if (!fs::exists(pff_path)) {
+                std::cerr << "Warning: no PFF for " << stem << " (tiered minor), skipping\n";
+                continue;
+            }
+
+            auto meta = fasta::read_pff_metadata(pff_path);
+            uint32_t S = meta.num_sequences;
+            uint32_t L = meta.alignment_length;
+
+            std::vector<char> raw(meta.get_data_size());
+            {
+                std::ifstream pf(pff_path, std::ios::binary);
+                pf.seekg(static_cast<std::streamoff>(meta.data_offset));
+                pf.read(raw.data(), static_cast<std::streamsize>(raw.size()));
+            }
+
+            for (auto& id : meta.seq_ids) {
+                species_sums.emplace(id, 0.0);
+                eval_gene_scores[stem].emplace(id, 0.0);
+            }
+
+            bool col_major = (meta.orientation == pff::Orientation::COLUMN_MAJOR);
+
+            // For each tiered minor entry for this gene
+            for (size_t ti : entry_indices) {
+                auto& te = tiered_minor_entries[ti];
+                if (te.pos >= L) continue;
+                // Filter alleles at this specific position that qualify for this tier
+                for (uint32_t si = 0; si < S; ++si) {
+                    bool has_tiered = false;
+                    for (auto& [apos, allele, freq] : alleles_it->second) {
+                        if (apos != te.pos || freq <= te.threshold) continue;
+                        char c = col_major
+                            ? raw[static_cast<size_t>(te.pos) * S + si]
+                            : raw[static_cast<size_t>(si) * L + te.pos];
+                        if (c == allele) { has_tiered = true; break; }
+                    }
+                    if (has_tiered) {
+                        species_sums[meta.seq_ids[si]] += te.weight;
+                        eval_gene_scores[stem][meta.seq_ids[si]] += te.weight;
+                    }
                 }
             }
         }

@@ -298,7 +298,8 @@ AlignmentMeta count_pff_columns(
     bool drop_major,
     const std::unordered_set<std::string>& dropout_labels,
     bool skip_x,
-    bool minor_column)
+    bool minor_column,
+    bool tiered_minor_col)
 {
     AlignmentMeta meta;
     meta.stem = pff_path.stem().string();
@@ -382,23 +383,48 @@ AlignmentMeta count_pff_columns(
         int num_cols = static_cast<int>(next_col);
         if (num_cols == 0) continue;
 
-        // Record map entries and minor flags (same order as DLT encoder)
+        // Record map entries, minor flags, and allele frequencies
+        int total_non_gap = 0;
+        if (tiered_minor_col) {
+            for (int c = 0; c < 256; ++c) total_non_gap += counts[c];
+        }
         for (int c = 0; c < 256; ++c) {
             if (col_idx[c] >= 0) {
                 meta.map.push_back({p, static_cast<char>(c)});
-                meta.col_is_minor.push_back(c != static_cast<int>(major));
+                bool is_minor = (c != static_cast<int>(major));
+                meta.col_is_minor.push_back(is_minor);
+                if (tiered_minor_col) {
+                    meta.col_allele_freq.push_back(
+                        is_minor ? static_cast<float>(counts[c]) / static_cast<float>(total_non_gap)
+                                 : 0.0f);
+                }
+            }
+        }
+
+        // Count per-position minor/tiered columns
+        if (minor_column) {
+            bool pos_has_minor = false;
+            for (int c = 0; c < 256; ++c) {
+                if (col_idx[c] >= 0 && c != static_cast<int>(major)) {
+                    pos_has_minor = true; break;
+                }
+            }
+            if (pos_has_minor) ++meta.num_minor_positions;
+        }
+        if (tiered_minor_col && total_non_gap > 0) {
+            for (size_t tier = 0; tier < NUM_TIERED_MINOR_TIERS; ++tier) {
+                for (int c = 0; c < 256; ++c) {
+                    if (col_idx[c] < 0 || c == static_cast<int>(major)) continue;
+                    float freq = static_cast<float>(counts[c]) / static_cast<float>(total_non_gap);
+                    if (freq > TIERED_MINOR_THRESHOLDS[tier]) {
+                        ++meta.num_tiered_minor_cols; break;
+                    }
+                }
             }
         }
     }
 
     meta.num_cols = meta.map.size();
-
-    // Determine if this gene will have a minor column
-    if (minor_column && meta.num_cols > 0) {
-        for (size_t j = 0; j < meta.col_is_minor.size(); ++j) {
-            if (meta.col_is_minor[j]) { meta.has_minor_col = true; break; }
-        }
-    }
 
     return meta;
 }
@@ -414,7 +440,7 @@ bool encode_pff_into(
     const std::unordered_set<std::string>& dropout_labels,
     bool skip_x,
     bool minor_column,
-    bool has_minor_col)
+    bool tiered_minor_col)
 {
     std::string stem = pff_path.stem().string();
 
@@ -449,10 +475,6 @@ bool encode_pff_into(
 
     int counts[256];
     int8_t col_idx[256];
-
-    // Track minor column (OR of all minor allele columns)
-    std::vector<uint8_t> minor_buf;
-    if (has_minor_col) minor_buf.assign(N, 0);
 
     uint64_t cur_col = col_offset;
 
@@ -509,27 +531,57 @@ bool encode_pff_into(
             if (ci >= 0) features(i, cur_col + ci) = 1.0f;
         }
 
-        // Update minor column buffer
-        if (has_minor_col) {
+        cur_col += num_cols;
+
+        // Per-position minor column: 1 if sample has any minor allele at this position
+        if (minor_column) {
+            bool pos_has_minor = false;
             for (int c = 0; c < 256; ++c) {
                 if (col_idx[c] >= 0 && c != static_cast<int>(major)) {
-                    // This column is a minor allele — OR its presence into minor_buf
-                    for (uint32_t i = 0; i < N; ++i) {
-                        if (seq_mapping[i] < 0) continue;
-                        auto ch = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
-                        if (ch == static_cast<uint8_t>(c)) minor_buf[i] = 1;
-                    }
+                    pos_has_minor = true; break;
                 }
+            }
+            if (pos_has_minor) {
+                for (uint32_t i = 0; i < N; ++i) {
+                    if (seq_mapping[i] < 0) continue;
+                    auto ch = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+                    if (col_idx[ch] >= 0 && ch != major)
+                        features(i, cur_col) = 1.0f;
+                }
+                ++cur_col;
             }
         }
 
-        cur_col += num_cols;
-    }
-
-    // Write minor column
-    if (has_minor_col) {
-        for (uint32_t i = 0; i < N; ++i)
-            features(i, cur_col) = static_cast<float>(minor_buf[i]);
+        // Per-position tiered minor columns
+        if (tiered_minor_col) {
+            int total_non_gap = 0;
+            for (int c = 0; c < 256; ++c) total_non_gap += counts[c];
+            if (total_non_gap > 0) {
+                for (size_t tier = 0; tier < NUM_TIERED_MINOR_TIERS; ++tier) {
+                    // Check if any minor allele at this position qualifies for this tier
+                    bool tier_active = false;
+                    for (int c = 0; c < 256; ++c) {
+                        if (col_idx[c] < 0 || c == static_cast<int>(major)) continue;
+                        if (static_cast<float>(counts[c]) / static_cast<float>(total_non_gap)
+                            > TIERED_MINOR_THRESHOLDS[tier]) {
+                            tier_active = true; break;
+                        }
+                    }
+                    if (!tier_active) continue;
+                    // Write column: 1 if sample has a qualifying allele at this position
+                    for (uint32_t i = 0; i < N; ++i) {
+                        if (seq_mapping[i] < 0) continue;
+                        auto ch = static_cast<uint8_t>(raw[static_cast<size_t>(p) * S + static_cast<uint32_t>(seq_mapping[i])]);
+                        if (col_idx[ch] >= 0 && ch != static_cast<uint8_t>(major)) {
+                            float freq = static_cast<float>(counts[ch]) / static_cast<float>(total_non_gap);
+                            if (freq > TIERED_MINOR_THRESHOLDS[tier])
+                                features(i, cur_col) = 1.0f;
+                        }
+                    }
+                    ++cur_col;
+                }
+            }
+        }
     }
 
     return true;
