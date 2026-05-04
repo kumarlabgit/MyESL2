@@ -121,13 +121,13 @@ void print_usage(const char* prog_name) {
 
         "-------------------------------------------\n"
         "DRPHYLO\n"
-        "  " + p + " drphylo <list.txt> <tree.nwk> <output_dir> [options]   (tree mode)\n"
-        "  " + p + " drphylo <list.txt> <output_dir> --hypothesis <file> [options]  (direct mode)\n\n"
-        "  Clade selection (required in tree mode, mutually exclusive):\n"
+        "  " + p + " drphylo <list.txt> <hypothesis.txt> <output_dir> [options]  (direct mode)\n"
+        "  " + p + " drphylo <list.txt> <output_dir> --tree <tree.nwk> [options] (tree mode)\n\n"
+        "  Tree mode (requires --tree):\n"
+        "    --tree <tree.nwk>            Newick tree file (required for tree mode)\n"
         "    --clade-list <file>          file listing clades to test\n"
         "    --gen-clade-list <spec>      auto-generate clade list from tree\n"
         "  DrPhylo-specific:\n"
-        "    --hypothesis <file>          run a single hypothesis instead of tree clades\n"
         "    --grid-rmse-cutoff X         exclude lambda results above RMSE threshold (default: 100)\n"
         "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
         "    --gene-limit N               max genes displayed in aggregated eval.svg (default: 100)\n"
@@ -407,23 +407,37 @@ int main(int argc, char* argv[]) {
         // =====================================================================
         } else if (command == "drphylo") {
         // =====================================================================
-            std::string direct_hyp_file;
-            for (int i = 4; i < argc; ++i)
-                if (std::string(argv[i]) == "--hypothesis" && i+1 < argc) { direct_hyp_file = argv[i+1]; break; }
-            bool hyp_mode = !direct_hyp_file.empty();
+            // Detect tree mode: --tree flag present anywhere in args
+            std::string tree_file;
+            bool has_clade_flag = false;
+            for (int i = 3; i < argc; ++i) {
+                std::string a = argv[i];
+                if (a == "--tree" && i+1 < argc) tree_file = argv[i+1];
+                if (a == "--clade-list" || a == "--gen-clade-list") has_clade_flag = true;
+            }
+            bool tree_mode = !tree_file.empty();
 
-            if (argc < (hyp_mode ? 4 : 5)) {
-                std::cerr << "Error: drphylo requires <list.txt> <tree.nwk> <output_dir> [options]\n"
-                          << "       or: drphylo <list.txt> <output_dir> --hypothesis <file> [options]\n";
+            // --clade-list / --gen-clade-list require --tree
+            if (!tree_mode && has_clade_flag) {
+                std::cerr << "Error: --clade-list and --gen-clade-list require tree mode.\n"
+                          << "       Add --tree <tree.nwk> to use tree mode.\n";
+                return 1;
+            }
+
+            if (argc < (tree_mode ? 4 : 5)) {
+                std::cerr << "Error: drphylo usage:\n"
+                          << "  drphylo <list.txt> <hypothesis.txt> <output_dir> [options]  (direct mode)\n"
+                          << "  drphylo <list.txt> <output_dir> --tree <tree.nwk> [options] (tree mode)\n";
                 return 1;
             }
 
             fs::path list_path   = argv[2];
             fs::path tree_path;
             fs::path output_dir;
+            fs::path direct_hyp_file;
             int extra_start;
-            if (hyp_mode) { output_dir = argv[3]; extra_start = 4; }
-            else          { tree_path = argv[3]; output_dir = argv[4]; extra_start = 5; }
+            if (tree_mode) { output_dir = argv[3]; tree_path = tree_file; extra_start = 4; }
+            else           { direct_hyp_file = argv[3]; output_dir = argv[4]; extra_start = 5; }
 
             // Build shared opts with defaults
             pipeline::PreprocessOptions pre_opts;
@@ -450,7 +464,7 @@ int main(int argc, char* argv[]) {
                 if      (arg == "--clade-list"       && i+1<argc) pre_opts.clade_list_file = argv[++i];
                 else if (arg == "--gen-clade-list"   && i+1<argc) pre_opts.gen_clade_spec  = argv[++i];
                 else if (arg == "--class-bal"        && i+1<argc) pre_opts.class_bal_phylo = argv[++i];
-                else if (arg == "--hypothesis"       && i+1<argc) { ++i; /* already captured */ }
+                else if (arg == "--tree"             && i+1<argc) { ++i; /* already captured */ }
                 else if (arg == "--datatype"         && i+1<argc) pre_opts.datatype        = argv[++i];
                 else if (arg == "--threads"          && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
                 else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
@@ -550,8 +564,8 @@ int main(int argc, char* argv[]) {
                 std::cout << label << ": HSS=" << agg.hss << "\n";
             };
 
-            if (hyp_mode) {
-                // Phase 1 conversion only (no tree)
+            if (!tree_mode) {
+                // Direct mode: 3 positional args (list, hypothesis, output_dir)
                 pipeline::preprocess(pre_opts);
                 std::string label = fs::path(direct_hyp_file).stem().string();
                 run_one(direct_hyp_file, output_dir, label);

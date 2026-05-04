@@ -63,8 +63,8 @@ jobs:
         run: |
           ./build/bin/myesl2 drphylo \
             "${{ matrix.aln_list }}" \
-            Fungi_data/Fungi_T1_with_ID.nwk \
             ci_output \
+            --tree Fungi_data/Fungi_T1_with_ID.nwk \
             --clade-list Fungi_data/clade_multiple.txt \
             --lambda-grid "0.1,0.2,0.1" "0.1,0.2,0.1" \
             --threads 1
@@ -75,8 +75,8 @@ jobs:
         run: |
           ./build/bin/Release/myesl2.exe drphylo \
             "${{ matrix.aln_list }}" \
-            Fungi_data/Fungi_T1_with_ID.nwk \
             ci_output \
+            --tree Fungi_data/Fungi_T1_with_ID.nwk \
             --clade-list Fungi_data/clade_multiple.txt \
             --lambda-grid "0.1,0.2,0.1" "0.1,0.2,0.1" \
             --threads 1
