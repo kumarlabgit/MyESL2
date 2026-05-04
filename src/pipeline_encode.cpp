@@ -65,6 +65,7 @@ EncodeResult encode(const EncodeOptions& opts)
             throw std::runtime_error("Cannot open hypothesis file: " + opts.hyp_path.string());
         std::string line;
         int line_num = 0;
+        int bad_lines = 0;
         while (std::getline(hyp_file, line)) {
             ++line_num;
             if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -74,15 +75,46 @@ EncodeResult encode(const EncodeOptions& opts)
             if (delim == std::string::npos) {
                 std::cerr << "Warning: hypothesis file line " << line_num
                           << " has no delimiter, skipping: \"" << line << "\"\n";
+                ++bad_lines;
                 continue;
             }
-            double val = std::stod(line.substr(delim + 1));
+            std::string val_str = line.substr(delim + 1);
+            // Trim leading whitespace from value (handles multiple spaces/tabs)
+            while (!val_str.empty() && (val_str.front() == ' ' || val_str.front() == '\t'))
+                val_str.erase(val_str.begin());
+            double val;
+            try {
+                size_t pos;
+                val = std::stod(val_str, &pos);
+                // Check for trailing non-whitespace after the number
+                while (pos < val_str.size() && (val_str[pos] == ' ' || val_str[pos] == '\t')) ++pos;
+                if (pos != val_str.size())
+                    throw std::invalid_argument("trailing characters");
+            } catch (const std::exception&) {
+                throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                    + " line " + std::to_string(line_num)
+                    + ": invalid label value \"" + val_str + "\""
+                    + " (expected -1, 0, or 1)");
+            }
+            if (val != -1.0 && val != 0.0 && val != 1.0)
+                throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                    + " line " + std::to_string(line_num)
+                    + ": label must be -1, 0, or 1 (got " + val_str + ")");
             if (val == 0.0) continue;
             hyp_seq_names.push_back(line.substr(0, delim));
             hyp_values.push_back(static_cast<float>(val));
         }
+        if (hyp_seq_names.empty() && bad_lines > 0)
+            throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                + " has no valid entries (all " + std::to_string(bad_lines)
+                + " non-empty lines were malformed)");
     }
     std::cout << "Hypothesis sequences (non-zero): " << hyp_seq_names.size() << "\n";
+
+    if (hyp_seq_names.size() < 2)
+        throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+            + " contains only " + std::to_string(hyp_seq_names.size())
+            + " non-zero sample(s); need at least 2");
 
     // --auto-bit-ct: override min_minor as percentage of minority class size
     if (opts.auto_bit_ct > 0.0) {
@@ -486,6 +518,12 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
+        // Sanity check: at least 2 feature positions
+        if (total_cols < 2)
+            throw std::runtime_error("Feature set covers only "
+                + std::to_string(total_cols)
+                + " feature position(s); need at least 2");
+
     } else {
         // ---- FASTA branch (two-pass encoding) ----
         std::vector<fs::path> pff_paths;
@@ -652,6 +690,20 @@ EncodeResult encode(const EncodeOptions& opts)
                     }
                 }
             }
+        }
+
+        // Sanity check: features must span at least 2 distinct alignment positions
+        {
+            std::unordered_set<std::string> distinct_positions;
+            for (int ri = 0; ri < total_encode; ++ri) {
+                if (metas[ri].failed) continue;
+                for (auto& [pos, allele] : metas[ri].map)
+                    distinct_positions.insert(metas[ri].stem + "_" + std::to_string(pos));
+            }
+            if (distinct_positions.size() < 2)
+                throw std::runtime_error("Feature set covers only "
+                    + std::to_string(distinct_positions.size())
+                    + " distinct alignment position(s); need at least 2");
         }
 
         // Compute per-gene column offsets in the features matrix
@@ -1016,6 +1068,7 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
             throw std::runtime_error("Cannot open hypothesis file: " + opts.hyp_path.string());
         std::string line;
         int line_num = 0;
+        int bad_lines = 0;
         while (std::getline(hyp_file, line)) {
             ++line_num;
             if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -1025,14 +1078,43 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
             if (delim == std::string::npos) {
                 std::cerr << "Warning: hypothesis file line " << line_num
                           << " has no delimiter, skipping: \"" << line << "\"\n";
+                ++bad_lines;
                 continue;
             }
-            double val = std::stod(line.substr(delim + 1));
+            std::string val_str = line.substr(delim + 1);
+            while (!val_str.empty() && (val_str.front() == ' ' || val_str.front() == '\t'))
+                val_str.erase(val_str.begin());
+            double val;
+            try {
+                size_t pos;
+                val = std::stod(val_str, &pos);
+                while (pos < val_str.size() && (val_str[pos] == ' ' || val_str[pos] == '\t')) ++pos;
+                if (pos != val_str.size())
+                    throw std::invalid_argument("trailing characters");
+            } catch (const std::exception&) {
+                throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                    + " line " + std::to_string(line_num)
+                    + ": invalid label value \"" + val_str + "\""
+                    + " (expected -1, 0, or 1)");
+            }
+            if (val != -1.0 && val != 0.0 && val != 1.0)
+                throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                    + " line " + std::to_string(line_num)
+                    + ": label must be -1, 0, or 1 (got " + val_str + ")");
             if (val == 0.0) continue;
             hyp_seq_names.push_back(line.substr(0, delim));
             hyp_values.push_back(static_cast<float>(val));
         }
+        if (hyp_seq_names.empty() && bad_lines > 0)
+            throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+                + " has no valid entries (all " + std::to_string(bad_lines)
+                + " non-empty lines were malformed)");
     }
+
+    if (hyp_seq_names.size() < 2)
+        throw std::runtime_error("Hypothesis file " + opts.hyp_path.string()
+            + " contains only " + std::to_string(hyp_seq_names.size())
+            + " non-zero sample(s); need at least 2");
 
     // --auto-bit-ct: override min_minor as percentage of minority class size
     if (opts.auto_bit_ct > 0.0) {
