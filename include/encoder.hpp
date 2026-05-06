@@ -12,13 +12,6 @@ namespace arma { template<typename eT> class Mat; typedef Mat<float> fmat; }
 
 namespace encoder {
 
-// Tiered minor column thresholds (as fractions, not percentages)
-static constexpr float TIERED_MINOR_THRESHOLDS[] = {0.0f, 0.001f, 0.01f, 0.05f};
-static constexpr size_t NUM_TIERED_MINOR_TIERS = 4;
-static constexpr const char* TIERED_MINOR_SUFFIXES[] = {
-    "_tminor_0pct", "_tminor_0.1pct", "_tminor_1pct", "_tminor_5pct"
-};
-
 struct AlignmentResult {
     std::string stem;
     std::vector<std::vector<uint8_t>> columns;  // columns[j][i]: j-th encoded col, i-th sequence
@@ -37,9 +30,7 @@ struct AlignmentMeta {
     std::vector<std::pair<uint32_t, char>> map; // (original_pos, allele) per encoded column
     std::vector<std::string> missing_sequences;
     std::vector<bool> col_is_minor;
-    std::vector<float> col_allele_freq;           // parallel to map: allele frequency at its position
-    uint32_t num_minor_positions = 0;             // positions with ≥1 minor allele (for --minor-column)
-    uint32_t num_tiered_minor_cols = 0;           // total (position, tier) column count
+    bool has_minor_col = false;  // true if any col_is_minor entry is true
     bool failed = false;
     std::string error_msg;
 };
@@ -92,14 +83,13 @@ AlignmentMeta count_pff_columns(
     bool drop_major = false,
     const std::unordered_set<std::string>& dropout_labels = {},
     bool skip_x = false,
-    bool minor_column = false,
-    bool tiered_minor_col = false
+    bool minor_column = false
 );
 
 // Pass 2: Re-read PFF and encode directly into a pre-allocated features matrix.
 // Writes columns starting at features(0, col_offset).
-// If minor_column is true, writes a per-position minor column after each position's allele columns.
-// If tiered_minor_col is true, writes per-position tiered columns after each position's allele columns.
+// If minor_column is true and the gene has minor alleles, writes an extra column at
+// col_offset + num_regular_cols containing the OR of all minor-allele columns.
 // Returns false on failure (same gene that would set failed=true in pass 1).
 bool encode_pff_into(
     arma::fmat& features,
@@ -111,7 +101,7 @@ bool encode_pff_into(
     const std::unordered_set<std::string>& dropout_labels = {},
     bool skip_x = false,
     bool minor_column = false,
-    bool tiered_minor_col = false
+    bool has_minor_col = false
 );
 
 } // namespace encoder

@@ -34,8 +34,7 @@ struct EvaluateOptions {
     std::string  datatype        = "universal";
     unsigned int num_threads     = 0;
     fs::path     cache_dir;
-    fs::path     minor_alleles_path;          // optional: path to minor_alleles.txt from training
-    fs::path     tiered_minor_alleles_path;  // optional: path to tiered_minor_alleles.txt
+    fs::path     minor_alleles_path; // optional: path to minor_alleles.txt from training
     // AIM feature ranking: if aim_window > 0, read ranked features from weights_path parent dir
     int          aim_window      = 0;
     // Visualization pass-through (used when no_visualize == false)

@@ -585,13 +585,11 @@ EncodeResult encode(const EncodeOptions& opts)
                     try {
                         metas[idx] = encoder::count_pff_columns(
                             pff_paths[idx], hyp_seq_names, min_minor,
-                            opts.drop_major, opts.dropout_labels, skip_x,
-                            opts.minor_column, opts.tiered_minor_col);
+                            opts.drop_major, opts.dropout_labels, skip_x, opts.minor_column);
                         {
                             std::lock_guard<std::mutex> lock(print_mutex);
                             ++done_count;
-                            size_t ncols = metas[idx].num_cols + metas[idx].num_minor_positions
-                                         + metas[idx].num_tiered_minor_cols;
+                            size_t ncols = metas[idx].num_cols + (metas[idx].has_minor_col ? 1 : 0);
                             running_cols += ncols;
                             std::cout << "[" << done_count << "/" << total_encode << "] "
                                       << pff_paths[idx].filename().string()
@@ -647,8 +645,7 @@ EncodeResult encode(const EncodeOptions& opts)
         std::vector<size_t> result_col_counts(total_encode, 0);
         for (int ri = 0; ri < total_encode; ++ri) {
             if (metas[ri].failed) { ++failed_count; continue; }
-            size_t ncols = metas[ri].num_cols + metas[ri].num_minor_positions
-                         + metas[ri].num_tiered_minor_cols;
+            size_t ncols = metas[ri].num_cols + (metas[ri].has_minor_col ? 1 : 0);
             result_col_counts[ri] = ncols;
             total_cols += ncols;
             ++n_aligned;
@@ -675,43 +672,10 @@ EncodeResult encode(const EncodeOptions& opts)
                 auto& meta = metas[ri];
                 if (meta.failed) continue;
                 all_stems_ordered.push_back(meta.stem);
-                // Group map entries by alignment position
-                size_t j = 0;
-                while (j < meta.map.size()) {
-                    uint32_t cur_pos = meta.map[j].first;
-                    size_t pos_start = j;
-                    // Write allele labels for this position
-                    while (j < meta.map.size() && meta.map[j].first == cur_pos) {
-                        auto& [pos, allele] = meta.map[j];
-                        combined_map << map_pos++ << '\t' << meta.stem << '_'
-                                     << pos << '_' << allele << '\n';
-                        ++j;
-                    }
-                    // Per-position minor label
-                    if (opts.minor_column) {
-                        bool has_minor = false;
-                        for (size_t k = pos_start; k < j; ++k)
-                            if (meta.col_is_minor[k]) { has_minor = true; break; }
-                        if (has_minor)
-                            combined_map << map_pos++ << '\t' << meta.stem << '_'
-                                         << cur_pos << "_minor\n";
-                    }
-                    // Per-position tiered labels
-                    if (opts.tiered_minor_col) {
-                        for (size_t tier = 0; tier < encoder::NUM_TIERED_MINOR_TIERS; ++tier) {
-                            bool active = false;
-                            for (size_t k = pos_start; k < j; ++k) {
-                                if (meta.col_is_minor[k] &&
-                                    meta.col_allele_freq[k] > encoder::TIERED_MINOR_THRESHOLDS[tier]) {
-                                    active = true; break;
-                                }
-                            }
-                            if (active)
-                                combined_map << map_pos++ << '\t' << meta.stem << '_'
-                                             << cur_pos << encoder::TIERED_MINOR_SUFFIXES[tier] << '\n';
-                        }
-                    }
-                }
+                for (auto& [pos, allele] : meta.map)
+                    combined_map << map_pos++ << '\t' << meta.stem << '_' << pos << '_' << allele << '\n';
+                if (meta.has_minor_col)
+                    combined_map << map_pos++ << '\t' << meta.stem << "_minor\n";
             }
         }
 
@@ -724,20 +688,6 @@ EncodeResult encode(const EncodeOptions& opts)
                         auto& [pos, allele] = meta.map[j];
                         ma_file << meta.stem << '_' << pos << '_' << allele << '\n';
                     }
-                }
-            }
-        }
-
-        if (opts.tiered_minor_col) {
-            std::ofstream tma(opts.output_dir / "tiered_minor_alleles.txt");
-            tma << std::fixed << std::setprecision(6);
-            for (auto& meta : metas) {
-                if (meta.failed) continue;
-                for (size_t j = 0; j < meta.map.size(); ++j) {
-                    if (!meta.col_is_minor[j]) continue;
-                    auto& [pos, allele] = meta.map[j];
-                    tma << meta.stem << '\t' << pos << '\t' << allele << '\t'
-                        << meta.col_allele_freq[j] << '\n';
                 }
             }
         }
@@ -771,7 +721,6 @@ EncodeResult encode(const EncodeOptions& opts)
         for (auto& meta : metas) {
             { decltype(meta.map) tmp; tmp.swap(meta.map); }
             { decltype(meta.col_is_minor) tmp; tmp.swap(meta.col_is_minor); }
-            { decltype(meta.col_allele_freq) tmp; tmp.swap(meta.col_allele_freq); }
             { decltype(meta.missing_sequences) tmp; tmp.swap(meta.missing_sequences); }
         }
         // Return freed metadata pages to OS before the large matrix allocation.
@@ -807,7 +756,7 @@ EncodeResult encode(const EncodeOptions& opts)
                             features, col_offsets[idx],
                             pff_paths[idx], hyp_seq_names, min_minor,
                             opts.drop_major, opts.dropout_labels, skip_x,
-                            opts.minor_column, opts.tiered_minor_col);
+                            opts.minor_column, metas[idx].has_minor_col);
                     } catch (const std::exception& e) {
                         std::lock_guard<std::mutex> lock(print_mutex);
                         std::cerr << "  Pass 2 FAIL: " << pff_paths[idx].filename().string()
@@ -1299,22 +1248,21 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
                 }
                 std::string stem = pff_paths[idx].stem().string();
                 try {
-                    uint64_t ncols;
-                    if (opts.minor_column || opts.tiered_minor_col) {
-                        // Use count_pff_columns which computes per-position minor/tiered counts
-                        auto meta = encoder::count_pff_columns(
-                            pff_paths[idx], hyp_seq_names, min_minor,
-                            opts.drop_major, opts.dropout_labels, skip_x,
-                            opts.minor_column, opts.tiered_minor_col);
-                        ncols = meta.num_cols + meta.num_minor_positions + meta.num_tiered_minor_cols;
-                    } else {
-                        auto result = pre.use_dlt
-                            ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor,
-                                                      opts.drop_major, opts.dropout_labels, skip_x)
-                            : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor,
-                                                  opts.drop_major, opts.dropout_labels, skip_x);
-                        ncols = result.columns.size();
+                    auto result = pre.use_dlt
+                        ? encoder::encode_pff_dlt(pff_paths[idx], hyp_seq_names, min_minor,
+                                                  opts.drop_major, opts.dropout_labels, skip_x)
+                        : encoder::encode_pff(pff_paths[idx], hyp_seq_names, min_minor,
+                                              opts.drop_major, opts.dropout_labels, skip_x);
+                    uint64_t ncols = result.columns.size();
+                    // Add 1 for the minor column if applicable
+                    if (opts.minor_column && ncols > 0) {
+                        bool any_minor = false;
+                        for (size_t j = 0; j < result.col_is_minor.size(); ++j) {
+                            if (result.col_is_minor[j]) { any_minor = true; break; }
+                        }
+                        if (any_minor) ++ncols;
                     }
+                    // result (including columns) goes out of scope here
                     std::lock_guard<std::mutex> lock(sizes_mutex);
                     sizes[stem] = ncols;
                     ++done_count;
