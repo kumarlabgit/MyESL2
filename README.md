@@ -112,6 +112,7 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--dlt` | Use direct lookup table encoder (faster encoding, identical output) |
 | `--drop-major-allele` | Exclude the major allele column from FASTA encoding |
 | `--minor-column` | Add a per-gene binary column indicating presence of any non-major allele |
+| `--tiered-minor-col` | Add per-gene tiered minor allele columns at 0%, 0.1%, 1%, and 5% frequency thresholds (mutually exclusive with `--minor-column`) |
 | `--class-bal <mode>` | Class balancing before regression: `up`, `down`, or `weighted` |
 | `--dropout <file>` | File listing feature labels to exclude from encoding (one label per line) |
 
@@ -136,6 +137,9 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--lambda-grid <min,max,step> <min,max,step>` | Run Cartesian product of lambda pairs (e.g., `0.1,0.9,0.1 0.0001,0.001,0.0001`) |
 | `--lambda-file <path>` | File of lambda pairs, one `l1 l2` per line |
 | `--nfolds N` | K-fold cross-validation (N ≥ 2) |
+| `--precision fp32\|fp64` | Solver precision (default: `fp32`); `fp64` doubles memory but may improve numerical stability |
+| `--max-mem <bytes>` | Abort if estimated feature matrix exceeds this size (default: 8 GB) |
+| `--adaptive-sparsification` | On `max-mem` exceeded, automatically split encoding into smaller chunks |
 | `--param <key>=<value>` | Pass option to the regression solver (see below) |
 
 **Available regression methods (`--method`):**
@@ -166,6 +170,7 @@ output_dir/
 ├── alignment_table.txt               # Gene × sample mapping metadata
 ├── missing_sequences.txt             # Samples absent from one or more alignments
 ├── minor_alleles.txt                 # Minor allele labels (only with --minor-column)
+├── tiered_minor_alleles.txt          # Minor allele labels with frequencies (only with --tiered-minor-col)
 ├── lambda_0/
 │   ├── weights.txt                   # Feature weights + intercept
 │   ├── gss.txt                       # Gene Significance Scores (sum |w| per gene)
@@ -208,6 +213,9 @@ myesl2 evaluate <weights.txt> <list.txt> <output_file> [options]
 | `--threads N` | Worker threads (default: all cores) |
 | `--no-visualize` | Skip automatic SVG heatmap generation |
 | `--minor-alleles <file>` | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
+| `--tiered-minor-alleles <file>` | Path to `tiered_minor_alleles.txt` from training (auto-detected if omitted) |
+| `--gene-limit N` | Maximum genes displayed in auto-generated SVG (default: 100) |
+| `--species-limit N` | Maximum species displayed in auto-generated SVG (default: 100) |
 
 **Outputs:**
 - `<output_file>` — TSV with columns: `SeqID`, `Prediction`, `Probability`, `ClassPrediction` (plus accuracy metrics if `--hypothesis` provided)
@@ -244,21 +252,21 @@ myesl2 visualize <gene_predictions.txt> <output.svg> [options]
 
 Runs the training pipeline separately for each clade in a phylogenetic tree (or each group in a hypothesis file), enabling clade-specific feature discovery.
 
-**Tree mode:**
+**Direct mode (hypothesis file):**
 ```
-myesl2 drphylo <list.txt> <tree.nwk> <output_dir> [options]
+myesl2 drphylo <list.txt> <hypothesis.txt> <output_dir> [options]
 ```
 
-**Hypothesis mode:**
+**Tree mode:**
 ```
-myesl2 drphylo <list.txt> <output_dir> --hypothesis <file> [options]
+myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 ```
 
 **Options:**
 
 | Flag | Description |
 |------|-------------|
-| `--hypothesis <file>` | Direct hypothesis file (activates hypothesis mode instead of tree mode) |
+| `--tree <tree.nwk>` | Newick tree file (activates tree mode) |
 | `--clade-list <file>` | File of clade node IDs to analyze, one per line (tree mode only) |
 | `--gen-clade-list <lower,upper>` | Auto-generate clade list by leaf count range, e.g., `3,10` (tree mode only) |
 | `--class-bal <mode>` | Balancing strategy: `phylo` (default, tree mode only), `up`, `down`, or `weighted` |
@@ -267,8 +275,10 @@ myesl2 drphylo <list.txt> <output_dir> --hypothesis <file> [options]
 | `--min-groups N` | Minimum number of genes required in the model |
 | `--grid-rmse-cutoff <value>` | Maximum RMSE threshold for lambda filtering (default: 100.0) |
 | `--grid-acc-cutoff <value>` | Minimum accuracy threshold for lambda filtering (default: 0.0) |
+| `--gene-limit N` | Maximum genes displayed in aggregated eval.svg (default: 100) |
+| `--species-limit N` | Maximum species displayed in aggregated eval.svg (default: 100) |
 
-All `--lambda`, `--lambda-grid`, `--lambda-file`, `--param`, `--cache-dir`, and `--threads` options from `train` are also accepted and passed through to each clade run.
+All `--lambda`, `--lambda-grid`, `--lambda-file`, `--param`, `--cache-dir`, `--threads`, and encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`) from `train` are also accepted.
 
 **Outputs:**
 

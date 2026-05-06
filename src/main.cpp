@@ -84,6 +84,7 @@ void print_usage(const char* prog_name) {
         "    --auto-bit-ct X              set min_minor = ceil(X% x min_class_size)\n"
         "    --drop-major-allele          exclude major-allele column from FASTA encoder\n"
         "    --minor-column               add per-gene binary minor allele summary column\n"
+        "    --tiered-minor-col           add per-gene tiered minor allele columns (0%, 0.1%, 1%, 5%)\n"
         "    --class-bal up|down|weighted balance classes before regression\n"
         "    --dropout <file>             exclude features listed in file from encoding\n"
         "    --write-features <path>      write encoded feature matrix to file\n"
@@ -113,6 +114,7 @@ void print_usage(const char* prog_name) {
         "    --hypothesis <file>     compare predictions to known labels (writes TPR/TNR/FPR/FNR)\n"
         "    --no-visualize          skip automatic SVG generation\n"
         "    --minor-alleles <file>  minor_alleles.txt from training (auto-detected if omitted)\n"
+        "    --tiered-minor-alleles <file>  tiered_minor_alleles.txt from training (auto-detected)\n"
         "    --gene-limit N          max genes displayed in auto-generated SVG (default: 100)\n"
         "    --species-limit N       max species displayed in auto-generated SVG (default: 100)\n"
         "    --cache-dir DIR\n"
@@ -280,6 +282,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--auto-bit-ct"&& i+1<argc) enc_opts.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts.drop_major = true;
                 else if (arg == "--minor-column") enc_opts.minor_column = true;
+                else if (arg == "--tiered-minor-col") enc_opts.tiered_minor_col = true;
                 else if (arg == "--class-bal"  && i+1<argc) {
                     enc_opts.class_bal = argv[++i];
                     if (enc_opts.class_bal != "up" && enc_opts.class_bal != "down" && enc_opts.class_bal != "weighted")
@@ -331,6 +334,9 @@ int main(int argc, char* argv[]) {
                 enc_opts.lambda_count = n ? n : 1;
             }
 
+            if (enc_opts.minor_column && enc_opts.tiered_minor_col)
+                throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
+
             pipeline::preprocess(pre_opts);
             try {
                 auto enc = pipeline::encode(enc_opts);
@@ -377,6 +383,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--threads"    && i+1<argc) { eval_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!eval_opts.num_threads) eval_opts.num_threads=1; }
                 else if (arg == "--no-visualize") eval_opts.no_visualize = true;
                 else if (arg == "--minor-alleles" && i+1<argc) eval_opts.minor_alleles_path = argv[++i];
+                else if (arg == "--tiered-minor-alleles" && i+1<argc) eval_opts.tiered_minor_alleles_path = argv[++i];
                 else if (arg == "--gene-limit"    && i+1<argc) eval_opts.gene_limit    = std::stoi(argv[++i]);
                 else if (arg == "--species-limit" && i+1<argc) eval_opts.species_limit = std::stoi(argv[++i]);
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
@@ -486,9 +493,12 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--auto-bit-ct"      && i+1<argc) enc_opts_base.auto_bit_ct   = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
                 else if (arg == "--minor-column") enc_opts_base.minor_column = true;
+                else if (arg == "--tiered-minor-col") enc_opts_base.tiered_minor_col = true;
                 else if (arg == "--max-mem"           && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
             }
+            if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
+                throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
             if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
                 enc_opts_base.disable_mc = true;
             if (!min_groups_set) train_opts_base.min_groups = 3;
@@ -555,6 +565,7 @@ int main(int argc, char* argv[]) {
                     eopts.num_threads  = pre_cfg.num_threads ? pre_cfg.num_threads : std::thread::hardware_concurrency();
                     eopts.cache_dir    = pre_cfg.cache_dir;
                     eopts.minor_alleles_path = run_dir / "minor_alleles.txt";
+                    eopts.tiered_minor_alleles_path = run_dir / "tiered_minor_alleles.txt";
                     pipeline::evaluate(eopts);
                 }
 
@@ -644,10 +655,13 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
                 else if (arg == "--minor-column") enc_opts_base.minor_column = true;
+                else if (arg == "--tiered-minor-col") enc_opts_base.tiered_minor_col = true;
                 else if (arg == "--auto-bit-ct"    && i+1<argc) enc_opts_base.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--max-mem"         && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
                 else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
             }
+            if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
+                throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
             if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
                 enc_opts_base.disable_mc = true;
             if (!has_lambda) { train_opts_base.lambda_grid_specs[0]="0.1,0.9,0.1"; train_opts_base.lambda_grid_specs[1]="0.0001,0.0002,0.0001"; train_opts_base.lambda_grid_set=true; }
@@ -1047,11 +1061,14 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--auto-bit-ct"     && i+1<argc) enc_opts.auto_bit_ct  = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele")            enc_opts.drop_major   = true;
                 else if (arg == "--minor-column")                  enc_opts.minor_column = true;
+                else if (arg == "--tiered-minor-col")              enc_opts.tiered_minor_col = true;
                 else if (arg == "--dropout"         && i+1<argc) {
                     enc_opts.dropout_labels = load_dropout_labels(argv[++i]);
                 }
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
+            if (enc_opts.minor_column && enc_opts.tiered_minor_col)
+                throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
             auto sizes = pipeline::encode_sizes(enc_opts);
             uint64_t total = 0;
             for (auto& [stem, ncols] : sizes) {

@@ -99,6 +99,7 @@ PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newi
 ### Encoding Options
 
 - `--minor-column`: Adds a per-gene binary summary column (`{stem}_minor`) indicating whether each species has any non-major allele in that gene. Writes `minor_alleles.txt` listing which feature labels are minor alleles, used by evaluate to reconstitute the column for new species.
+- `--tiered-minor-col`: Adds up to 4 per-gene binary columns (`{stem}_tminor_Xpct`) at frequency thresholds 0%, 0.1%, 1%, and 5%. A tier column is 1 if the species has any minor allele at any position in the gene whose per-position frequency exceeds the threshold. Writes `tiered_minor_alleles.txt` (stem, pos, allele, freq). Mutually exclusive with `--minor-column`. Evaluate uses `--tiered-minor-alleles <file>` to locate the auxiliary file.
 - `--drop-major-allele`: Excludes the most frequent allele column from FASTA encoding.
 - `--auto-bit-ct X`: Sets `min_minor = ceil(X% × minority_class_size)`.
 
