@@ -27,6 +27,8 @@ struct EncodeResult {
     fs::path     field_path;          // empty if not overlapping
     std::map<std::string, std::string> extra_params;  // e.g. sWeight path
     std::string  datatype;            // passed through for train/evaluate
+    std::vector<size_t> group_var_site_counts;  // per-group polymorphic position count
+    std::vector<size_t> group_feature_lengths;  // per-group feature column count
 };
 
 struct EncodeOptions {

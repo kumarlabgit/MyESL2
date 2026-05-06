@@ -42,6 +42,7 @@ struct AlignmentMeta {
     bool has_minor_col = false;                   // true if any col_is_minor entry is true
     std::array<bool, 4> tiered_minor_active = {}; // which tiers have qualifying alleles
     uint8_t num_tiered_minor_cols = 0;            // count of active tiers (0-4)
+    size_t var_site_count = 0;  // polymorphic positions (matches encode_raw_sequences semantics)
     bool failed = false;
     std::string error_msg;
 };

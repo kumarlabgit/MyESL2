@@ -1,5 +1,6 @@
 #include "pipeline_psc.hpp"
 #include "encoder.hpp"
+#include "group_penalty.hpp"
 #include "newick.hpp"
 #include "regression.hpp"
 
@@ -45,10 +46,8 @@ static std::string format_float_trim(double x) {
     return s;
 }
 
-static double round_to(double x, int digits) {
-    double p = std::pow(10.0, digits);
-    return std::round(x * p) / p;
-}
+// round_to, linear_space, build_penalty_terms, compute_group_weights
+// moved to include/group_penalty.hpp — shared with pipeline_train
 
 static bool is_fasta_ext(const fs::path& p) {
     auto ext = p.extension().string();
@@ -573,17 +572,6 @@ static void validate_combo_species_against_alignments(
 
 // ── Lambda grid ───────────────────────────────────────────────────────────────
 
-static std::vector<double> linear_space(double start, double end, double step) {
-    if (step <= 0) throw std::runtime_error("step must be > 0");
-    std::vector<double> out;
-    double val = start;
-    while (val <= end + 1e-12) {
-        out.push_back(round_to(val, 6));
-        val += step;
-    }
-    return out;
-}
-
 static std::vector<double> logspace(double start, double end, size_t points) {
     if (start <= 0 || end <= 0) throw std::runtime_error("logspace bounds must be > 0");
     if (points < 2) throw std::runtime_error("logspace requires at least 2 points");
@@ -608,71 +596,20 @@ static std::vector<std::array<double, 2>> build_lambda_grid(const PscOptions& op
         int digits = static_cast<int>(std::abs(std::log10(opts.initial_lambda1))) + 5;
         for (double l1 : l1_vals)
             for (double l2 : l2_vals)
-                grid.push_back({round_to(l1, digits), round_to(l2, digits)});
+                grid.push_back({group_penalty::round_to(l1, digits), group_penalty::round_to(l2, digits)});
     } else {
         double l1 = opts.initial_lambda1;
         while (l1 <= opts.final_lambda1 + 1e-12) {
             double l2 = opts.initial_lambda2;
             while (l2 <= opts.final_lambda2 + 1e-12) {
                 grid.push_back({l1, l2});
-                l2 = round_to(l2 + opts.lambda_step, 3);
+                l2 = group_penalty::round_to(l2 + opts.lambda_step, 3);
             }
-            l1 = round_to(l1 + opts.lambda_step, 3);
+            l1 = group_penalty::round_to(l1 + opts.lambda_step, 3);
         }
     }
 
     return grid;
-}
-
-// ── Group penalty ─────────────────────────────────────────────────────────────
-
-static std::vector<double> build_penalty_terms(
-    const PscOptions& opts,
-    const std::vector<GeneMeta>& genes)
-{
-    std::string kind = opts.group_penalty_type;
-    for (auto& c : kind) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-    if (kind == "median") {
-        std::vector<size_t> vars;
-        for (auto& g : genes)
-            if (g.var_site_count > 0) vars.push_back(g.var_site_count);
-        if (vars.empty()) vars.push_back(1);
-        std::sort(vars.begin(), vars.end());
-        double median;
-        if (vars.size() % 2 == 1) {
-            median = static_cast<double>(vars[vars.size() / 2]);
-        } else {
-            size_t hi = vars.size() / 2;
-            median = static_cast<double>(vars[hi - 1] + vars[hi]) / 2.0;
-        }
-        return {std::floor(median)};
-    }
-
-    return linear_space(opts.initial_gp_value, opts.final_gp_value, opts.gp_step);
-}
-
-static std::vector<double> compute_group_weights(
-    const std::string& kind,
-    double penalty_term,
-    const std::vector<GeneMeta>& genes)
-{
-    std::string k = kind;
-    for (auto& c : k) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-    std::vector<double> weights;
-    weights.reserve(genes.size());
-    for (auto& g : genes) {
-        size_t feature_len = (g.feature_end >= g.feature_start) ?
-            g.feature_end - g.feature_start + 1 : 0;
-        double w;
-        if (k == "std")         w = std::sqrt(static_cast<double>(feature_len));
-        else if (k == "linear" || k == "median") w = static_cast<double>(g.var_site_count) + penalty_term;
-        else if (k == "sqrt")   w = std::sqrt(static_cast<double>(g.var_site_count));
-        else                    w = std::sqrt(static_cast<double>(feature_len));
-        weights.push_back(w);
-    }
-    return weights;
 }
 
 // ── Preprocessing (per-combo, per-gene) ───────────────────────────────────────
@@ -1504,8 +1441,20 @@ void run_psc(const PscOptions& opts) {
                 continue;
             }
 
+            // Extract per-group vectors for shared group_penalty functions
+            std::vector<size_t> gp_feature_lengths, gp_var_site_counts;
+            gp_feature_lengths.reserve(prep.gene_metas.size());
+            gp_var_site_counts.reserve(prep.gene_metas.size());
+            for (auto& gm : prep.gene_metas) {
+                gp_feature_lengths.push_back(gm.feature_end - gm.feature_start + 1);
+                gp_var_site_counts.push_back(gm.var_site_count);
+            }
+
             // Build penalty terms
-            auto penalty_terms = build_penalty_terms(effective_opts, prep.gene_metas);
+            auto penalty_terms = group_penalty::build_penalty_terms(
+                effective_opts.group_penalty_type,
+                effective_opts.initial_gp_value, effective_opts.final_gp_value,
+                effective_opts.gp_step, gp_var_site_counts);
             std::cout << "  Penalty terms: " << penalty_terms.size() << "\n";
 
             // Build prediction design
@@ -1525,7 +1474,8 @@ void run_psc(const PscOptions& opts) {
             // ── Penalty loop ──────────────────────────────────────────
             for (auto penalty : penalty_terms) {
                 std::string gp_kind = effective_opts.use_default_gp ? "std" : effective_opts.group_penalty_type;
-                auto group_weights = compute_group_weights(gp_kind, penalty, prep.gene_metas);
+                auto group_weights = group_penalty::compute_group_weights(
+                    gp_kind, penalty, gp_feature_lengths, gp_var_site_counts);
 
                 // Update alg_table row 2 with group weights
                 for (size_t gi = 0; gi < prep.gene_metas.size(); ++gi) {

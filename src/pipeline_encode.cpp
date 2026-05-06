@@ -190,6 +190,8 @@ EncodeResult encode(const EncodeOptions& opts)
     arma::mat alg_table;
     std::vector<std::string> all_missing;
     std::vector<std::string> all_stems_ordered;
+    std::vector<size_t> group_var_site_counts;
+    std::vector<size_t> group_feature_lengths;
 
     auto fmt_bytes = [](uint64_t b) -> std::string {
         std::ostringstream oss;
@@ -440,6 +442,7 @@ EncodeResult encode(const EncodeOptions& opts)
             }
             arma::mat group_table(3, groups.size());
             std::vector<uint64_t> field_indices;
+            std::vector<size_t> grp_feature_lengths(groups.size(), 0);
             {
                 uint64_t field_pos = 1;
                 for (size_t gi = 0; gi < groups.size(); ++gi) {
@@ -455,6 +458,7 @@ EncodeResult encode(const EncodeOptions& opts)
                     uint64_t grp_end = field_pos - 1;
                     group_table(0, gi) = static_cast<double>(grp_start);
                     group_table(1, gi) = static_cast<double>(grp_end);
+                    grp_feature_lengths[gi] = (grp_end >= grp_start) ? static_cast<size_t>(grp_end - grp_start + 1) : 0;
                     {
                         std::ostringstream ss;
                         ss << std::fixed << std::setprecision(6)
@@ -496,6 +500,11 @@ EncodeResult encode(const EncodeOptions& opts)
                 }
             }
             alg_table = group_table;
+            // For numeric data, use feature_length as var_site_count equivalent.
+            // Numeric input has no alignment positions, so there is no natural
+            // polymorphism count; feature_count is the closest proxy.
+            group_var_site_counts = grp_feature_lengths;
+            group_feature_lengths = std::move(grp_feature_lengths);
         }
 
         if (!all_missing.empty()) {
@@ -741,6 +750,11 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
+        // Build stem-to-var_site_count map before freeing metadata
+        std::unordered_map<std::string, size_t> stem_to_vsc;
+        for (auto& meta : metas)
+            if (!meta.failed) stem_to_vsc[meta.stem] = meta.var_site_count;
+
         // Free map/col_is_minor data (no longer needed) before big allocation
         for (auto& meta : metas) {
             { decltype(meta.map) tmp; tmp.swap(meta.map); }
@@ -839,21 +853,28 @@ EncodeResult encode(const EncodeOptions& opts)
             }
             arma::mat group_table(3, groups.size());
             std::vector<uint64_t> field_indices;
+            std::vector<size_t> grp_var_site_counts(groups.size(), 0);
+            std::vector<size_t> grp_feature_lengths(groups.size(), 0);
             {
                 uint64_t field_pos = 1;
                 for (size_t gi = 0; gi < groups.size(); ++gi) {
                     uint64_t grp_start = field_pos;
                     for (auto& p : groups[gi]) {
-                        auto it = stem_to_cols.find(p.stem().string());
+                        std::string stem = p.stem().string();
+                        auto it = stem_to_cols.find(stem);
                         if (it == stem_to_cols.end()) continue;
                         for (uint64_t fi = it->second.first; fi <= it->second.second; ++fi) {
                             field_indices.push_back(fi);
                             ++field_pos;
                         }
+                        auto vsc_it = stem_to_vsc.find(stem);
+                        if (vsc_it != stem_to_vsc.end())
+                            grp_var_site_counts[gi] += vsc_it->second;
                     }
                     uint64_t grp_end = field_pos - 1;
                     group_table(0, gi) = static_cast<double>(grp_start);
                     group_table(1, gi) = static_cast<double>(grp_end);
+                    grp_feature_lengths[gi] = (grp_end >= grp_start) ? static_cast<size_t>(grp_end - grp_start + 1) : 0;
                     {
                         std::ostringstream ss;
                         ss << std::fixed << std::setprecision(6)
@@ -895,6 +916,8 @@ EncodeResult encode(const EncodeOptions& opts)
                 }
             }
             alg_table = group_table;
+            group_var_site_counts = std::move(grp_var_site_counts);
+            group_feature_lengths = std::move(grp_feature_lengths);
         }
 
         if (!all_missing.empty()) {
@@ -1044,6 +1067,8 @@ EncodeResult encode(const EncodeOptions& opts)
     result.field_path         = is_overlapping ? (opts.output_dir / "field.txt") : fs::path{};
     result.extra_params       = std::move(extra_params);
     result.datatype           = pre.datatype;
+    result.group_var_site_counts = std::move(group_var_site_counts);
+    result.group_feature_lengths = std::move(group_feature_lengths);
 
     double matrix_mb = static_cast<double>(
         static_cast<uint64_t>(N) * total_cols * sizeof(float)) / (1 << 20);

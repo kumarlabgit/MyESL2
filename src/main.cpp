@@ -80,6 +80,11 @@ void print_usage(const char* prog_name) {
         "    --param <key>=<value>        pass option to solver\n"
         "      intercept=false            disable intercept term\n"
         "      field=<path>               group-index CSV (overlapping group methods)\n"
+        "  Group penalty:\n"
+        "    --group-penalty-type <type>  std|sqrt|linear|median (default: std)\n"
+        "    --initial-gp-value X         initial penalty term for linear mode (default: 1)\n"
+        "    --final-gp-value X           final penalty term for linear mode (default: 1)\n"
+        "    --gp-step X                  penalty term step for linear mode (default: 1)\n"
         "  Encoding:\n"
         "    --auto-bit-ct X              set min_minor = ceil(X% x min_class_size)\n"
         "    --drop-major-allele          exclude major-allele column from FASTA encoder\n"
@@ -137,6 +142,7 @@ void print_usage(const char* prog_name) {
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
         "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
@@ -151,6 +157,7 @@ void print_usage(const char* prog_name) {
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
         "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
 
@@ -300,10 +307,21 @@ int main(int argc, char* argv[]) {
                     train_opts.adaptive_l1_spec = argv[++i];
                     train_opts.adaptive_l2_spec = argv[++i];
                 }
+                else if (arg == "--group-penalty-type" && i+1<argc) train_opts.group_penalty_type = argv[++i];
+                else if (arg == "--initial-gp-value"   && i+1<argc) train_opts.initial_gp_value = std::stod(argv[++i]);
+                else if (arg == "--final-gp-value"     && i+1<argc) train_opts.final_gp_value   = std::stod(argv[++i]);
+                else if (arg == "--gp-step"            && i+1<argc) train_opts.gp_step          = std::stod(argv[++i]);
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
             if (train_opts.params.count("disable_mc") && train_opts.params.at("disable_mc") == "1")
                 enc_opts.disable_mc = true;
+
+            {
+                std::string gpt = train_opts.group_penalty_type;
+                for (auto& c : gpt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
+                    throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
+            }
 
             if (!train_opts.lambda_file_path.empty() && train_opts.lambda_explicitly_set)
                 throw std::runtime_error("--lambda and --lambda-file are mutually exclusive");
@@ -495,7 +513,17 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--minor-column") enc_opts_base.minor_column = true;
                 else if (arg == "--tiered-minor-col") enc_opts_base.tiered_minor_col = true;
                 else if (arg == "--max-mem"           && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
+                else if (arg == "--group-penalty-type" && i+1<argc) train_opts_base.group_penalty_type = argv[++i];
+                else if (arg == "--initial-gp-value"   && i+1<argc) train_opts_base.initial_gp_value = std::stod(argv[++i]);
+                else if (arg == "--final-gp-value"     && i+1<argc) train_opts_base.final_gp_value   = std::stod(argv[++i]);
+                else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
                 else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
+            }
+            {
+                std::string gpt = train_opts_base.group_penalty_type;
+                for (auto& c : gpt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
+                    throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
             }
             if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
                 throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
@@ -658,7 +686,17 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--tiered-minor-col") enc_opts_base.tiered_minor_col = true;
                 else if (arg == "--auto-bit-ct"    && i+1<argc) enc_opts_base.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--max-mem"         && i+1<argc) enc_opts_base.max_mem = std::stoull(argv[++i]);
+                else if (arg == "--group-penalty-type" && i+1<argc) train_opts_base.group_penalty_type = argv[++i];
+                else if (arg == "--initial-gp-value"   && i+1<argc) train_opts_base.initial_gp_value = std::stod(argv[++i]);
+                else if (arg == "--final-gp-value"     && i+1<argc) train_opts_base.final_gp_value   = std::stod(argv[++i]);
+                else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
                 else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
+            }
+            {
+                std::string gpt = train_opts_base.group_penalty_type;
+                for (auto& c : gpt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
+                    throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
             }
             if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
                 throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
@@ -744,10 +782,11 @@ int main(int argc, char* argv[]) {
                 t_opts.output_dir = iter_dir;
                 pipeline::train(enc, t_opts);
 
-                // Read feature weights
+                // Read feature weights — check penalty subdirs when multi-penalty output exists
                 std::vector<std::pair<double,std::string>> feature_rank;
-                fs::path bss_file   = iter_dir / "bss_median.txt";
-                fs::path lam0_wfile = iter_dir / "lambda_0" / "weights.txt";
+                fs::path aim_base = fs::exists(iter_dir / "penalty_0") ? iter_dir / "penalty_0" : iter_dir;
+                fs::path bss_file   = aim_base / "bss_median.txt";
+                fs::path lam0_wfile = aim_base / "lambda_0" / "weights.txt";
                 if (fs::exists(bss_file)) {
                     std::ifstream bf(bss_file);
                     std::string line;

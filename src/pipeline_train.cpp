@@ -1,4 +1,5 @@
 #include "pipeline_train.hpp"
+#include "group_penalty.hpp"
 #include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "regression.hpp"
@@ -87,8 +88,24 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     const std::string& method       = opts.method;
     const arma::fmat&  features     = enc.features;
     const arma::frowvec& responses  = enc.responses;
-    const arma::mat&   alg_table    = enc.alg_table;
+    arma::mat          alg_table    = enc.alg_table; // mutable copy; row 2 may be rewritten per penalty term
     uint32_t N                      = enc.N;
+
+    // Build per-group feature lengths from alg_table rows 0/1 for group penalty computation
+    std::vector<size_t> group_feature_lengths;
+    group_feature_lengths.reserve(alg_table.n_cols);
+    for (arma::uword gi = 0; gi < alg_table.n_cols; ++gi) {
+        auto start = static_cast<size_t>(alg_table(0, gi));
+        auto end   = static_cast<size_t>(alg_table(1, gi));
+        group_feature_lengths.push_back(end >= start ? end - start + 1 : 0);
+    }
+
+    auto penalty_terms = group_penalty::build_penalty_terms(
+        opts.group_penalty_type,
+        opts.initial_gp_value, opts.final_gp_value, opts.gp_step,
+        enc.group_var_site_counts.empty() ? group_feature_lengths : enc.group_var_site_counts);
+
+    const bool multi_penalty = penalty_terms.size() > 1;
 
     TrainResult result;
     result.output_dir = output_dir;
@@ -342,11 +359,35 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         opts.params["field"] = enc.field_path.string();
     }
 
+    pipeline_utils::log_rss("train: before lambda loop");
+
+    // ── Penalty loop ────────────────────────────────────────────────────────────
+    for (size_t pi = 0; pi < penalty_terms.size(); ++pi) {
+        double penalty = penalty_terms[pi];
+
+        // Rewrite alg_table row 2 with group weights for this penalty term.
+        // Skip for the default single-term "std" case (row 2 already correct from encode).
+        if (opts.group_penalty_type != "std" || multi_penalty) {
+            auto weights = group_penalty::compute_group_weights(
+                opts.group_penalty_type, penalty,
+                group_feature_lengths,
+                enc.group_var_site_counts.empty() ? group_feature_lengths : enc.group_var_site_counts);
+            for (size_t gi = 0; gi < weights.size(); ++gi)
+                alg_table(2, gi) = weights[gi];
+        }
+
+        // When multiple penalty terms exist, nest output under penalty_N/
+        fs::path pen_dir = multi_penalty
+            ? output_dir / ("penalty_" + std::to_string(pi))
+            : output_dir;
+        if (multi_penalty) {
+            fs::create_directories(pen_dir);
+            std::cout << "  ── Penalty term " << pi << " = " << penalty << " ──\n";
+        }
+
     // Per-grid-index gene_count captured during solve; -1 = not solved / errored.
     // Used by the parallel post-hoc pruner to replay sequential skip-ahead logic.
     std::vector<int> gene_counts(lambdas.size(), -1);
-
-    pipeline_utils::log_rss("train: before lambda loop");
 
     // Step 10: Lambda loop — branches on thread count.
     if (n_threads <= 1) {
@@ -355,7 +396,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
         for (int idx = 0; idx < (int)lambdas.size(); ++idx) {
             auto& lam = lambdas[idx];
-            fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+            fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(idx));
             fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
 
             if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
@@ -384,6 +425,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
                 result.weights_paths.push_back(lam_dir / "weights.txt");
                 result.lambdas_used.push_back(lam);
+                result.penalties_used.push_back(penalty);
                 gene_counts[idx] = gene_count;
 
                 if (skip_ahead_valid && opts.min_groups > 0 && gene_count <= opts.min_groups) {
@@ -487,7 +529,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
         // Pre-create all sentinel dirs up front (avoids directory-create contention).
         for (size_t idx = 0; idx < lambdas.size(); ++idx)
-            fs::create_directories(output_dir / ("lambda_" + std::to_string(idx)));
+            fs::create_directories(pen_dir / ("lambda_" + std::to_string(idx)));
 
         // Pre-sized per-index result slots; workers write without locks.
         std::vector<fs::path> per_idx_weights(lambdas.size());
@@ -509,7 +551,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 if (idx >= lambdas.size()) break;
                 try {
                     const auto& lam = lambdas[idx];
-                    fs::path lam_dir = output_dir / ("lambda_" + std::to_string(idx));
+                    fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(idx));
 
                     std::ostringstream out;
                     out << std::fixed << std::setprecision(4);
@@ -555,7 +597,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         std::unordered_set<size_t> pruned_set;
         if (prune_enabled) {
             auto pruned = prune_skipped_lambdas(
-                lambdas, gene_counts, output_dir, opts.min_groups, min_lambda2);
+                lambdas, gene_counts, pen_dir, opts.min_groups, min_lambda2);
             pruned_set.insert(pruned.begin(), pruned.end());
             std::cout << "  Pruned " << pruned.size() << " of " << lambdas.size()
                       << " lambda point(s) to match single-threaded skip-ahead semantics.\n";
@@ -567,6 +609,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             if (pruned_set.count(idx)) continue;
             result.weights_paths.push_back(per_idx_weights[idx]);
             result.lambdas_used.push_back(per_idx_lambdas[idx]);
+            result.penalties_used.push_back(penalty);
         }
     }
 
@@ -575,7 +618,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         // Read all lambda gss.txt files (only non-zero entries appear in files)
         std::unordered_map<std::string, std::vector<double>> gss_all;
         for (size_t li = 0; li < lambdas.size(); ++li) {
-            fs::path gss_path = output_dir / ("lambda_" + std::to_string(li)) / "gss.txt";
+            fs::path gss_path = pen_dir / ("lambda_" + std::to_string(li)) / "gss.txt";
             std::ifstream gf(gss_path);
             if (!gf) continue;
             std::string line;
@@ -595,7 +638,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 if (med != 0.0) med_gss.push_back({med, g});
             }
             std::sort(med_gss.rbegin(), med_gss.rend());
-            std::ofstream mf(output_dir / "gss_median.txt");
+            std::ofstream mf(pen_dir / "gss_median.txt");
             mf << std::fixed << std::setprecision(6);
             for (auto& [val, g] : med_gss) mf << g << '\t' << val << '\n';
             std::cout << "  gss_median.txt written (" << med_gss.size() << " genes)\n";
@@ -605,7 +648,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         if (enc.datatype != "numeric") {
             std::unordered_map<std::string, std::vector<double>> pss_all;
             for (size_t li = 0; li < lambdas.size(); ++li) {
-                fs::path pss_path = output_dir / ("lambda_" + std::to_string(li)) / "pss.txt";
+                fs::path pss_path = pen_dir / ("lambda_" + std::to_string(li)) / "pss.txt";
                 std::ifstream pf(pss_path);
                 if (!pf) continue;
                 std::string line;
@@ -633,7 +676,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                         uint32_t pb = static_cast<uint32_t>(std::stoul(b.first.substr(ub + 1)));
                         return pa < pb;
                     });
-                std::ofstream mf(output_dir / "pss_median.txt");
+                std::ofstream mf(pen_dir / "pss_median.txt");
                 mf << std::fixed << std::setprecision(6);
                 for (auto& [k, val] : med_pss) mf << k << '\t' << val << '\n';
                 std::cout << "  pss_median.txt written (" << med_pss.size() << " positions)\n";
@@ -645,7 +688,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             std::unordered_map<std::string, std::vector<double>> bss_all;
             std::vector<std::string> bss_order; // first-appearance order
             for (size_t li = 0; li < lambdas.size(); ++li) {
-                fs::path w_path = output_dir / ("lambda_" + std::to_string(li)) / "weights.txt";
+                fs::path w_path = pen_dir / ("lambda_" + std::to_string(li)) / "weights.txt";
                 std::ifstream wf(w_path);
                 if (!wf) continue;
                 std::string line;
@@ -663,7 +706,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     }
                 }
             }
-            std::ofstream mf(output_dir / "bss_median.txt");
+            std::ofstream mf(pen_dir / "bss_median.txt");
             mf << std::fixed << std::setprecision(6);
             size_t bss_written = 0;
             for (const auto& label : bss_order) {
@@ -676,6 +719,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             std::cout << "  bss_median.txt written (" << bss_written << " weights)\n";
         }
     }
+
+    } // end penalty loop
 
     double regr_elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - regr_start).count();

@@ -877,14 +877,29 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
     DrPhyloAggResult result;
 
     // -------------------------------------------------------------------------
-    // Scan run_dir for lambda_N dirs in sequence
+    // Scan run_dir for lambda_N dirs (flat) or penalty_N/lambda_M dirs (nested)
     // -------------------------------------------------------------------------
     std::vector<fs::path> lambda_dirs;
-    for (int li = 0; ; ++li) {
-        fs::path ld = run_dir / ("lambda_" + std::to_string(li));
-        if (!fs::exists(ld)) break;
-        if (fs::exists(ld / "weights.txt"))
-            lambda_dirs.push_back(ld);
+    // Check for penalty subdirectories first (multi-penalty output)
+    bool has_penalty_dirs = fs::exists(run_dir / "penalty_0");
+    if (has_penalty_dirs) {
+        for (int pi = 0; ; ++pi) {
+            fs::path pd = run_dir / ("penalty_" + std::to_string(pi));
+            if (!fs::exists(pd)) break;
+            for (int li = 0; ; ++li) {
+                fs::path ld = pd / ("lambda_" + std::to_string(li));
+                if (!fs::exists(ld)) break;
+                if (fs::exists(ld / "weights.txt"))
+                    lambda_dirs.push_back(ld);
+            }
+        }
+    } else {
+        for (int li = 0; ; ++li) {
+            fs::path ld = run_dir / ("lambda_" + std::to_string(li));
+            if (!fs::exists(ld)) break;
+            if (fs::exists(ld / "weights.txt"))
+                lambda_dirs.push_back(ld);
+        }
     }
     if (lambda_dirs.empty()) return result;
 

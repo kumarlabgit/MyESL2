@@ -35,12 +35,18 @@ struct TrainOptions {
     // single-threaded skip-ahead would have skipped, preserving the dirs
     // themselves as drphylo aggregation sentinels.
     bool         prune_skipped_lambda = false;
+    // Group penalty (default "std" preserves current sqrt(feature_count) behavior)
+    std::string  group_penalty_type  = "std";
+    double       initial_gp_value    = 1.0;
+    double       final_gp_value      = 1.0;
+    double       gp_step             = 1.0;
 };
 
 struct TrainResult {
     fs::path output_dir;
     std::vector<fs::path>             weights_paths;  // lambda_N/weights.txt per lambda
     std::vector<std::array<double,2>> lambdas_used;
+    std::vector<double>               penalties_used;  // penalty terms used (parallel to weights_paths)
 };
 
 TrainResult train(const EncodeResult& enc, const TrainOptions& opts);

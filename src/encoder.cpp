@@ -350,9 +350,11 @@ AlignmentMeta count_pff_columns(
         int major_count = 0;
         uint8_t major = 0;
         int num_alleles = 0;
+        int total_nongap = 0;
         for (int c = 0; c < 256; ++c) {
             if (counts[c] == 0) continue;
             ++num_alleles;
+            total_nongap += counts[c];
             if (counts[c] > major_count) {
                 major_count = counts[c];
                 major = static_cast<uint8_t>(c);
@@ -360,6 +362,12 @@ AlignmentMeta count_pff_columns(
         }
 
         if (num_alleles < 2) continue;
+
+        // Variable-site counting (matches encode_raw_sequences PSC semantics:
+        // polymorphic, not all-singletons, not one-minority-singleton).
+        // Counted before min_minor filter so it reflects true polymorphism.
+        if (num_alleles != total_nongap && major_count != total_nongap - 1)
+            ++meta.var_site_count;
 
         int non_major = 0;
         for (int c = 0; c < 256; ++c)
