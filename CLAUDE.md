@@ -151,3 +151,31 @@ Key implementation files with extensive inline documentation:
 - `include/pff_format.hpp` - 200+ lines of format documentation
 - `include/fasta_parser.hpp` - API documentation with examples
 - `src/fasta_parser.cpp` - Implementation details
+
+## Disabled features
+
+The PSC auto-pairs feature is **disabled at the CLI surface only**. All implementation logic in `src/pipeline_psc.cpp` (`run_auto_pairs`, the activator branch, helper functions) and the `PscOptions` fields in `include/pipeline_psc.hpp` are intact and still compile — only the `main.cpp` argv parsing, help text, and contrast-source validation are commented out. Re-enabling does not require any code changes, just uncommenting.
+
+### Gated flags (PSC mode)
+
+- `--auto-pairs-tree <file>` — activator (one of the four contrast sources)
+- `--auto-pairs-method <name>` — tuning sub-flag
+- `--auto-pairs-num-alternates N` — tuning sub-flag
+- `--auto-pairs-max-combinations N` — tuning sub-flag
+
+### Where the gates live
+
+All edits are in `src/main.cpp`. Each commented block carries an `AUTO-PAIRS DISABLED` breadcrumb comment.
+
+1. CLI parsing — the `else if (arg == "--auto-pairs-tree" ...)` line in the PSC contrast-source block, and the four-line Auto-pairs subsection (label comment + three tuning flags) at the end of the PSC argv loop.
+2. Help text — the `--auto-pairs-tree` line under the PSC "Species contrast source" subsection, and the entire `Auto-pairs:` subsection at the end of the PSC help block.
+3. Contrast-source validation — the `if (!psc_opts.auto_pairs_tree.empty()) ++sources;` line; the two `throw std::runtime_error(...)` messages no longer mention `--auto-pairs-tree`.
+
+### Re-enable recipe
+
+In `src/main.cpp`:
+
+1. Search for `AUTO-PAIRS DISABLED` (5 occurrences). At each site, uncomment the lines immediately following the breadcrumb.
+2. Restore `--auto-pairs-tree` in the two `runtime_error` strings under the contrast-source validation.
+
+Rebuild. No changes to `pipeline_psc.{hpp,cpp}` are required.

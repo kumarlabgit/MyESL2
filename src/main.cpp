@@ -172,8 +172,9 @@ void print_usage(const char* prog_name) {
         "  Species contrast source (exactly one required):\n"
         "    --species-groups <file>       species contrast pairs file\n"
         "    --response-file <file>        single response matrix\n"
-        "    --response-dir <dir>          directory of response matrices\n"
-        "    --auto-pairs-tree <file>      auto-generate from tree (requires --species-pheno-path)\n\n"
+        "    --response-dir <dir>          directory of response matrices\n\n"
+        // AUTO-PAIRS DISABLED — see CLAUDE.md "Disabled features"
+        // "    --auto-pairs-tree <file>      auto-generate from tree (requires --species-pheno-path)\n\n"
         "  Lambda grid:\n"
         "    --initial-lambda1 X           (default: 0.01)\n"
         "    --final-lambda1 X             (default: 0.99)\n"
@@ -216,10 +217,11 @@ void print_usage(const char* prog_name) {
         "    --make-null-models            response-flipped null\n"
         "    --make-pair-randomized-null-models\n"
         "    --num-randomized-alignments N (default: 10)\n\n"
-        "  Auto-pairs:\n"
-        "    --auto-pairs-method <method>  (default: simple_deterministic)\n"
-        "    --auto-pairs-num-alternates N (default: 0)\n"
-        "    --auto-pairs-max-combinations N (default: 1)\n\n"
+        // AUTO-PAIRS DISABLED — see CLAUDE.md "Disabled features"
+        // "  Auto-pairs:\n"
+        // "    --auto-pairs-method <method>  (default: simple_deterministic)\n"
+        // "    --auto-pairs-num-alternates N (default: 0)\n"
+        // "    --auto-pairs-max-combinations N (default: 1)\n\n"
 
         "-------------------------------------------\n"
         "VISUALIZE\n"
@@ -1020,7 +1022,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--species-groups"    && i+1<argc) psc_opts.species_groups_file = argv[++i];
                 else if (arg == "--response-file"     && i+1<argc) psc_opts.response_file       = argv[++i];
                 else if (arg == "--response-dir"      && i+1<argc) psc_opts.response_dir        = argv[++i];
-                else if (arg == "--auto-pairs-tree"   && i+1<argc) psc_opts.auto_pairs_tree     = argv[++i];
+                // AUTO-PAIRS DISABLED — see CLAUDE.md "Disabled features". Re-enable by uncommenting:
+                // else if (arg == "--auto-pairs-tree"   && i+1<argc) psc_opts.auto_pairs_tree     = argv[++i];
                 // Lambda grid
                 else if (arg == "--initial-lambda1"   && i+1<argc) psc_opts.initial_lambda1 = std::stod(argv[++i]);
                 else if (arg == "--final-lambda1"     && i+1<argc) psc_opts.final_lambda1   = std::stod(argv[++i]);
@@ -1071,23 +1074,25 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--make-null-models")                        psc_opts.make_null_models                    = true;
                 else if (arg == "--make-pair-randomized-null-models")        psc_opts.make_pair_randomized_null_models    = true;
                 else if (arg == "--num-randomized-alignments" && i+1<argc) psc_opts.num_randomized_alignments = static_cast<size_t>(std::stoi(argv[++i]));
-                // Auto-pairs
-                else if (arg == "--auto-pairs-method"         && i+1<argc) psc_opts.auto_pairs_method          = argv[++i];
-                else if (arg == "--auto-pairs-num-alternates" && i+1<argc) psc_opts.auto_pairs_num_alternates  = std::stoi(argv[++i]);
-                else if (arg == "--auto-pairs-max-combinations" && i+1<argc) psc_opts.auto_pairs_max_combinations = std::stoi(argv[++i]);
+                // AUTO-PAIRS DISABLED — see CLAUDE.md "Disabled features". Re-enable by uncommenting the four lines below:
+                // // Auto-pairs
+                // else if (arg == "--auto-pairs-method"         && i+1<argc) psc_opts.auto_pairs_method          = argv[++i];
+                // else if (arg == "--auto-pairs-num-alternates" && i+1<argc) psc_opts.auto_pairs_num_alternates  = std::stoi(argv[++i]);
+                // else if (arg == "--auto-pairs-max-combinations" && i+1<argc) psc_opts.auto_pairs_max_combinations = std::stoi(argv[++i]);
                 else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
             }
 
-            // Validate: exactly one contrast source or auto-pairs
+            // Validate: exactly one contrast source
             int sources = 0;
             if (!psc_opts.species_groups_file.empty()) ++sources;
             if (!psc_opts.response_file.empty())       ++sources;
             if (!psc_opts.response_dir.empty())        ++sources;
-            if (!psc_opts.auto_pairs_tree.empty())     ++sources;
+            // AUTO-PAIRS DISABLED — see CLAUDE.md "Disabled features". Re-enable by uncommenting:
+            // if (!psc_opts.auto_pairs_tree.empty())     ++sources;
             if (sources == 0)
-                throw std::runtime_error("PSC requires one of: --species-groups, --response-file, --response-dir, --auto-pairs-tree");
+                throw std::runtime_error("PSC requires one of: --species-groups, --response-file, --response-dir");
             if (sources > 1)
-                throw std::runtime_error("PSC: specify only one of --species-groups, --response-file, --response-dir, --auto-pairs-tree");
+                throw std::runtime_error("PSC: specify only one of --species-groups, --response-file, --response-dir");
 
             if (psc_opts.output_base_name.empty())
                 throw std::runtime_error("PSC requires --output-base-name");
