@@ -107,6 +107,20 @@ PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newi
 
 `--threads N` parallelises the lambda grid solver loop in addition to preprocessing/encoding (previously only the preprocess phase was threaded). The `--min-groups` skip-ahead ratchet is disabled while the parallel loop runs (the ratchet relies on sequential gene-count ordering). Pass `--prune-skipped-lambda` to replay the skip-ahead logic after the parallel loop finishes, deleting the contents of `lambda_<idx>/` directories that a single-threaded run would have skipped (the dirs are preserved as sentinels for drphylo aggregation). Grid-loop parallelism is disabled when `--nfolds > 0`. When running `--threads > 1`, set `OPENBLAS_NUM_THREADS=1` to avoid nested parallelism between worker threads and OpenBLAS kernels. `psc` has its own independent grid-loop threading (unchanged by this).
 
+### Lambda grid (train / drphylo / aim / adaptive)
+
+- Every lambda value reaching these paths must lie in the open interval `(0,1)`. Values from `--lambda`, `--lambda-file`, or any `--lambda-grid` sweep that fall outside (including the boundary values `0` and `1`) raise an error before any solving happens.
+- `--use-logspace` replaces a `--lambda-grid` linear sweep with `λ_i = vmin × (vmax_eff/vmin)^(i/(N-1))`, where `vmax_eff` is the largest sweep value strictly `< vmax` and `< 1` (i.e. anchored to the largest *valid* point the linear sweep would have produced, not to `vmax` itself). Applies only to `--lambda-grid` — `--lambda-file` and single-`--lambda` values pass through verbatim. PSC has its own independent `--use-logspace` with different anchor semantics (uses `--initial-lambda*` / `--final-lambda*`).
+
+### Group penalty (train / drphylo / aim)
+
+PSC's group-penalty system (`std`/`sqrt`/`linear`/`median`) is shared with these commands via `include/group_penalty.hpp`. Flags: `--group-penalty-type` (default `std` = `sqrt(feature_count)`, preserves prior behavior), `--initial-gp-value` / `--final-gp-value` / `--gp-step` (used by the `linear` mode to drive a penalty sweep). When the type is anything other than `std`, or when more than one penalty term is produced, the lambda subdirs are nested one level deeper under `penalty_<N>/` and `gss_median.txt` / `bss_median.txt` / `pss_median.txt` are written inside each penalty dir. Adaptive sparsification forwards these flags through `TrainOptions` automatically.
+
+### PSC inputs and outputs (additions)
+
+- `--alignments-list <file>`: list file specifying overlapping groups of alignments (one group per line, comma-separated paths relative to `alignments_dir`). Required for the olsg solvers when groups have >1 entry; resolved field array is written to `<output_dir>/<base>_field.csv` and injected via `params["field"]` (does not overwrite a user-supplied `--param field=`). Without the flag, the legacy directory-enumeration path is preserved byte-for-byte.
+- `--dump-weights`: opt-in TSV dump of the full feature-weight vector from every solver call to `<output_dir>/[combo_N/][penalty_P/]lambda_L/weights.tsv`. The `combo_N/` and `penalty_P/` layers are skipped when there is only one combo or only one penalty term. Each worker writes a unique leaf file, so the parallel grid path needs no additional synchronization.
+
 ## Code Architecture
 
 ### PFF (Parsed FASTA File) Format

@@ -136,11 +136,14 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--lambda <l1> <l2>` | Single lambda pair: `l1` = site sparsity, `l2` = group sparsity (default: 0.1 0.1) |
 | `--lambda-grid <min,max,step> <min,max,step>` | Run Cartesian product of lambda pairs (e.g., `0.1,0.9,0.1 0.0001,0.001,0.0001`) |
 | `--lambda-file <path>` | File of lambda pairs, one `l1 l2` per line |
+| `--use-logspace` | Replace each `--lambda-grid` linear sweep with a log-spaced grid: `λ_i = vmin × (vmax_eff / vmin)^(i/(N-1))`, where `vmax_eff` is the largest sweep value strictly `< vmax` and `< 1`. Applies only to `--lambda-grid` (not `--lambda` or `--lambda-file`). |
 | `--nfolds N` | K-fold cross-validation (N ≥ 2) |
 | `--precision fp32\|fp64` | Solver precision (default: `fp32`); `fp64` doubles memory but may improve numerical stability |
 | `--max-mem <bytes>` | Abort if estimated feature matrix exceeds this size (default: 8 GB) |
 | `--adaptive-sparsification` | On `max-mem` exceeded, automatically split encoding into smaller chunks |
 | `--param <key>=<value>` | Pass option to the regression solver (see below) |
+
+> **Lambda range:** every value supplied via `--lambda`, `--lambda-file`, or `--lambda-grid` must lie in the open interval `(0,1)`. Values at or outside the boundary raise an error before any solving begins.
 
 **Available regression methods (`--method`):**
 
@@ -160,6 +163,17 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `maxIter=N` | Maximum solver iterations |
 | `field=<path>` | Group-index CSV for overlapping methods |
 
+#### Group penalty options
+
+Each group's regularization is multiplied by a per-group weight derived from `--group-penalty-type`. When more than one penalty term is requested (via `--initial-gp-value` / `--final-gp-value` / `--gp-step`) the lambda loop is wrapped in a penalty loop, and the per-lambda outputs are nested under `penalty_N/` (see *Output structure* below).
+
+| Flag | Description |
+|------|-------------|
+| `--group-penalty-type <type>` | One of `std` (default, `sqrt(feature_count)`), `sqrt`, `linear`, or `median`. Default `std` preserves prior behavior. |
+| `--initial-gp-value X` | Start of penalty sweep (used by `linear`; default: 1) |
+| `--final-gp-value X` | End of penalty sweep (default: 1) |
+| `--gp-step X` | Penalty sweep step (default: 1) |
+
 #### Output structure
 
 When regression is run, each lambda pair produces a subdirectory:
@@ -174,13 +188,32 @@ output_dir/
 ├── lambda_0/
 │   ├── weights.txt                   # Feature weights + intercept
 │   ├── gss.txt                       # Gene Significance Scores (sum |w| per gene)
+│   ├── bss.txt                       # Bit (feature) Significance Scores
 │   ├── pss.txt                       # Position Significance Scores (FASTA only)
 │   └── eval_gene_predictions.txt     # Per-sample per-gene scores on training data
 ├── lambda_1/
 │   └── ...
 ├── gss_median.txt                    # Median GSS across all lambdas (multiple lambdas only)
+├── bss_median.txt                    # Median BSS across all lambdas (multiple lambdas only)
 ├── pss_median.txt                    # Median PSS across all lambdas (FASTA only)
 └── lambda_list.txt                   # Generated lambda pairs (when using --lambda-grid)
+```
+
+When `--group-penalty-type` is anything other than `std`, or when `--initial-gp-value` / `--final-gp-value` / `--gp-step` produce more than one penalty term, the lambda subdirs are nested one level deeper under `penalty_N/`, and the median files are written inside each penalty dir:
+
+```
+output_dir/
+├── penalty_0/
+│   ├── lambda_0/
+│   │   └── ...
+│   ├── lambda_1/
+│   │   └── ...
+│   ├── gss_median.txt
+│   ├── bss_median.txt
+│   └── pss_median.txt
+├── penalty_1/
+│   └── ...
+└── lambda_list.txt
 ```
 
 When `--nfolds` is used, each `lambda_N/` also contains:
@@ -278,7 +311,7 @@ myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 | `--gene-limit N` | Maximum genes displayed in aggregated eval.svg (default: 100) |
 | `--species-limit N` | Maximum species displayed in aggregated eval.svg (default: 100) |
 
-All `--lambda`, `--lambda-grid`, `--lambda-file`, `--param`, `--cache-dir`, `--threads`, and encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`) from `train` are also accepted.
+All `--lambda`, `--lambda-grid`, `--lambda-file`, `--use-logspace`, `--param`, `--cache-dir`, `--threads`, group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`), and encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`) from `train` are also accepted. Lambda values must be in `(0,1)`.
 
 **Outputs:**
 
@@ -305,7 +338,7 @@ myesl2 aim <list.txt> <hypothesis.txt> <output_dir> [options]
 | `--aim-max-ft N` | Maximum features to accumulate in dropout list (default: 1000) |
 | `--aim-window N` | Top-N features considered per iteration for dropout (default: 100) |
 
-All `train` options are accepted. Defaults applied if not specified:
+All `train` options are accepted, including `--use-logspace` and the group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`). Lambda values must be in `(0,1)`. Defaults applied if not specified:
 - Method: `sg_lasso`
 - Lambdas: `--lambda-grid 0.1,0.9,0.1 0.0001,0.0002,0.0001`
 
@@ -341,6 +374,12 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 | `output_dir` | Output directory (created if needed) |
 | `--output-base-name <name>` | Base name for output files |
 
+**Input options:**
+
+| Flag | Description |
+|------|-------------|
+| `--alignments-list <file>` | List file specifying overlapping groups of alignments — one group per line, comma-separated paths relative to `alignments_dir`. Without this flag, `alignments_dir` is enumerated and each file becomes its own group. Any group with more than one entry requires `--method olsg_lasso_logisticr` or `olsg_lasso_leastr`; otherwise the run errors out. The resolved field array is written to `<output_dir>/<base>_field.csv`. |
+
 **Species contrast source (exactly one required):**
 
 | Flag | Description |
@@ -348,7 +387,6 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 | `--species-groups <file>` | File with alternating convergent/control species lines (one per line, comma-separated for alternates) |
 | `--response-file <file>` | Single response matrix (species,value per line) |
 | `--response-dir <dir>` | Directory of response matrices (one combo per file) |
-| `--auto-pairs-tree <file>` | Auto-generate pairs from Newick tree + phenotypes (requires `--species-pheno-path`) |
 
 **Lambda grid options:**
 
@@ -402,6 +440,7 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 | `--no-pred-output` | Skip species prediction output |
 | `--no-genes-output` | Skip gene ranks output |
 | `--show-selected-sites` | Output selected sites CSV |
+| `--dump-weights` | Write the full feature-weight vector from every solver call to disk (see *PSC output files* below). |
 | `--top-rank-frac X` | Fraction for "top ranked" threshold (default: 0.01) |
 | `--limited-genes-list <file>` | Only process genes in this list |
 
@@ -413,21 +452,19 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 | `--make-pair-randomized-null-models` | Randomize pairs at each position |
 | `--num-randomized-alignments N` | Number of randomized replicates (default: 10) |
 
-**Auto-pairs options:**
-
-| Flag | Description |
-|------|-------------|
-| `--auto-pairs-method <method>` | Pair selection method (default: `simple_deterministic`) |
-| `--auto-pairs-num-alternates N` | Number of alternate species per pair side (default: 0) |
-| `--auto-pairs-max-combinations N` | Max Cartesian product combos (default: 1) |
-
 **PSC output files:**
 
 ```
 output_dir/
 ├── <base>_gene_ranks.csv           # Gene rankings (multimatrix: num_combos_ranked, etc.)
 ├── <base>_species_predictions.csv  # SPS for prediction species
-└── <base>_selected_sites.csv       # Selected alignment positions (if --show-selected-sites)
+├── <base>_selected_sites.csv       # Selected alignment positions (if --show-selected-sites)
+├── <base>_field.csv                # Group-index CSV (only when --alignments-list is used)
+└── [combo_N/][penalty_P/]lambda_L/weights.tsv
+                                    # Per-run feature weights (only with --dump-weights).
+                                    # combo_N/ and penalty_P/ layers are present only when
+                                    # there is more than one combo or more than one penalty
+                                    # term, mirroring train mode's nesting.
 ```
 
 **Species groups file format:**
@@ -447,14 +484,6 @@ myesl2 psc alignments/ output/ \
     --output-base-name analysis \
     --use-logspace --num-log-points 10 \
     --method sg_lasso
-
-# PSC with auto-pairs from phylogenetic tree
-myesl2 psc alignments/ output/ \
-    --auto-pairs-tree tree.nwk \
-    --species-pheno-path phenotypes.csv \
-    --output-base-name autopairs \
-    --use-logspace --num-log-points 10 \
-    --method sg_lasso --show-selected-sites
 ```
 
 ---

@@ -73,6 +73,8 @@ void print_usage(const char* prog_name) {
         "    --lambda-grid <s1> <s2>      Cartesian product grid; each spec is min,max,step\n"
         "    --use-logspace               replace linear sweep with log-spaced grid anchored at\n"
         "                                 [vmin, largest sweep value < vmax and < 1]\n"
+        "      Note: every lambda value (single, file, or grid) must lie in the open\n"
+        "      interval (0,1); out-of-range values raise an error.\n"
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --min-groups N               skip lambdas selecting fewer than N non-zero groups\n"
         "    --prune-skipped-lambda       with --threads > 1 and --min-groups > 0, after the\n"
