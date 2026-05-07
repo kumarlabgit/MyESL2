@@ -208,6 +208,8 @@ void print_usage(const char* prog_name) {
         "    --no-pred-output              skip species predictions\n"
         "    --no-genes-output             skip gene ranks\n"
         "    --show-selected-sites         output selected sites CSV\n"
+        "    --dump-weights                dump per-run feature weights as TSV under\n"
+        "                                  <output_dir>/[combo_N/][penalty_P/]lambda_L/weights.tsv\n"
         "    --top-rank-frac X             (default: 0.01)\n"
         "    --limited-genes-list <file>\n\n"
         "  Null models:\n"
@@ -1062,6 +1064,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--no-pred-output")                         psc_opts.no_pred_output            = true;
                 else if (arg == "--no-genes-output")                        psc_opts.no_genes_output           = true;
                 else if (arg == "--show-selected-sites")                    psc_opts.show_selected_sites       = true;
+                else if (arg == "--dump-weights")                           psc_opts.dump_weights              = true;
                 else if (arg == "--top-rank-frac"             && i+1<argc) psc_opts.top_rank_frac             = std::stod(argv[++i]);
                 else if (arg == "--limited-genes-list"        && i+1<argc) psc_opts.limited_genes_list        = argv[++i];
                 // Null models

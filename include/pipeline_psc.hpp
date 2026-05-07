@@ -137,6 +137,7 @@ struct PscOptions {
     bool no_pred_output = false;
     bool no_genes_output = false;
     bool show_selected_sites = false;
+    bool dump_weights = false;
     double top_rank_frac = 0.01;
     std::filesystem::path limited_genes_list;
 

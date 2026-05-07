@@ -1714,8 +1714,24 @@ void run_psc(const PscOptions& opts) {
             if (effective_opts.make_pair_randomized_null_models)
                 combo_tag += "_" + std::to_string(random_rep);
 
+            // Weight-dump directory roots: skip combo layer when there is only one
+            // combo and no null-model randomization. When randomization is on, the
+            // combo dir name picks up a _rep_<n> suffix.
+            const bool multi_combo = combos.size() > 1 || random_repeats > 1;
+            fs::path combo_dir = opts.output_dir;
+            if (multi_combo) {
+                std::string cname = "combo_" + std::to_string(combo.index);
+                if (random_repeats > 1)
+                    cname += "_rep_" + std::to_string(random_rep);
+                combo_dir = opts.output_dir / cname;
+            }
+
             // ── Penalty loop ──────────────────────────────────────────
-            for (auto penalty : penalty_terms) {
+            for (size_t pi = 0; pi < penalty_terms.size(); ++pi) {
+                double penalty = penalty_terms[pi];
+                fs::path pen_dir = penalty_terms.size() > 1
+                    ? combo_dir / ("penalty_" + std::to_string(pi))
+                    : combo_dir;
                 std::string gp_kind = effective_opts.use_default_gp ? "std" : effective_opts.group_penalty_type;
                 auto group_weights = group_penalty::compute_group_weights(
                     gp_kind, penalty, gp_feature_lengths, gp_var_site_counts);
@@ -1777,6 +1793,24 @@ void run_psc(const PscOptions& opts) {
                     LambdaResult& result = lambda_results[li];
                     result.intercept = regr->getInterceptValue();
                     result.beta.assign(params.begin(), params.end());
+
+                    // Dump per-run weights as <pen_dir>/lambda_<li>/weights.tsv when --dump-weights is set.
+                    // fs::create_directories is idempotent and tolerates concurrent calls; each worker
+                    // writes a unique leaf file, so no synchronization is needed.
+                    if (effective_opts.dump_weights) {
+                        fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(li));
+                        fs::create_directories(lam_dir);
+                        std::ofstream wo(lam_dir / "weights.tsv");
+                        if (wo) {
+                            wo << "feature_label\tfeature_weight\n";
+                            wo << std::scientific << std::setprecision(10);
+                            wo << "__intercept__\t" << result.intercept << "\n";
+                            for (size_t j = 0; j < result.beta.size(); ++j) {
+                                if (result.beta[j] == 0.0) continue;
+                                wo << prep.feature_metas[j].label << "\t" << result.beta[j] << "\n";
+                            }
+                        }
+                    }
 
                     // Compute per-gene GSS and selected sites
                     result.gene_gss.assign(n_genes, 0.0);
