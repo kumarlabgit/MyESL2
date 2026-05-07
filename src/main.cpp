@@ -71,6 +71,8 @@ void print_usage(const char* prog_name) {
         "    --lambda <l1> <l2>           single lambda pair (default: 0.1 0.1)\n"
         "    --lambda-file <path>         file of lambda pairs, one 'l1 l2' per line\n"
         "    --lambda-grid <s1> <s2>      Cartesian product grid; each spec is min,max,step\n"
+        "    --use-logspace               replace linear sweep with log-spaced grid anchored at\n"
+        "                                 [vmin, largest sweep value < vmax and < 1]\n"
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --min-groups N               skip lambdas selecting fewer than N non-zero groups\n"
         "    --prune-skipped-lambda       with --threads > 1 and --min-groups > 0, after the\n"
@@ -140,7 +142,7 @@ void print_usage(const char* prog_name) {
         "    --gene-limit N               max genes displayed in aggregated eval.svg (default: 100)\n"
         "    --species-limit N            max species displayed in aggregated eval.svg (default: 100)\n"
         "  Shared with train (same semantics):\n"
-        "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
+        "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
         "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
@@ -155,7 +157,7 @@ void print_usage(const char* prog_name) {
         "    --aim-max-ft N        stop after accumulating this many features total (default: 1000)\n"
         "    --aim-window N        top-N features considered per iteration (default: 100)\n"
         "  Shared with train (same semantics):\n"
-        "    --method, --precision, --lambda, --lambda-file, --lambda-grid\n"
+        "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
         "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
@@ -292,6 +294,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--lambda"     && i+2<argc) { train_opts.lambda[0]=std::stod(argv[++i]); train_opts.lambda[1]=std::stod(argv[++i]); train_opts.lambda_explicitly_set=true; }
                 else if (arg == "--lambda-file"&& i+1<argc) train_opts.lambda_file_path = argv[++i];
                 else if (arg == "--lambda-grid"&& i+2<argc) { train_opts.lambda_grid_specs[0]=argv[++i]; train_opts.lambda_grid_specs[1]=argv[++i]; train_opts.lambda_grid_set=true; }
+                else if (arg == "--use-logspace") train_opts.use_logspace = true;
                 else if (arg == "--param"      && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts.params[kv.substr(0,eq)]=kv.substr(eq+1); else std::cerr<<"Warning: --param '"<<kv<<"' has no '=', ignoring\n"; }
                 else if (arg == "--nfolds"     && i+1<argc) { train_opts.nfolds=std::stoi(argv[++i]); if(train_opts.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
                 else if (arg == "--min-groups" && i+1<argc) train_opts.min_groups = std::stoi(argv[++i]);
@@ -510,6 +513,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--lambda"           && i+2<argc) { train_opts_base.lambda[0]=std::stod(argv[++i]); train_opts_base.lambda[1]=std::stod(argv[++i]); train_opts_base.lambda_explicitly_set=true; }
                 else if (arg == "--lambda-file"      && i+1<argc) train_opts_base.lambda_file_path = argv[++i];
                 else if (arg == "--lambda-grid"      && i+2<argc) { train_opts_base.lambda_grid_specs[0]=argv[++i]; train_opts_base.lambda_grid_specs[1]=argv[++i]; train_opts_base.lambda_grid_set=true; }
+                else if (arg == "--use-logspace") train_opts_base.use_logspace = true;
                 else if (arg == "--param"            && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts_base.params[kv.substr(0,eq)]=kv.substr(eq+1); }
                 else if (arg == "--nfolds"           && i+1<argc) { train_opts_base.nfolds=std::stoi(argv[++i]); if(train_opts_base.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
                 else if (arg == "--min-groups"       && i+1<argc) { train_opts_base.min_groups=std::stoi(argv[++i]); min_groups_set=true; }
@@ -686,6 +690,7 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--lambda"         && i+2<argc) { train_opts_base.lambda[0]=std::stod(argv[++i]); train_opts_base.lambda[1]=std::stod(argv[++i]); train_opts_base.lambda_explicitly_set=true; has_lambda=true; }
                 else if (arg == "--lambda-file"    && i+1<argc) { train_opts_base.lambda_file_path=argv[++i]; has_lambda=true; }
                 else if (arg == "--lambda-grid"    && i+2<argc) { train_opts_base.lambda_grid_specs[0]=argv[++i]; train_opts_base.lambda_grid_specs[1]=argv[++i]; train_opts_base.lambda_grid_set=true; has_lambda=true; }
+                else if (arg == "--use-logspace") train_opts_base.use_logspace = true;
                 else if (arg == "--param"          && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts_base.params[kv.substr(0,eq)]=kv.substr(eq+1); }
                 else if (arg == "--nfolds"         && i+1<argc) train_opts_base.nfolds = std::stoi(argv[++i]);
                 else if (arg == "--min-groups"     && i+1<argc) train_opts_base.min_groups = std::stoi(argv[++i]);

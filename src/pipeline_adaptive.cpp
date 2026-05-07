@@ -252,6 +252,7 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
             train_combo.lambda_grid_specs[0] = train_opts.adaptive_l1_spec;
             train_combo.lambda_grid_specs[1] = train_opts.adaptive_l2_spec;
             train_combo.lambda_grid_set      = true;
+            train_combo.use_logspace         = train_opts.use_logspace;
             train_combo.threads              = train_opts.threads;
             train_combo.prune_skipped_lambda = train_opts.prune_skipped_lambda;
             pipeline::train(enc_result, train_combo);

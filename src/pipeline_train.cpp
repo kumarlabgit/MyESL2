@@ -22,6 +22,13 @@ namespace pipeline {
 
 namespace {
 
+static void validate_lambda_in_open_unit(double v) {
+    if (!(v > 0.0 && v < 1.0))
+        throw std::runtime_error(
+            "Lambda value " + std::to_string(v) +
+            " is outside (0,1); all lambda values must be in the open interval (0,1)");
+}
+
 // Post-hoc emulation of sequential --min-groups skip-ahead.
 //
 // Walks the grid in original λ₁-outer/λ₂-inner order (the harness's natural
@@ -142,8 +149,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     std::vector<std::array<double, 2>> lambdas;
     if (!opts.lambda_file_path.empty()) {
         lambdas = load_lambda_list(opts.lambda_file_path);
+        for (const auto& lp : lambdas) {
+            validate_lambda_in_open_unit(lp[0]);
+            validate_lambda_in_open_unit(lp[1]);
+        }
     } else if (opts.lambda_grid_set) {
-        auto parse_spec = [](const std::string& spec) {
+        auto parse_spec = [](const std::string& spec, double& vmax_out) {
             std::vector<double> vals;
             double vmin, vmax, vstep;
             char c1, c2;
@@ -153,10 +164,34 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             if (vstep <= 0.0) throw std::runtime_error("lambda-grid step must be > 0");
             for (double v = vmin; v <= vmax + vstep * 1e-9; v += vstep)
                 vals.push_back(v);
+            vmax_out = vmax;
             return vals;
         };
-        auto v1 = parse_spec(opts.lambda_grid_specs[0]);
-        auto v2 = parse_spec(opts.lambda_grid_specs[1]);
+        double vmax1 = 0.0, vmax2 = 0.0;
+        auto v1 = parse_spec(opts.lambda_grid_specs[0], vmax1);
+        auto v2 = parse_spec(opts.lambda_grid_specs[1], vmax2);
+        for (double v : v1) validate_lambda_in_open_unit(v);
+        for (double v : v2) validate_lambda_in_open_unit(v);
+        if (opts.use_logspace) {
+            // Anchor logspace endpoints to [vmin, vmax_effective] where vmax_effective is the
+            // largest sweep value strictly < vmax AND < 1. Indices map uniformly onto [0,1] so
+            // the largest sweep value projects to vmax_effective exactly.
+            auto project = [](std::vector<double>& vals, double vmax) {
+                vals.erase(std::remove_if(vals.begin(), vals.end(),
+                    [vmax](double v) { return !(v < vmax && v < 1.0); }), vals.end());
+                if (vals.size() < 2) return;
+                const double vmin_eff = vals.front();
+                const double vmax_eff = vals.back();
+                const double ratio = vmax_eff / vmin_eff;
+                const size_t N = vals.size();
+                for (size_t i = 0; i < N; ++i) {
+                    double t = static_cast<double>(i) / static_cast<double>(N - 1);
+                    vals[i] = vmin_eff * std::pow(ratio, t);
+                }
+            };
+            project(v1, vmax1);
+            project(v2, vmax2);
+        }
         fs::path gen_path = output_dir / "lambda_list.txt";
         {
             std::ofstream f(gen_path);
@@ -169,6 +204,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                   << " = " << lambdas.size() << " pairs -> "
                   << gen_path.string() << "\n";
     } else {
+        validate_lambda_in_open_unit(opts.lambda[0]);
+        validate_lambda_in_open_unit(opts.lambda[1]);
         fs::path gen_path = output_dir / "lambda_list.txt";
         {
             std::ofstream f(gen_path);
@@ -186,6 +223,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         plog.param("lambda_file", opts.lambda_file_path);
     else
         plog.param("lambda", std::to_string(opts.lambda[0]) + " " + std::to_string(opts.lambda[1]));
+    plog.param("use_logspace", opts.use_logspace ? "true" : "false");
     plog.param("lambdas_count", (int)lambdas.size());
     if (opts.nfolds > 0)      plog.param("nfolds",     opts.nfolds);
     if (opts.min_groups > 0)  plog.param("min_groups", opts.min_groups);

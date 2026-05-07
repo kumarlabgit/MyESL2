@@ -20,6 +20,7 @@ struct TrainOptions {
     std::string  lambda_file_path;
     std::array<std::string,2> lambda_grid_specs = {"", ""};
     bool         lambda_grid_set    = false;
+    bool         use_logspace       = false;
     int          nfolds             = 0;
     int          min_groups         = 0;
     std::map<std::string, std::string> params;  // slep opts, merged with enc.extra_params
