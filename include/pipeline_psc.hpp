@@ -88,6 +88,12 @@ struct PscOptions {
     std::filesystem::path output_dir;
     std::string output_base_name;
 
+    // Optional list file specifying overlapping groups of alignments.
+    // Format: one group per line, comma-separated alignment paths.
+    // Paths are resolved relative to alignments_dir; backslashes are normalized to '/'.
+    // When absent, all FASTA files in alignments_dir become singleton groups (legacy behavior).
+    std::filesystem::path alignments_list_file;
+
     // Species contrast source (exactly one required)
     std::filesystem::path species_groups_file;
     std::filesystem::path response_file;

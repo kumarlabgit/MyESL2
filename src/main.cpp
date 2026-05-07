@@ -164,6 +164,11 @@ void print_usage(const char* prog_name) {
         "-------------------------------------------\n"
         "PSC\n"
         "  " + p + " psc <alignments_dir> <output_dir> [options]\n\n"
+        "  Input:\n"
+        "    --alignments-list <file>      list file specifying overlapping groups of alignments\n"
+        "                                  (one group per line, comma-separated paths relative to\n"
+        "                                  alignments_dir; requires --method olsg_lasso_logisticr or\n"
+        "                                  olsg_lasso_leastr when any group has >1 entry)\n\n"
         "  Species contrast source (exactly one required):\n"
         "    --species-groups <file>       species contrast pairs file\n"
         "    --response-file <file>        single response matrix\n"
@@ -1007,8 +1012,10 @@ int main(int argc, char* argv[]) {
 
             for (int i = 4; i < argc; ++i) {
                 std::string arg = argv[i];
+                // Input
+                if      (arg == "--alignments-list"   && i+1<argc) psc_opts.alignments_list_file = argv[++i];
                 // Species contrast source
-                if      (arg == "--species-groups"    && i+1<argc) psc_opts.species_groups_file = argv[++i];
+                else if (arg == "--species-groups"    && i+1<argc) psc_opts.species_groups_file = argv[++i];
                 else if (arg == "--response-file"     && i+1<argc) psc_opts.response_file       = argv[++i];
                 else if (arg == "--response-dir"      && i+1<argc) psc_opts.response_dir        = argv[++i];
                 else if (arg == "--auto-pairs-tree"   && i+1<argc) psc_opts.auto_pairs_tree     = argv[++i];

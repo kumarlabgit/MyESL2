@@ -143,6 +143,119 @@ static std::vector<GeneAlignment> load_alignments(
     return out;
 }
 
+// Load alignments and overlapping group structure from a list file.
+// Format: one group per line, comma-separated alignment paths.
+// Returns:
+//   - vector of unique GeneAlignments, deduped by canonical resolved path
+//   - groups[i] = vector of indices into the alignments vector (the i-th group)
+static std::pair<std::vector<GeneAlignment>, std::vector<std::vector<size_t>>>
+load_alignments_from_list(
+    const fs::path& base_dir,
+    const fs::path& list_path,
+    const std::unordered_set<std::string>& limited_genes)
+{
+    std::ifstream file(list_path);
+    if (!file) throw std::runtime_error("Cannot open alignments list: " + list_path.string());
+
+    std::vector<GeneAlignment> alignments;
+    std::vector<std::vector<size_t>> groups;
+    std::unordered_map<std::string, size_t> path_to_idx;  // canonical path -> alignments index
+
+    size_t dropped_alignments = 0;
+    size_t dropped_empty_groups = 0;
+    size_t dropped_duplicate_groups = 0;
+
+    auto trim = [](std::string& s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    };
+
+    std::string line;
+    int line_num = 0;
+    while (std::getline(file, line)) {
+        ++line_num;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        trim(line);
+        if (line.empty()) continue;
+
+        std::vector<size_t> group;
+        std::istringstream ss(line);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            trim(token);
+            if (token.empty()) continue;
+
+            // Normalize path separators
+            for (auto& c : token) if (c == '\\') c = '/';
+
+            fs::path resolved = base_dir / token;
+            std::string canonical;
+            std::error_code ec;
+            fs::path canon = fs::weakly_canonical(resolved, ec);
+            canonical = ec ? resolved.lexically_normal().string() : canon.string();
+
+            std::string gene_name = resolved.stem().string();
+            if (!limited_genes.empty() && !limited_genes.count(gene_name)) {
+                ++dropped_alignments;
+                continue;
+            }
+
+            auto it = path_to_idx.find(canonical);
+            if (it == path_to_idx.end()) {
+                if (!fs::exists(resolved))
+                    throw std::runtime_error("Alignment file not found (line "
+                        + std::to_string(line_num) + "): " + resolved.string());
+                auto [seq_map, seq_len] = read_fasta_map(resolved);
+                size_t idx = alignments.size();
+                alignments.push_back({gene_name, seq_len, std::move(seq_map)});
+                path_to_idx[canonical] = idx;
+                group.push_back(idx);
+            } else {
+                group.push_back(it->second);
+            }
+        }
+
+        if (group.empty()) {
+            ++dropped_empty_groups;
+            continue;
+        }
+        groups.push_back(std::move(group));
+    }
+
+    // Deduplicate groups by sorted-membership signature.
+    // Keep the first occurrence; drop later duplicates.
+    {
+        std::vector<std::vector<size_t>> kept;
+        kept.reserve(groups.size());
+        std::set<std::vector<size_t>> seen_signatures;
+        for (auto& g : groups) {
+            std::vector<size_t> sig = g;
+            std::sort(sig.begin(), sig.end());
+            sig.erase(std::unique(sig.begin(), sig.end()), sig.end());
+            if (seen_signatures.insert(sig).second) {
+                kept.push_back(std::move(g));
+            } else {
+                ++dropped_duplicate_groups;
+            }
+        }
+        groups = std::move(kept);
+    }
+
+    if (dropped_alignments || dropped_empty_groups || dropped_duplicate_groups) {
+        std::cout << "  Filter summary: dropped " << dropped_alignments
+                  << " alignment ref(s), " << dropped_empty_groups
+                  << " empty group(s), " << dropped_duplicate_groups
+                  << " duplicate group(s)\n";
+    }
+
+    if (alignments.empty())
+        throw std::runtime_error("No usable alignments after parsing list file: " + list_path.string());
+    if (groups.empty())
+        throw std::runtime_error("No usable groups after parsing list file: " + list_path.string());
+
+    return {std::move(alignments), std::move(groups)};
+}
+
 // ── Species groups & Cartesian product ────────────────────────────────────────
 
 static std::vector<std::vector<std::string>> parse_species_groups(const fs::path& path) {
@@ -619,11 +732,23 @@ struct PreprocessedCombo {
     std::vector<double> y_model;
     arma::fmat features;
     arma::frowvec responses;
-    arma::mat alg_table;     // 3 x n_genes
+    arma::mat alg_table;     // 3 x n_groups (groups = genes when overlap inactive)
     std::vector<FeatureMeta> feature_metas;
     std::vector<GeneMeta> gene_metas;
     std::vector<std::string> stems_ordered;
     fs::path combined_map_path;
+
+    // Group-level metadata for the regularizer.
+    // In non-overlap mode, parallels gene_metas (one group per gene).
+    // In overlap mode, each entry corresponds to one group from the list file.
+    std::vector<size_t> group_feature_lengths;  // total feature columns in the group
+    std::vector<size_t> group_var_site_counts;  // sum of var_site_counts across the group's alignments
+
+    // Field array (1-based feature column indices, with repetition across groups).
+    // Empty when overlap inactive; populated only when groups overlap (>1 alignment per group
+    // or shared alignments across groups), in which case alg_table row 0/1 index INTO this array.
+    arma::rowvec field;
+    bool overlap_active = false;
 };
 
 static GeneEncoded preprocess_one_gene(
@@ -688,7 +813,8 @@ static PreprocessedCombo preprocess_combo(
     bool apply_gap_cancel,
     bool randomize_pairs,
     const PscOptions& opts,
-    const fs::path& output_dir)
+    const fs::path& output_dir,
+    const std::vector<std::vector<size_t>>& alignment_groups = {})
 {
     PreprocessedCombo prep;
     prep.species = combo.species;
@@ -711,9 +837,12 @@ static PreprocessedCombo preprocess_combo(
     for (uint32_t i = 0; i < N; ++i)
         prep.responses(i) = static_cast<float>(prep.y_model[i]);
 
-    // Build features matrix and metadata
+    // Build features matrix and per-gene feature metadata
     prep.features.zeros(N, static_cast<arma::uword>(total_cols));
-    prep.alg_table.zeros(3, static_cast<arma::uword>(gene_results.size()));
+
+    // Per-gene column ranges (1-based, inclusive end), populated as we go.
+    std::vector<std::pair<size_t, size_t>> gene_col_ranges;
+    gene_col_ranges.reserve(gene_results.size());
 
     size_t col_offset = 0;
     for (size_t gi = 0; gi < gene_results.size(); ++gi) {
@@ -733,13 +862,85 @@ static PreprocessedCombo preprocess_combo(
         prep.gene_metas.push_back({gr.name, feature_start, feature_end, gr.var_site_count});
         prep.stems_ordered.push_back(gr.name);
 
-        // alg_table: 1-based column indices
-        prep.alg_table(0, gi) = static_cast<double>(col_offset + 1);
-        prep.alg_table(1, gi) = static_cast<double>(col_offset + n_cols);
-        // Weight placeholder -- will be updated per penalty term
-        prep.alg_table(2, gi) = std::sqrt(static_cast<double>(std::max(n_cols, size_t(1))));
+        // 1-based inclusive feature column range for this gene
+        if (n_cols > 0)
+            gene_col_ranges.push_back({col_offset + 1, col_offset + n_cols});
+        else
+            gene_col_ranges.push_back({col_offset + 1, col_offset});  // empty
 
         col_offset += n_cols;
+    }
+
+    // ── Build alg_table, group metadata, and (if overlap) field array ─────────
+    // Detect "real" overlap: any group has >1 alignment, or any alignment appears in >1 group.
+    // A pure-singleton list with no shared alignments behaves exactly like the legacy dir path.
+    bool real_overlap = false;
+    if (!alignment_groups.empty()) {
+        std::unordered_set<size_t> seen;
+        for (auto& g : alignment_groups) {
+            if (g.size() > 1) { real_overlap = true; break; }
+            if (!seen.insert(g[0]).second) { real_overlap = true; break; }
+        }
+    }
+
+    if (alignment_groups.empty() || !real_overlap) {
+        // Non-overlap (legacy) mode: one group per gene, alg_table indexes feature matrix directly.
+        size_t n_groups = gene_results.size();
+        prep.alg_table.zeros(3, static_cast<arma::uword>(n_groups));
+        prep.group_feature_lengths.reserve(n_groups);
+        prep.group_var_site_counts.reserve(n_groups);
+
+        for (size_t gi = 0; gi < n_groups; ++gi) {
+            auto& gr = gene_results[gi];
+            size_t n_cols = gr.columns.size();
+            auto [start, end] = gene_col_ranges[gi];
+            prep.alg_table(0, gi) = static_cast<double>(start);
+            prep.alg_table(1, gi) = static_cast<double>(end);
+            prep.alg_table(2, gi) = std::sqrt(static_cast<double>(std::max(n_cols, size_t(1))));
+
+            prep.group_feature_lengths.push_back(n_cols);
+            prep.group_var_site_counts.push_back(gr.var_site_count);
+        }
+    } else {
+        // Overlap mode: alg_table row 0/1 are 1-based start/end into the field array.
+        size_t n_groups = alignment_groups.size();
+        prep.alg_table.zeros(3, static_cast<arma::uword>(n_groups));
+        prep.group_feature_lengths.reserve(n_groups);
+        prep.group_var_site_counts.reserve(n_groups);
+
+        std::vector<double> field_buf;
+        // Reserve a reasonable upper bound (sum of group sizes in features)
+        size_t field_reserve = 0;
+        for (auto& g : alignment_groups)
+            for (auto ai : g) field_reserve += gene_results[ai].columns.size();
+        field_buf.reserve(field_reserve);
+
+        for (size_t gi = 0; gi < n_groups; ++gi) {
+            size_t group_start = field_buf.size() + 1;  // 1-based
+            size_t group_feature_count = 0;
+            size_t group_var_sites = 0;
+
+            for (auto ai : alignment_groups[gi]) {
+                auto& gr = gene_results[ai];
+                auto [start, end] = gene_col_ranges[ai];
+                for (size_t c = start; c <= end; ++c)
+                    field_buf.push_back(static_cast<double>(c));
+                group_feature_count += gr.columns.size();
+                group_var_sites += gr.var_site_count;
+            }
+
+            size_t group_end = field_buf.size();  // 1-based inclusive
+
+            prep.alg_table(0, gi) = static_cast<double>(group_start);
+            prep.alg_table(1, gi) = static_cast<double>(group_end);
+            prep.alg_table(2, gi) = std::sqrt(static_cast<double>(std::max(group_feature_count, size_t(1))));
+
+            prep.group_feature_lengths.push_back(group_feature_count);
+            prep.group_var_site_counts.push_back(group_var_sites);
+        }
+
+        prep.field = arma::rowvec(field_buf.data(), field_buf.size());
+        prep.overlap_active = true;
     }
 
     // Write combined.map
@@ -1344,12 +1545,37 @@ void run_psc(const PscOptions& opts) {
     if (!opts.limited_genes_list.empty())
         limited_genes = load_limited_genes(opts.limited_genes_list);
 
-    // Load alignments
-    std::cout << "  Loading alignments from " << opts.alignments_dir.string() << "\n";
-    auto train_alignments = load_alignments(opts.alignments_dir, limited_genes);
+    // Load alignments — either from a directory (legacy) or from a list file (overlap support)
+    std::vector<GeneAlignment> train_alignments;
+    std::vector<std::vector<size_t>> alignment_groups;  // empty in non-overlap mode
+    if (!opts.alignments_list_file.empty()) {
+        std::cout << "  Loading alignments from list " << opts.alignments_list_file.string()
+                  << " (base dir: " << opts.alignments_dir.string() << ")\n";
+        auto loaded = load_alignments_from_list(opts.alignments_dir, opts.alignments_list_file, limited_genes);
+        train_alignments = std::move(loaded.first);
+        alignment_groups = std::move(loaded.second);
+        std::cout << "  Loaded " << train_alignments.size() << " unique alignments in "
+                  << alignment_groups.size() << " group(s)\n";
+    } else {
+        std::cout << "  Loading alignments from " << opts.alignments_dir.string() << "\n";
+        train_alignments = load_alignments(opts.alignments_dir, limited_genes);
+        std::cout << "  Loaded " << train_alignments.size() << " gene alignments\n";
+    }
     if (train_alignments.empty())
         throw std::runtime_error("No alignments found in " + opts.alignments_dir.string());
-    std::cout << "  Loaded " << train_alignments.size() << " gene alignments\n";
+
+    // Method gating: if any group has >1 entry, an overlapping solver is required.
+    {
+        bool any_overlap = false;
+        for (auto& g : alignment_groups) if (g.size() > 1) { any_overlap = true; break; }
+        if (any_overlap
+            && opts.method != "olsg_lasso_logisticr"
+            && opts.method != "olsg_lasso_leastr") {
+            throw std::runtime_error(
+                "Overlapping groups require --method olsg_lasso_logisticr or olsg_lasso_leastr "
+                "(got --method " + opts.method + ")");
+        }
+    }
 
     // Load prediction alignments
     const std::vector<GeneAlignment>* prediction_alignments = &train_alignments;
@@ -1368,6 +1594,10 @@ void run_psc(const PscOptions& opts) {
 
     // Handle auto-pairs
     PscOptions effective_opts = opts;
+    // Propagate --maxiter to the solver (unless the user already set it via --param maxIter=N)
+    if (effective_opts.params.find("maxIter") == effective_opts.params.end()) {
+        effective_opts.params["maxIter"] = std::to_string(effective_opts.maxiter);
+    }
     if (!opts.auto_pairs_tree.empty()) {
         if (opts.species_pheno_path.empty())
             throw std::runtime_error("--auto-pairs-tree requires --species-pheno-path");
@@ -1430,25 +1660,38 @@ void run_psc(const PscOptions& opts) {
 
             // Preprocess combo
             auto prep = preprocess_combo(train_alignments, combo,
-                apply_gap_cancel, randomize, effective_opts, opts.output_dir);
+                apply_gap_cancel, randomize, effective_opts, opts.output_dir, alignment_groups);
 
             std::cout << "  Features: " << prep.features.n_cols
                       << " from " << prep.gene_metas.size() << " genes"
                       << " (" << prep.features.n_rows << " species)\n";
+            if (prep.overlap_active)
+                std::cout << "  Overlap mode: " << prep.group_feature_lengths.size()
+                          << " group(s), field length " << prep.field.n_cols << "\n";
 
             if (prep.features.n_cols == 0) {
                 std::cout << "  No features after preprocessing, skipping combo\n";
                 continue;
             }
 
-            // Extract per-group vectors for shared group_penalty functions
-            std::vector<size_t> gp_feature_lengths, gp_var_site_counts;
-            gp_feature_lengths.reserve(prep.gene_metas.size());
-            gp_var_site_counts.reserve(prep.gene_metas.size());
-            for (auto& gm : prep.gene_metas) {
-                gp_feature_lengths.push_back(gm.feature_end - gm.feature_start + 1);
-                gp_var_site_counts.push_back(gm.var_site_count);
+            // In overlap mode, persist the field array as a CSV and inject the path
+            // into solver params (unless the user already supplied one).
+            if (prep.overlap_active) {
+                std::string field_filename = effective_opts.output_base_name.empty()
+                    ? std::string("field.csv")
+                    : (effective_opts.output_base_name + "_field.csv");
+                fs::path field_path = opts.output_dir / field_filename;
+                if (!prep.field.save(field_path.string(), arma::csv_ascii))
+                    throw std::runtime_error("Failed to write field CSV: " + field_path.string());
+                if (effective_opts.params.find("field") == effective_opts.params.end())
+                    effective_opts.params["field"] = field_path.string();
             }
+
+            // Per-group vectors for shared group_penalty functions.
+            // These are populated by preprocess_combo and parallel gene_metas in non-overlap mode
+            // or describe the actual overlapping groups in overlap mode.
+            const auto& gp_feature_lengths = prep.group_feature_lengths;
+            const auto& gp_var_site_counts = prep.group_var_site_counts;
 
             // Build penalty terms
             auto penalty_terms = group_penalty::build_penalty_terms(
@@ -1477,8 +1720,9 @@ void run_psc(const PscOptions& opts) {
                 auto group_weights = group_penalty::compute_group_weights(
                     gp_kind, penalty, gp_feature_lengths, gp_var_site_counts);
 
-                // Update alg_table row 2 with group weights
-                for (size_t gi = 0; gi < prep.gene_metas.size(); ++gi) {
+                // Update alg_table row 2 with group weights (one entry per group, which equals
+                // gene count in non-overlap mode and the list-file group count in overlap mode)
+                for (size_t gi = 0; gi < group_weights.size(); ++gi) {
                     std::ostringstream ss;
                     ss << std::fixed << std::setprecision(6) << group_weights[gi];
                     prep.alg_table(2, gi) = std::stod(ss.str());
