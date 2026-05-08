@@ -258,12 +258,45 @@ jobs:
     name: Publish Release
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create release
+      # If docs/changelog/<tag>.md exists, use it verbatim as the release
+      # body. Otherwise fall back to GitHub's auto-generated notes. Lets
+      # us hand-curate notes per release without losing the auto-gen
+      # safety net for tags we forget to write a changelog for.
+      - name: Determine release notes source
+        id: notes
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          file="docs/changelog/${tag}.md"
+          if [[ -f "$file" ]]; then
+            echo "Using release notes from $file"
+            echo "has_file=true" >> "$GITHUB_OUTPUT"
+            echo "body_path=$file" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changelog at $file; falling back to auto-generated notes"
+            echo "has_file=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release (from changelog file)
+        if: steps.notes.outputs.has_file == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.notes.outputs.body_path }}
+          files: |
+            artifacts/myesl2-linux-x64/*
+            artifacts/myesl2-linux-x64-portable/*
+            artifacts/myesl2-macos-arm64/*
+            artifacts/myesl2-windows-x64/*
+
+      - name: Create release (auto-generated notes)
+        if: steps.notes.outputs.has_file != 'true'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
