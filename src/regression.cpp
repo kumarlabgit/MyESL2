@@ -440,13 +440,12 @@ public:
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
-                          const std::array<double, 2>&               lambda,
-                          bool                                       physical_expand)
+                          const std::array<double, 2>&               lambda)
         : lambda_(lambda),
           model_(std::make_unique<OLSGLassoFP32>(
               features, responses,
               alg_table, load_field(params),
-              lambda_.data(), slep_opts_from(params), physical_expand,
+              lambda_.data(), slep_opts_from(params),
               intercept_from(params)))
     {}
 
@@ -456,14 +455,13 @@ public:
                           const std::map<std::string, std::string>&  params,
                           const std::array<double, 2>&               lambda,
                           const arma::rowvec&                        xval_idxs,
-                          int                                        xval_id,
-                          bool                                       physical_expand)
+                          int                                        xval_id)
         : lambda_(lambda),
           model_(std::make_unique<OLSGLassoFP32>(
               features, responses,
               alg_table, load_field(params),
               lambda_.data(), slep_opts_from(params), xval_idxs, xval_id,
-              physical_expand, intercept_from(params)))
+              intercept_from(params)))
     {}
 
     void writeSparseMappedWeightsToStream(std::ofstream& out,
@@ -490,14 +488,13 @@ public:
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
-                          const std::array<double, 2>&               lambda,
-                          bool                                       physical_expand)
+                          const std::array<double, 2>&               lambda)
         : lambda_(lambda),
           model_(std::make_unique<OLSGLassoFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table, load_field(params),
-              lambda_.data(), slep_opts_from(params), physical_expand,
+              lambda_.data(), slep_opts_from(params),
               intercept_from(params)))
     {}
 
@@ -507,15 +504,14 @@ public:
                           const std::map<std::string, std::string>&  params,
                           const std::array<double, 2>&               lambda,
                           const arma::rowvec&                        xval_idxs,
-                          int                                        xval_id,
-                          bool                                       physical_expand)
+                          int                                        xval_id)
         : lambda_(lambda),
           model_(std::make_unique<OLSGLassoFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table, load_field(params),
               lambda_.data(), slep_opts_from(params), xval_idxs, xval_id,
-              physical_expand, intercept_from(params)))
+              intercept_from(params)))
     {}
 
     void writeSparseMappedWeightsToStream(std::ofstream& out,
@@ -666,12 +662,11 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysis(
             features, responses, alg_table, params, lambda);
     }
     if (method == "ol_sg_lasso") {
-        bool phys = params.count("physical_expand") && params.at("physical_expand") == "true";
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoFP64Wrapper>(
-                features, responses, alg_table, params, lambda, phys);
+                features, responses, alg_table, params, lambda);
         return std::make_unique<OLSGLassoFP32Wrapper>(
-            features, responses, alg_table, params, lambda, phys);
+            features, responses, alg_table, params, lambda);
     }
     if (method == "gl_logisticr") {
         if (precision == Precision::FP64)
@@ -725,12 +720,11 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
     if (method == "ol_sg_lasso") {
-        bool phys = params.count("physical_expand") && params.at("physical_expand") == "true";
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoFP64Wrapper>(
-                features, responses, alg_table, params, lambda, xval_idxs, xval_id, phys);
+                features, responses, alg_table, params, lambda, xval_idxs, xval_id);
         return std::make_unique<OLSGLassoFP32Wrapper>(
-            features, responses, alg_table, params, lambda, xval_idxs, xval_id, phys);
+            features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
     if (method == "gl_logisticr") {
         if (precision == Precision::FP64)

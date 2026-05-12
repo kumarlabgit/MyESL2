@@ -81,8 +81,6 @@ void print_usage(const char* prog_name) {
         "                                 parallel grid finishes, delete contents of lambda_N/\n"
         "                                 dirs that the single-threaded run would have skipped\n"
         "                                 (preserves dirs as drphylo sentinels)\n"
-        "    --physical-expand            use physically expanded matrix for ol_sg_lasso\n"
-        "                                 (benchmark mode; higher memory, no gather/scatter)\n"
         "    --param <key>=<value>        pass option to solver\n"
         "      intercept=false            disable intercept term\n"
         "      field=<path>               group-index CSV (overlapping group methods)\n"
@@ -288,7 +286,6 @@ int main(int argc, char* argv[]) {
                 }
                 else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; train_opts.threads = pre_opts.num_threads; }
                 else if (arg == "--prune-skipped-lambda") train_opts.prune_skipped_lambda = true;
-                else if (arg == "--physical-expand") train_opts.physical_expand = true;
                 else if (arg == "--method"     && i+1<argc) train_opts.method = argv[++i];
                 else if (arg == "--precision"  && i+1<argc) {
                     std::string p = argv[++i];
@@ -510,7 +507,6 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--datatype"         && i+1<argc) pre_opts.datatype        = argv[++i];
                 else if (arg == "--threads"          && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
                 else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
-                else if (arg == "--physical-expand") train_opts_base.physical_expand = true;
                 else if (arg == "--cache-dir"        && i+1<argc) pre_opts.cache_dir       = argv[++i];
                 else if (arg == "--dlt")              pre_opts.use_dlt = true;
                 else if (arg == "--min-minor"        && i+1<argc) pre_opts.min_minor        = std::stoi(argv[++i]);
@@ -689,7 +685,6 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--datatype"       && i+1<argc) pre_opts.datatype   = argv[++i];
                 else if (arg == "--threads"        && i+1<argc) { pre_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
                 else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
-                else if (arg == "--physical-expand") train_opts_base.physical_expand = true;
                 else if (arg == "--dlt")            pre_opts.use_dlt = true;
                 else if (arg == "--min-minor"      && i+1<argc) pre_opts.min_minor = std::stoi(argv[++i]);
                 else if (arg == "--method"         && i+1<argc) { train_opts_base.method = argv[++i]; has_method = true; }

@@ -7,7 +7,6 @@
 #include <iomanip>
 #include <cstring>
 #include <chrono>
-#include <functional>
 
 
 OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
@@ -16,12 +15,11 @@ OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
                                    const arma::rowvec& field,
                                    double* lambda,
                                    std::map<std::string, std::string> slep_opts,
-                                   bool physical_expand,
                                    const bool intercept) :
     lambda(lambda),
     intercept(intercept)
 {
-  Train(features, responses, weights, field, slep_opts, physical_expand, intercept);
+  Train(features, responses, weights, field, slep_opts, intercept);
 }
 
 
@@ -33,13 +31,12 @@ OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
                                    std::map<std::string, std::string> slep_opts,
                                    const arma::rowvec& xval_idxs,
                                    int xval_id,
-                                   bool physical_expand,
                                    const bool intercept) :
     lambda(lambda),
     intercept(intercept)
 {
   arma::uvec indices = arma::find(xval_idxs != xval_id);
-  Train(features.rows(indices), responses.elem(indices).t(), weights, field, slep_opts, physical_expand, intercept);
+  Train(features.rows(indices), responses.elem(indices).t(), weights, field, slep_opts, intercept);
 }
 
 
@@ -100,7 +97,6 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
                                const arma::mat& weights,
                                const arma::rowvec& field,
                                std::map<std::string, std::string> slep_opts,
-                               bool physical_expand,
                                const bool intercept)
 {
   this->intercept = intercept;
@@ -226,75 +222,37 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
       ind_flat_base[r * 3 + 2] = ind(r, 2);
   }
 
-  // Log solver dimensions and expansion mode
+  // Log solver dimensions
   std::cout << "  [ol_sg_lasso] m=" << m << " n=" << n << " F=" << F
             << " expansion=" << (F - n) << " ("
-            << std::fixed << std::setprecision(1) << (100.0 * (F - n) / n) << "% overlap)"
-            << " mode=" << (physical_expand ? "physical" : "virtual") << "\n";
+            << std::fixed << std::setprecision(1) << (100.0 * (F - n) / n) << "% overlap)\n";
 
-  // ── Matvec setup: virtual vs physical expansion ──────────────────────────────
+  // ── Virtual-expansion matvec ─────────────────────────────────────────────────
   const float* A_ptr = A.memptr();
   const int M_int = static_cast<int>(m);
   const int N_int = static_cast<int>(n);
-  const int F_int = static_cast<int>(F);
 
-  // Temp buffers for virtual expansion path
-  std::vector<float> x_physical;
-  std::vector<float> g_physical;
-  // Expanded matrix for physical expansion path
-  arma::fmat A_exp;
-  const float* A_exp_ptr = nullptr;
+  std::vector<float> x_physical(n, 0.0f);
+  std::vector<float> g_physical(n);
 
-  if (physical_expand) {
-    // Build expanded matrix: A_exp(:, j) = A(:, field[j]) for all j
-    A_exp.set_size(m, F);
+  auto matvec = [&](const float* x_exp, float* out) {
+    // Scatter: accumulate expanded coefficients into physical space
+    std::memset(x_physical.data(), 0, n * sizeof(float));
     for (size_t j = 0; j < F; ++j)
-        std::memcpy(A_exp.colptr(j), A.colptr(field_idx[j]), m * sizeof(float));
-    A_exp_ptr = A_exp.memptr();
-    double exp_mb = double(m) * F * sizeof(float) / (1 << 20);
-    double orig_mb = double(m) * n * sizeof(float) / (1 << 20);
-    std::cout << "  [ol_sg_lasso] expanded matrix: " << std::fixed << std::setprecision(2)
-              << exp_mb << " MB (original: " << orig_mb << " MB, delta: +"
-              << (exp_mb - orig_mb) << " MB)\n";
-  } else {
-    x_physical.resize(n, 0.0f);
-    g_physical.resize(n);
-  }
+        x_physical[field_idx[j]] += x_exp[j];
+    cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
+                M_int, N_int, 1.0f, A_ptr, M_int,
+                x_physical.data(), 1, 0.0f, out, 1);
+  };
 
-  // Matvec lambdas — same signature regardless of path
-  std::function<void(const float*, float*)> matvec;
-  std::function<void(const float*, float*)> matvec_t;
-
-  if (physical_expand) {
-    matvec = [&](const float* x_exp, float* out) {
-      cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
-                  M_int, F_int, 1.0f, A_exp_ptr, M_int,
-                  x_exp, 1, 0.0f, out, 1);
-    };
-    matvec_t = [&](const float* b_in, float* out_exp) {
-      cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
-                  M_int, F_int, 1.0f, A_exp_ptr, M_int,
-                  b_in, 1, 0.0f, out_exp, 1);
-    };
-  } else {
-    matvec = [&](const float* x_exp, float* out) {
-      // Scatter: accumulate expanded coefficients into physical space
-      std::memset(x_physical.data(), 0, n * sizeof(float));
-      for (size_t j = 0; j < F; ++j)
-          x_physical[field_idx[j]] += x_exp[j];
-      cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
-                  M_int, N_int, 1.0f, A_ptr, M_int,
-                  x_physical.data(), 1, 0.0f, out, 1);
-    };
-    matvec_t = [&](const float* b_in, float* out_exp) {
-      // BLAS on physical matrix, then gather into expanded space
-      cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
-                  M_int, N_int, 1.0f, A_ptr, M_int,
-                  b_in, 1, 0.0f, g_physical.data(), 1);
-      for (size_t j = 0; j < F; ++j)
-          out_exp[j] = g_physical[field_idx[j]];
-    };
-  }
+  auto matvec_t = [&](const float* b_in, float* out_exp) {
+    // BLAS on physical matrix, then gather into expanded space
+    cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
+                M_int, N_int, 1.0f, A_ptr, M_int,
+                b_in, 1, 0.0f, g_physical.data(), 1);
+    for (size_t j = 0; j < F; ++j)
+        out_exp[j] = g_physical[field_idx[j]];
+  };
 
   // Helper: float dot product (matches Armadillo's float accumulation)
   auto dotf = [](const float* a, const float* b, size_t len) -> float {
@@ -302,9 +260,6 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
     for (size_t i = 0; i < len; i++) sum += a[i] * b[i];
     return sum;
   };
-
-  // Timing accumulators
-  double matvec_total_ms = 0, matvec_t_total_ms = 0;
 
   // Convert responses to flat array
   std::vector<float> y(m);
@@ -375,12 +330,7 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
 
 	 // ATb = A^T * b — produces F-sized gathered gradient
 	 std::vector<float> ATb(F);
-	 {
-	   auto t0 = std::chrono::steady_clock::now();
-	   matvec_t(b_vec.data(), ATb.data());
-	   matvec_t_total_ms += std::chrono::duration<double, std::milli>(
-	       std::chrono::steady_clock::now() - t0).count();
-	 }
+	 matvec_t(b_vec.data(), ATb.data());
 
 	 // temp = abs(ATb), lambda1_max = max(temp)
 	 std::vector<float> temp(F);
@@ -465,12 +415,7 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
     }
 
     // g = A^T * b  (F-sized output via matvec_t)
-    {
-      auto t0 = std::chrono::steady_clock::now();
-      matvec_t(b_vec.data(), g.data());
-      matvec_t_total_ms += std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - t0).count();
-    }
+    matvec_t(b_vec.data(), g.data());
 
     // Save
     std::memcpy(xp.data(), x.data(), F * sizeof(float));
@@ -493,12 +438,7 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
       for (size_t i = 0; i < F; i++) v[i] = x[i] - s[i];
 
       // Ax = A * x  (F-sized input via matvec)
-      {
-        auto t0 = std::chrono::steady_clock::now();
-        matvec(x.data(), Ax.data());
-        matvec_total_ms += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - t0).count();
-      }
+      matvec(x.data(), Ax.data());
 
       // aa = -y % (Ax + c)
       for (size_t i = 0; i < m; i++) aa[i] = -y[i] * (Ax[i] + (float)c);
@@ -587,13 +527,10 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
   auto train_end = std::chrono::steady_clock::now();
   double train_ms = std::chrono::duration<double, std::milli>(train_end - train_start).count();
   std::cout << "  [ol_sg_lasso] converged in " << iterStep << " iterations, "
-            << std::fixed << std::setprecision(1) << train_ms << " ms"
-            << " (mode=" << (physical_expand ? "physical" : "virtual") << ")\n";
-  std::cout << "  [ol_sg_lasso] matvec: " << std::fixed << std::setprecision(1)
-            << matvec_total_ms << " ms, matvec_t: " << matvec_t_total_ms << " ms\n";
+            << std::fixed << std::setprecision(1) << train_ms << " ms\n";
 
   // Write results back to Armadillo members
-  std::cout << std::defaultfloat << "Intercept: " << c << std::endl;
+  std::cout << std::defaultfloat << std::setprecision(6) << "Intercept: " << c << std::endl;
   this->intercept_value = c;
 
   parameters.set_size(F);

@@ -36,8 +36,6 @@ struct TrainOptions {
     // single-threaded skip-ahead would have skipped, preserving the dirs
     // themselves as drphylo aggregation sentinels.
     bool         prune_skipped_lambda = false;
-    // ol_sg_lasso: use physically expanded matrix instead of virtual expansion
-    bool         physical_expand     = false;
     // Group penalty (default "std" preserves current sqrt(feature_count) behavior)
     std::string  group_penalty_type  = "std";
     double       initial_gp_value    = 1.0;

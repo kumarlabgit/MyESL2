@@ -12,7 +12,6 @@ class OLSGLassoFP32
                  const arma::rowvec& field,
                  double* lambda,
                  std::map<std::string, std::string> slep_opts,
-                 bool physical_expand = false,
                  const bool intercept = true);
 
   OLSGLassoFP32(const arma::fmat& features,
@@ -23,7 +22,6 @@ class OLSGLassoFP32
                  std::map<std::string, std::string> slep_opts,
                  const arma::rowvec& xval_idxs,
                  int xval_id,
-                 bool physical_expand = false,
                  const bool intercept = true);
 
   OLSGLassoFP32() : lambda(), intercept(true) { }
@@ -33,7 +31,6 @@ class OLSGLassoFP32
                const arma::mat& weights,
                const arma::rowvec& field,
                std::map<std::string, std::string> slep_opts,
-               bool physical_expand = false,
                const bool intercept = true);
 
   void writeModelToXMLStream(std::ofstream& XMLFile);

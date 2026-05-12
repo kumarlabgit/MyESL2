@@ -450,9 +450,6 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         }
         opts.params["field"] = id_field.string();
     }
-    if (method == "ol_sg_lasso" && opts.physical_expand)
-        opts.params["physical_expand"] = "true";
-
     pipeline_utils::log_rss("train: before lambda loop");
 
     // ── Penalty loop ────────────────────────────────────────────────────────────
