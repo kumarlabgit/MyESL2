@@ -2,9 +2,17 @@
 # setup.sh — Download the latest MyESL2 release binary for this platform
 #            and place it (plus its runtime libraries) into ./bin/.
 #
-# Usage:   bash scripts/setup.sh [--tag vX.Y.Z] [--repo owner/repo]
-# Example: bash scripts/setup.sh                       # latest release
-#          bash scripts/setup.sh --tag v0.1.2          # specific tag
+# Usage:   bash scripts/setup.sh [--tag TAG] [--repo owner/repo] [--channel main|dev]
+# Example: bash scripts/setup.sh                       # latest release for current channel
+#          bash scripts/setup.sh --tag v0.1.2          # specific main tag
+#          bash scripts/setup.sh --channel dev         # latest dev-v* release
+#
+# Channel selection:
+#   - Auto-detected from `git rev-parse --abbrev-ref HEAD`: `dev` branch → dev
+#     channel, anything else (main, detached HEAD, no git) → main channel.
+#   - Override with --channel main|dev.
+#   - main channel pulls `v*` releases via /releases/latest.
+#   - dev  channel pulls `dev-v*` releases via /releases?per_page=100.
 #
 # Supports:  Linux x86_64, macOS arm64 (Apple Silicon).
 # Windows:   use scripts/setup.ps1 from a PowerShell prompt instead.
@@ -18,15 +26,30 @@ BIN_DIR="$REPO_ROOT/bin"
 # ── Args ──────────────────────────────────────────────────────────
 REPO="kumarlabgit/MyESL2"
 TAG=""
+CHANNEL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --tag)  TAG="$2"; shift 2 ;;
-        --repo) REPO="$2"; shift 2 ;;
+        --tag)     TAG="$2"; shift 2 ;;
+        --repo)    REPO="$2"; shift 2 ;;
+        --channel) CHANNEL="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,12p' "$0"; exit 0 ;;
+            sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+# ── Channel autodetect ────────────────────────────────────────────
+# If --channel wasn't supplied, infer from the checked-out git branch.
+# Defaults to `main` for detached HEAD, feature branches, and non-git
+# checkouts so the dev channel is strictly opt-in.
+if [[ -z "$CHANNEL" ]]; then
+    GIT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ "$GIT_BRANCH" == "dev" ]]; then CHANNEL="dev"; else CHANNEL="main"; fi
+fi
+case "$CHANNEL" in
+    main|dev) ;;
+    *) echo "ERROR: --channel must be 'main' or 'dev' (got '$CHANNEL')" >&2; exit 2 ;;
+esac
 
 # ── Platform detection ────────────────────────────────────────────
 OS="$(uname -s)"
@@ -72,20 +95,54 @@ esac
 
 echo "=== MyESL2 binary setup ==="
 echo "  Repo:     $REPO"
+echo "  Channel:  $CHANNEL"
 echo "  Platform: $OS $ARCH"
 echo "  Target:   $BIN_DIR/"
 echo ""
 
 # ── Resolve release tag ──────────────────────────────────────────
+# main channel: /releases/latest excludes prereleases, so dev tags
+# (published with prerelease=true by release-dev.yml) can never be
+# returned here even when they're the most recent release by date.
+#
+# dev channel: /releases/latest does NOT include prereleases, so we
+# paginate /releases and pick the first tag matching `dev-v*` (the
+# API returns releases sorted by created_at desc).
 if [[ -z "$TAG" ]]; then
-    API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-    echo "Resolving latest release tag..."
-    TAG=$(curl -fsSL "$API_URL" \
-        | grep -oE '"tag_name":[[:space:]]*"[^"]+"' \
-        | head -1 \
-        | sed -E 's/.*"([^"]+)"$/\1/')
-    [[ -n "$TAG" ]] \
-        || { echo "ERROR: could not resolve latest release tag from $API_URL" >&2; exit 1; }
+    if [[ "$CHANNEL" == "main" ]]; then
+        API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+        echo "Resolving latest main release tag..."
+        TAG=$(curl -fsSL "$API_URL" \
+            | grep -oE '"tag_name":[[:space:]]*"[^"]+"' \
+            | head -1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')
+        [[ -n "$TAG" ]] \
+            || { echo "ERROR: could not resolve latest release tag from $API_URL" >&2; exit 1; }
+    else
+        API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
+        echo "Resolving latest dev-v* release tag..."
+        TAG=$(curl -fsSL "$API_URL" \
+            | grep -oE '"tag_name":[[:space:]]*"dev-v[^"]+"' \
+            | head -1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')
+        [[ -n "$TAG" ]] \
+            || { echo "ERROR: no dev-v* release found at $API_URL" >&2; exit 1; }
+    fi
+fi
+
+# ── Cross-contamination safety check ─────────────────────────────
+# Fires on both auto-resolved tags and user-supplied --tag values.
+# Prevents a main checkout from fetching a dev tag (and vice versa)
+# even if the upstream API or a typo would have allowed it through.
+if [[ "$CHANNEL" == "main" && "$TAG" == dev-* ]]; then
+    echo "ERROR: channel=main but tag '$TAG' is a dev tag." >&2
+    echo "       Pass --channel dev to switch channels, or use a v* tag." >&2
+    exit 1
+fi
+if [[ "$CHANNEL" == "dev" && "$TAG" != dev-* ]]; then
+    echo "ERROR: channel=dev but tag '$TAG' is not a dev tag." >&2
+    echo "       Pass --channel main to switch channels, or use a dev-v* tag." >&2
+    exit 1
 fi
 echo "  Tag:      $TAG"
 echo ""

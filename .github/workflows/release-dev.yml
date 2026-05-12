@@ -1,12 +1,16 @@
-name: Release
+name: Release (dev)
 
-# Dev releases use .github/workflows/release-dev.yml with `dev-v*` tags.
-# `v*` is an fnmatch glob requiring a literal leading `v`, so `dev-v*` tags
-# never match this trigger — the two release channels are mutually exclusive.
+# Dev-channel release workflow. Sibling to .github/workflows/release.yml.
+# Triggers on `dev-v*` tags (disjoint from `v*` because fnmatch globs require
+# a literal leading char). Builds Linux (regular + portable) and Windows;
+# macOS is intentionally skipped to save CI minutes on the dev channel.
+# All releases produced here are marked prerelease=true so that the GitHub
+# API's /releases/latest endpoint never returns a dev tag — the main setup
+# scripts that hit /releases/latest are immune to picking up dev builds.
 
 on:
   push:
-    tags: ['v*']
+    tags: ['dev-v*']
 
 permissions:
   contents: write
@@ -23,9 +27,6 @@ jobs:
           - os: ubuntu-latest
             artifact: myesl2-linux-x64
             aln_list: Fungi_data/aln_200_linux.txt
-          - os: macos-latest
-            artifact: myesl2-macos-arm64
-            aln_list: Fungi_data/aln_200_linux.txt
           - os: windows-latest
             artifact: myesl2-windows-x64
             aln_list: Fungi_data/aln_200.txt
@@ -35,11 +36,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      # ── Runtime dependencies ──────────────────────────────────────
-      - name: Install gfortran runtime (macOS)
-        if: runner.os == 'macOS'
-        run: brew install gcc
 
       # ── Install Armadillo headers ─────────────────────────────────
       - name: Install Armadillo headers (pinned version from deps.env)
@@ -91,11 +87,6 @@ jobs:
         run: bash test/compare_golden.sh ci_output test/golden
 
       # ── Upload artifacts ──────────────────────────────────────────
-      # Each platform's binary + bundled runtime libraries are packaged
-      # into a single archive so the released assets don't collide across
-      # builds (e.g. linux-x64 vs linux-x64-portable both shipping
-      # libopenblas.so). setup.sh / setup.ps1 download the archive and
-      # extract it into ./bin/.
       - name: Prepare binary archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -105,21 +96,11 @@ jobs:
           cp build/bin/libopenblas* "$stage/" 2>/dev/null || true
           cp build/bin/libgfortran* "$stage/" 2>/dev/null || true
           cp build/bin/libquadmath* "$stage/" 2>/dev/null || true
-          # Fallback: if CMake didn't copy the Fortran runtime, grab from system
           if ! ls "$stage"/libgfortran* 1>/dev/null 2>&1; then
-            if [[ "$(uname -s)" == "Darwin" ]]; then
-              GFORT=$(find /opt/homebrew/lib/gcc -name "libgfortran.5.dylib" 2>/dev/null | head -1)
-              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$GFORT" "$stage/libgfortran.5.dylib"
-              QUAD=$(find /opt/homebrew/lib/gcc -name "libquadmath.0.dylib" 2>/dev/null | head -1)
-              [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$QUAD" "$stage/libquadmath.0.dylib"
-            else
-              GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
-                      || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
-              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
-              cp "$(realpath "$GFORT")" "$stage/libgfortran.so.5"
-            fi
+            GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
+                    || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
+            [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
+            cp "$(realpath "$GFORT")" "$stage/libgfortran.so.5"
           fi
           mkdir -p artifact
           tar -czf "artifact/${{ matrix.artifact }}.tar.gz" -C "$stage" .
@@ -141,16 +122,9 @@ jobs:
           path: artifact/
 
   # ── Portable Linux build (glibc 2.17, RHEL 7 / older HPC) ──────
-  # Builds inside manylinux2014 (CentOS 7, glibc 2.17) and rebuilds
-  # OpenBLAS from source so the resulting bundle runs on any Linux
-  # with glibc ≥ 2.17. Runs in parallel with the matrix job above.
-  #
-  # NOTE: We can't use the `container:` GH Actions field here. The runner
-  # would then inject its Node 20 binary into the container, but Node 20
-  # is built against glibc ≥ 2.27 and won't load on glibc 2.17, so even
-  # actions/checkout fails. Instead we keep the job on ubuntu-latest
-  # (where checkout/upload-artifact work) and shell into manylinux2014
-  # via a single `docker run` for the actual build.
+  # Same as release.yml. Kept in the dev pipeline because RHEL-7 / HPC
+  # users are common early-testers for dev tags; dropping it here would
+  # cut off the very audience the dev channel exists to serve.
   build-linux-portable:
     runs-on: ubuntu-latest
     name: Build & Test (linux-x64-portable, glibc 2.17)
@@ -177,8 +151,6 @@ jobs:
           cp -r armadillo-${ARMADILLO_VERSION}/include/armadillo_bits include/armadillo_bits
 
           # ── OpenBLAS from source ──
-          # Match the vendored binary's build flags (DYNAMIC_ARCH, NO_AFFINITY)
-          # so behaviour matches the non-portable Linux artifact.
           echo "Building OpenBLAS $OPENBLAS_VERSION"
           curl -L -o openblas.tar.gz \
             "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}.tar.gz"
@@ -189,13 +161,6 @@ jobs:
             CC=gcc FC=gfortran
           make install PREFIX=/work/openblas-install
           popd
-          # Overwrite the vendored deps so the existing CMakeLists.txt
-          # target_link_libraries path resolves to the portable copy.
-          # OpenBLAS' multi-threaded build installs the real .so under a
-          # name like libopenblasp-r0.3.29.so with libopenblas.so and
-          # libopenblas.so.0 as symlinks to it, so we follow the .so
-          # symlink to whatever the real file is rather than relying on a
-          # name pattern.
           REAL_SO=$(readlink -f /work/openblas-install/lib/libopenblas.so)
           [ -f "$REAL_SO" ] || {
             echo "ERROR: libopenblas.so does not resolve to a real file" >&2
@@ -237,8 +202,6 @@ jobs:
           fi
           INNER
 
-      # Files in build/ are root-owned (created inside the container) but
-      # remain world-readable, so cp on the host runner works fine.
       - name: Prepare binary archive
         shell: bash
         run: |
@@ -259,7 +222,7 @@ jobs:
   publish:
     needs: [build-and-test, build-linux-portable]
     runs-on: ubuntu-latest
-    name: Publish Release
+    name: Publish Release (dev)
 
     steps:
       - uses: actions/checkout@v4
@@ -270,9 +233,9 @@ jobs:
           path: artifacts
 
       # If docs/changelog/<tag>.md exists, use it verbatim as the release
-      # body. Otherwise fall back to GitHub's auto-generated notes. Lets
-      # us hand-curate notes per release without losing the auto-gen
-      # safety net for tags we forget to write a changelog for.
+      # body. Otherwise fall back to GitHub's auto-generated notes. Same
+      # convention as release.yml; dev tags should put their notes under
+      # docs/changelog/dev-v*.md.
       - name: Determine release notes source
         id: notes
         shell: bash
@@ -292,20 +255,20 @@ jobs:
         if: steps.notes.outputs.has_file == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           body_path: ${{ steps.notes.outputs.body_path }}
           files: |
             artifacts/myesl2-linux-x64/*
             artifacts/myesl2-linux-x64-portable/*
-            artifacts/myesl2-macos-arm64/*
             artifacts/myesl2-windows-x64/*
 
       - name: Create release (auto-generated notes)
         if: steps.notes.outputs.has_file != 'true'
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           generate_release_notes: true
           files: |
             artifacts/myesl2-linux-x64/*
             artifacts/myesl2-linux-x64-portable/*
-            artifacts/myesl2-macos-arm64/*
             artifacts/myesl2-windows-x64/*

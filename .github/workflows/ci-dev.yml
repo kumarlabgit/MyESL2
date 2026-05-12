@@ -1,13 +1,14 @@
-name: CI
+name: CI (dev)
 
-# Dev branch is handled by .github/workflows/ci-dev.yml. `branches: [main]`
-# is an exclusive allowlist, so dev pushes/PRs never reach this workflow.
+# Dev-branch CI. Sibling to .github/workflows/ci.yml — see that file for the
+# main-branch equivalent. Linux + Windows only (no macOS) to save CI time;
+# the dev-release workflow follows the same matrix shape.
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
   pull_request:
-    branches: [main]
+    branches: [dev]
 
 # Pre-compiled OpenBLAS+LAPACK libraries live in deps/ per platform.
 # Armadillo version is read from deps.env for the header download.
@@ -21,9 +22,6 @@ jobs:
           - os: ubuntu-latest
             artifact: myesl2-linux-x64
             aln_list: Fungi_data/aln_200_linux.txt
-          - os: macos-latest
-            artifact: myesl2-macos-arm64
-            aln_list: Fungi_data/aln_200_linux.txt
           - os: windows-latest
             artifact: myesl2-windows-x64
             aln_list: Fungi_data/aln_200.txt
@@ -33,11 +31,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      # ── Runtime dependencies ──────────────────────────────────────
-      - name: Install gfortran runtime (macOS)
-        if: runner.os == 'macOS'
-        run: brew install gcc
 
       # ── Install Armadillo headers ─────────────────────────────────
       - name: Install Armadillo headers (pinned version from deps.env)
@@ -121,21 +114,10 @@ jobs:
           cp build/bin/libquadmath* artifact/ 2>/dev/null || true
           # Fallback: if CMake didn't copy the Fortran runtime, grab from system
           if ! ls artifact/libgfortran* 1>/dev/null 2>&1; then
-            if [[ "$(uname -s)" == "Darwin" ]]; then
-              # Homebrew GCC uses versioned names (gfortran-15, etc.) so search
-              # the lib directory directly instead of relying on `gfortran`.
-              GFORT=$(find /opt/homebrew/lib/gcc -name "libgfortran.5.dylib" 2>/dev/null | head -1)
-              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.5.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$GFORT" artifact/libgfortran.5.dylib
-              QUAD=$(find /opt/homebrew/lib/gcc -name "libquadmath.0.dylib" 2>/dev/null | head -1)
-              [ -f "$QUAD" ] || { echo "ERROR: cannot find libquadmath.0.dylib in Homebrew GCC" >&2; exit 1; }
-              cp "$QUAD" artifact/libquadmath.0.dylib
-            else
-              GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
-                      || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
-              [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
-              cp "$(realpath "$GFORT")" artifact/libgfortran.so.5
-            fi
+            GFORT=$(gfortran --print-file-name=libgfortran.so.5 2>/dev/null \
+                    || gcc --print-file-name=libgfortran.so.5 2>/dev/null)
+            [ -f "$GFORT" ] || { echo "ERROR: cannot find libgfortran.so.5" >&2; exit 1; }
+            cp "$(realpath "$GFORT")" artifact/libgfortran.so.5
           fi
 
       - name: Prepare binary artifact (Windows)

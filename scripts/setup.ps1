@@ -4,13 +4,22 @@
 # Usage (from a PowerShell prompt in the repo root):
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Tag v0.1.2
+#   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Channel dev
+#
+# Channel selection:
+#   - Auto-detected from `git rev-parse --abbrev-ref HEAD`: `dev` branch
+#     → dev channel, anything else → main channel.
+#   - Override with -Channel main|dev.
+#   - main channel pulls `v*` releases via /releases/latest.
+#   - dev  channel pulls `dev-v*` releases via /releases?per_page=100.
 #
 # On Linux/macOS use scripts/setup.sh instead.
 
 [CmdletBinding()]
 param(
-    [string] $Tag  = "",
-    [string] $Repo = "kumarlabgit/MyESL2"
+    [string] $Tag     = "",
+    [string] $Repo    = "kumarlabgit/MyESL2",
+    [string] $Channel = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,26 +29,74 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Resolve-Path (Join-Path $scriptDir "..")
 $binDir    = Join-Path $repoRoot "bin"
 
+# ── Channel autodetect ───────────────────────────────────────────
+# If -Channel wasn't supplied, infer from the checked-out git branch.
+# Defaults to `main` for detached HEAD, feature branches, and non-git
+# checkouts so the dev channel is strictly opt-in.
+if (-not $Channel) {
+    $gitBranch = ""
+    try {
+        $gitBranch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null)
+    } catch {}
+    if ($LASTEXITCODE -eq 0 -and $gitBranch -eq "dev") { $Channel = "dev" } else { $Channel = "main" }
+}
+if ($Channel -ne "main" -and $Channel -ne "dev") {
+    Write-Error "-Channel must be 'main' or 'dev' (got '$Channel')"
+    exit 2
+}
+
 Write-Host "=== MyESL2 binary setup ==="
 Write-Host "  Repo:     $Repo"
+Write-Host "  Channel:  $Channel"
 Write-Host "  Platform: Windows x64"
 Write-Host "  Target:   $binDir\"
 Write-Host ""
 
 # ── Resolve release tag ──────────────────────────────────────────
+# main channel: /releases/latest excludes prereleases, so dev tags
+# (published with prerelease=true) can never be returned here.
+# dev channel: paginate /releases and take the first `dev-v*` tag
+# (the API sorts by created_at desc).
 if (-not $Tag) {
-    Write-Host "Resolving latest release tag..."
-    $apiUrl = "https://api.github.com/repos/$Repo/releases/latest"
-    try {
-        $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -Headers @{
-            "User-Agent" = "myesl2-setup"
+    if ($Channel -eq "main") {
+        Write-Host "Resolving latest main release tag..."
+        $apiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+        try {
+            $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -Headers @{
+                "User-Agent" = "myesl2-setup"
+            }
+        } catch {
+            Write-Error "Could not query GitHub API: $apiUrl`n$_"
+            exit 1
         }
-    } catch {
-        Write-Error "Could not query GitHub API: $apiUrl`n$_"
-        exit 1
+        $Tag = $release.tag_name
+        if (-not $Tag) { Write-Error "No tag_name in latest release response."; exit 1 }
+    } else {
+        Write-Host "Resolving latest dev-v* release tag..."
+        $apiUrl = "https://api.github.com/repos/$Repo/releases?per_page=100"
+        try {
+            $releases = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -Headers @{
+                "User-Agent" = "myesl2-setup"
+            }
+        } catch {
+            Write-Error "Could not query GitHub API: $apiUrl`n$_"
+            exit 1
+        }
+        $devRelease = $releases | Where-Object { $_.tag_name -like "dev-v*" } | Select-Object -First 1
+        if (-not $devRelease) { Write-Error "No dev-v* release found at $apiUrl"; exit 1 }
+        $Tag = $devRelease.tag_name
     }
-    $Tag = $release.tag_name
-    if (-not $Tag) { Write-Error "No tag_name in latest release response."; exit 1 }
+}
+
+# ── Cross-contamination safety check ─────────────────────────────
+# Fires on both auto-resolved tags and user-supplied -Tag values.
+if ($Channel -eq "main" -and $Tag -like "dev-*") {
+    Write-Error "channel=main but tag '$Tag' is a dev tag.`nPass -Channel dev to switch channels, or use a v* tag."
+    exit 1
+}
+if ($Channel -eq "dev" -and $Tag -notlike "dev-*") {
+    Write-Error "channel=dev but tag '$Tag' is not a dev tag.`nPass -Channel main to switch channels, or use a dev-v* tag."
+    exit 1
 }
 Write-Host "  Tag:      $Tag"
 Write-Host ""
