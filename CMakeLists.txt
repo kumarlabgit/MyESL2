@@ -28,6 +28,8 @@ set(SOURCES
     src/overlapping_sg_lasso_leastr_fp64.cpp
     src/overlapping_sg_lasso_logisticr_fp32.cpp
     src/overlapping_sg_lasso_logisticr_fp64.cpp
+    src/ol_sg_lasso_fp32.cpp
+    src/ol_sg_lasso_fp64.cpp
     src/gl_logisticr_fp32.cpp
     src/gl_logisticr_fp64.cpp
     src/numeric_parser.cpp
