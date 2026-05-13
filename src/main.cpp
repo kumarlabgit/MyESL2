@@ -172,7 +172,7 @@ void print_usage(const char* prog_name) {
         "    --alignments-list <file>      list file specifying overlapping groups of alignments\n"
         "                                  (one group per line, comma-separated paths relative to\n"
         "                                  alignments_dir; requires --method olsg_lasso_logisticr,\n"
-        "                                  olsg_lasso_leastr, or ol_sg_lasso when any group has >1 entry)\n\n"
+        "                                  olsg_lasso_leastr, ol_sg_lasso, or ol_sg_lasso_leastr when any group has >1 entry)\n\n"
         "  Species contrast source (exactly one required):\n"
         "    --species-groups <file>       species contrast pairs file\n"
         "    --response-file <file>        single response matrix\n"

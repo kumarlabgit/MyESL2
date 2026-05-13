@@ -430,14 +430,14 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     // only on enc + method, so the value would be the same at every grid point.
     if (enc.is_overlapping
         && (method == "olsg_lasso_leastr" || method == "olsg_lasso_logisticr"
-            || method == "ol_sg_lasso")
+            || method == "ol_sg_lasso" || method == "ol_sg_lasso_leastr")
         && opts.params.find("field") == opts.params.end()) {
         opts.params["field"] = enc.field_path.string();
     }
     // ol_sg_lasso on non-overlapping input: generate identity field (1,2,...,n)
     // so the solver runs correctly. With identity field, output is bit-for-bit
     // identical to sg_lasso (0+x = x in IEEE 754).
-    if (method == "ol_sg_lasso" && !enc.is_overlapping
+    if ((method == "ol_sg_lasso" || method == "ol_sg_lasso_leastr") && !enc.is_overlapping
         && opts.params.find("field") == opts.params.end()) {
         fs::path id_field = output_dir / "field.txt";
         if (!fs::exists(id_field)) {
@@ -505,7 +505,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     method, features, responses, alg_table.t(), opts.params, lam, opts.precision);
                 {
                     std::ofstream wo(lam_dir / "weights.txt");
-                    fs::path map_path = (method == "ol_sg_lasso")
+                    fs::path map_path = (method == "ol_sg_lasso" || method == "ol_sg_lasso_leastr")
                         ? generate_expanded_map(output_dir)
                         : (output_dir / "combined.map");
                     std::ifstream mi(map_path);
@@ -536,7 +536,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
                     {
                         std::ofstream wo(fw);
-                        fs::path map_path = (method == "ol_sg_lasso")
+                        fs::path map_path = (method == "ol_sg_lasso" || method == "ol_sg_lasso_leastr")
                             ? generate_expanded_map(output_dir)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
@@ -659,7 +659,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     fs::path wpath = lam_dir / "weights.txt";
                     {
                         std::ofstream wo(wpath);
-                        fs::path map_path = (method == "ol_sg_lasso")
+                        fs::path map_path = (method == "ol_sg_lasso" || method == "ol_sg_lasso_leastr")
                             ? generate_expanded_map(output_dir)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
