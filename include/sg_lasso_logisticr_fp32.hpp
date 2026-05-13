@@ -10,7 +10,7 @@
  * Optionally, this class can perform ridge regression, if the lambda parameter
  * is set to a number greater than zero.
  */
-class SGLassoFP32
+class SGLassoLogisticRFP32
 {
  public:
   /**
@@ -21,7 +21,7 @@ class SGLassoFP32
    * @param lambda Regularization constant for ridge regression.
    * @param intercept Whether or not to include an intercept term.
    */
-//  SGLassoFP32(const arma::mat& features,
+//  SGLassoLogisticRFP32(const arma::mat& features,
 //                   const arma::rowvec& responses,
 //                   const double lambda = 0,
 //                   const bool intercept = true);
@@ -35,14 +35,14 @@ class SGLassoFP32
    * @param lambda Regularization constant for ridge regression.
    * @param intercept Whether or not to include an intercept term.
    */
-  SGLassoFP32(const arma::fmat& features,
+  SGLassoLogisticRFP32(const arma::fmat& features,
                    const arma::frowvec& responses,
                    const arma::mat& weights,
                    double* lambda,
                    std::map<std::string, std::string> slep_opts,
                    const bool intercept = true);
 
-  SGLassoFP32(const arma::fmat& features,
+  SGLassoLogisticRFP32(const arma::fmat& features,
                    const arma::frowvec& responses,
                    const arma::mat& weights,
                    double* lambda,
@@ -56,10 +56,10 @@ class SGLassoFP32
    * called (or make sure the model parameters are set) before calling
    * Predict()!
    */
-  SGLassoFP32() : lambda(), intercept(true) { }
+  SGLassoLogisticRFP32() : lambda(), intercept(true) { }
 
   /**
-   * Train the SGLassoFP32 model on the given data and weights. Careful!
+   * Train the SGLassoLogisticRFP32 model on the given data and weights. Careful!
    * This will completely ignore and overwrite the existing model. This
    * particular implementation does not have an incremental training algorithm.
    * To set the regularization parameter lambda, call Lambda() or set a

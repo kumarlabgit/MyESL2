@@ -1,32 +1,29 @@
 
-#include "ol_sg_lasso_fp32.hpp"
+#include "sg_lasso_logisticr_fp32.hpp"
 #include "sg_lasso_helpers.hpp"
 #include "pipeline_utils.hpp"
 #include "cblas_decl.hpp"
 #include <sstream>
 #include <iomanip>
 #include <cstring>
-#include <chrono>
 
 
-OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
+SGLassoLogisticRFP32::SGLassoLogisticRFP32(const arma::fmat& features,
                                    const arma::frowvec& responses,
                                    const arma::mat& weights,
-                                   const arma::rowvec& field,
                                    double* lambda,
                                    std::map<std::string, std::string> slep_opts,
                                    const bool intercept) :
     lambda(lambda),
     intercept(intercept)
 {
-  Train(features, responses, weights, field, slep_opts, intercept);
+  Train(features, responses, weights, slep_opts, intercept);
 }
 
 
-OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
+SGLassoLogisticRFP32::SGLassoLogisticRFP32(const arma::fmat& features,
                                    const arma::frowvec& responses,
                                    const arma::mat& weights,
-                                   const arma::rowvec& field,
                                    double* lambda,
                                    std::map<std::string, std::string> slep_opts,
                                    const arma::rowvec& xval_idxs,
@@ -35,14 +32,16 @@ OLSGLassoFP32::OLSGLassoFP32(const arma::fmat& features,
     lambda(lambda),
     intercept(intercept)
 {
+  //subset features and responses according to xval_id and xval_idxs
   arma::uvec indices = arma::find(xval_idxs != xval_id);
-  Train(features.rows(indices), responses.elem(indices).t(), weights, field, slep_opts, intercept);
+  Train(features.rows(indices), responses.elem(indices).t(), weights, slep_opts, intercept);
 }
 
 
-void OLSGLassoFP32::writeModelToXMLStream(std::ofstream& XMLFile)
+void SGLassoLogisticRFP32::writeModelToXMLStream(std::ofstream& XMLFile)
 {
   int i_level = 0;
+  //std::string XMLString = "";
   XMLFile << std::string(i_level * 8, ' ') + "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>" + "\n";
   XMLFile << std::string(i_level * 8, ' ') + "<model>" + "\n";
   i_level++;
@@ -51,6 +50,7 @@ void OLSGLassoFP32::writeModelToXMLStream(std::ofstream& XMLFile)
   XMLFile << std::string(i_level * 8, ' ') + "<n_rows>" + std::to_string(this->parameters.n_cols) + "</n_rows>" + "\n";
   XMLFile << std::string(i_level * 8, ' ') + "<n_cols>" + std::to_string(this->parameters.n_rows) + "</n_cols>" + "\n";
   XMLFile << std::string(i_level * 8, ' ') + "<n_elem>" + std::to_string(this->parameters.n_elem) + "</n_elem>" + "\n";
+  //for(int i=0; i<this->parameters.n_cols; i++)
   for(int i=0; i<this->parameters.n_elem; i++)
   {
     std::ostringstream streamObj;
@@ -67,10 +67,23 @@ void OLSGLassoFP32::writeModelToXMLStream(std::ofstream& XMLFile)
 
 }
 
-void OLSGLassoFP32::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
+void SGLassoLogisticRFP32::writeSparseMappedWeightsToStream(std::ofstream& MappedWeightsFile, std::ifstream& FeatureMap)
 {
+  /*
+  int i_level = 0;
+  //std::string XMLString = "";
+  XMLFile << std::string(i_level * 8, ' ') + "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<model>" + "\n";
+  i_level++;
+  XMLFile << std::string(i_level * 8, ' ') + "<parameters>" + "\n";
+  i_level++;
+  XMLFile << std::string(i_level * 8, ' ') + "<n_rows>" + std::to_string(this->parameters.n_cols) + "</n_rows>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<n_cols>" + std::to_string(this->parameters.n_rows) + "</n_cols>" + "\n";
+  XMLFile << std::string(i_level * 8, ' ') + "<n_elem>" + std::to_string(this->parameters.n_elem) + "</n_elem>" + "\n";
+  */
   std::string line;
   std::getline(FeatureMap, line);
+  //for(int i=0; i<this->parameters.n_cols; i++)
   for(int i=0; i<this->parameters.n_elem; i++)
   {
     std::getline(FeatureMap, line);
@@ -92,16 +105,13 @@ void OLSGLassoFP32::writeSparseMappedWeightsToStream(std::ofstream& MappedWeight
 }
 
 
-arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
+arma::frowvec& SGLassoLogisticRFP32::Train(const arma::fmat& A,
                                const arma::frowvec& responses,
                                const arma::mat& weights,
-                               const arma::rowvec& field,
                                std::map<std::string, std::string> slep_opts,
                                const bool intercept)
 {
   this->intercept = intercept;
-  auto train_start = std::chrono::steady_clock::now();
-
   auto trim = [](std::string& s)
   {
      size_t p = s.find_first_not_of(" \t\r\n");
@@ -189,12 +199,6 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
 
   const size_t m = A.n_rows;
   const size_t n = A.n_cols;
-  const size_t F = field.n_cols;  // expanded vector size
-
-  // Build field index (0-based)
-  std::vector<int> field_idx(F);
-  for (size_t j = 0; j < F; ++j)
-      field_idx[j] = static_cast<int>(field(j)) - 1;  // 1-based to 0-based
 
   arma::mat& ind = opts_ind;
 
@@ -222,36 +226,24 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
       ind_flat_base[r * 3 + 2] = ind(r, 2);
   }
 
-  // Log solver dimensions
-  std::cout << "  [ol_sg_lasso] m=" << m << " n=" << n << " F=" << F
-            << " expansion=" << (F - n) << " ("
-            << std::fixed << std::setprecision(1) << (100.0 * (F - n) / n) << "% overlap)\n";
-
-  // ── Virtual-expansion matvec ─────────────────────────────────────────────────
+  // ── Native flat-array implementation ─────────────────────────────────────────
+  // A is column-major (Armadillo default): A(i,j) = A_ptr[j*m + i]
   const float* A_ptr = A.memptr();
   const int M_int = static_cast<int>(m);
   const int N_int = static_cast<int>(n);
 
-  std::vector<float> x_physical(n, 0.0f);
-  std::vector<float> g_physical(n);
-
-  auto matvec = [&](const float* x_exp, float* out) {
-    // Scatter: accumulate expanded coefficients into physical space
-    std::memset(x_physical.data(), 0, n * sizeof(float));
-    for (size_t j = 0; j < F; ++j)
-        x_physical[field_idx[j]] += x_exp[j];
+  // Helper: out = A * x_in  (m×n × n×1 = m×1)
+  auto matvec = [&](const float* x_in, float* out) {
     cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_NO_TRANS,
                 M_int, N_int, 1.0f, A_ptr, M_int,
-                x_physical.data(), 1, 0.0f, out, 1);
+                x_in, 1, 0.0f, out, 1);
   };
 
-  auto matvec_t = [&](const float* b_in, float* out_exp) {
-    // BLAS on physical matrix, then gather into expanded space
+  // Helper: out = A^T * b_in  (n×m × m×1 = n×1)
+  auto matvec_t = [&](const float* b_in, float* out) {
     cblas_sgemv(MYESL_CBLAS_COL_MAJOR, MYESL_CBLAS_TRANS,
                 M_int, N_int, 1.0f, A_ptr, M_int,
-                b_in, 1, 0.0f, g_physical.data(), 1);
-    for (size_t j = 0; j < F; ++j)
-        out_exp[j] = g_physical[field_idx[j]];
+                b_in, 1, 0.0f, out, 1);
   };
 
   // Helper: float dot product (matches Armadillo's float accumulation)
@@ -311,7 +303,7 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
   m1 = (double)sw_pos_sum / (double)sw_total;
   m2 = 1.0 - m1;
 
-  // Lambda initialization — all F-sized
+  // Lambda initialization
   double* lambda_ptr;
   std::vector<float> b_vec(m);
 
@@ -328,14 +320,14 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
 	   b_vec[i] = (y[i] == 1.0f) ? (float)(m2 * sw[i]) : (float)(-m1 * sw[i]);
 	 }
 
-	 // ATb = A^T * b — produces F-sized gathered gradient
-	 std::vector<float> ATb(F);
+	 // ATb = A^T * b
+	 std::vector<float> ATb(n);
 	 matvec_t(b_vec.data(), ATb.data());
 
 	 // temp = abs(ATb), lambda1_max = max(temp)
-	 std::vector<float> temp(F);
+	 std::vector<float> temp(n);
 	 float lambda1_max_f = 0;
-	 for (size_t j = 0; j < F; j++) {
+	 for (size_t j = 0; j < n; j++) {
 	   temp[j] = std::abs(ATb[j]);
 	   if (temp[j] > lambda1_max_f) lambda1_max_f = temp[j];
 	 }
@@ -343,16 +335,16 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
 	 lambda1 = lambda1 * (double)lambda1_max_f;
 
 	 // temp = max(temp - lambda1, 0)
-	 for (size_t j = 0; j < F; j++) {
+	 for (size_t j = 0; j < n; j++) {
 	   temp[j] = std::max(temp[j] - (float)lambda1, 0.0f);
 	 }
 
-	 lambda2_max = computeLambda2Max_flat(temp.data(), F, ind_flat_base.data(), n_groups);
+	 lambda2_max = computeLambda2Max_flat(temp.data(), n, ind_flat_base.data(), n_groups);
 	 lambda2 = lambda2 * lambda2_max;
   }
 
-  // Initial state — F-sized coefficient vectors
-  std::vector<float> x(F, 0.0f);
+  // Initial state
+  std::vector<float> x(n, 0.0f);
   double c = std::log(m1/m2);
   std::vector<float> Ax(m, 0.0f);  // A * x = 0 initially
 
@@ -363,23 +355,31 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
   std::vector<float> weighty(m);
   for (size_t i = 0; i < m; i++) weighty[i] = sw[i] * y[i];
 
-  std::vector<float> xp(F, 0.0f);
+  std::vector<float> xp(n, 0.0f);
   std::vector<float> Axp(m, 0.0f);
-  std::vector<float> xxp(F, 0.0f);
+  std::vector<float> xxp(n, 0.0f);
   double cp = c, ccp = 0;
   double alphap = 0, alpha = 1;
 
-  // Working vectors — F-sized for coefficient space, m-sized for sample space
+  // Working vectors
   double beta, sc, gc, fun_s, fun_x, l_sum, r_sum, tree_norm;
-  std::vector<float> s(F), v(F), As(m), g(F), aa(m), bb(m), prob(m);
+  std::vector<float> s(n), v(n), As(m), g(n), aa(m), bb(m), prob(m);
   std::vector<double> ValueL(opts_maxIter);
   std::vector<double> funVal(opts_maxIter);
 
-  int iterStep = 0;
-  for (iterStep = 0; iterStep < opts_maxIter; iterStep++)
+  {
+    static std::once_flag rss_flag;
+    std::call_once(rss_flag, [&](){
+        std::cout << "  [solver] m=" << m << " n=" << n
+                  << " vectors: 6×n×4=" << (6*n*4/1048576) << "MB, 10×m×4=" << (10*m*4/1048576) << "MB\n";
+        pipeline_utils::log_rss("solver: all vectors allocated (first thread)");
+    });
+  }
+
+  for (int iterStep = 0; iterStep < opts_maxIter; iterStep++)
   {
     beta = (alphap - 1)/alpha;
-    for (size_t i = 0; i < F; i++) s[i] = x[i] + xxp[i] * (float)beta;
+    for (size_t i = 0; i < n; i++) s[i] = x[i] + xxp[i] * (float)beta;
     sc = c + beta * ccp;
 
     // As = Ax + (Ax - Axp) * beta
@@ -414,11 +414,11 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
       gc = (double)acc;
     }
 
-    // g = A^T * b  (F-sized output via matvec_t)
+    // g = A^T * b
     matvec_t(b_vec.data(), g.data());
 
     // Save
-    std::memcpy(xp.data(), x.data(), F * sizeof(float));
+    std::memcpy(xp.data(), x.data(), n * sizeof(float));
     std::memcpy(Axp.data(), Ax.data(), m * sizeof(float));
     cp = c;
 
@@ -427,17 +427,17 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
     {
       // v = s - g/L;  c = sc - gc/L
       float invL = (float)(1.0 / L);
-      for (size_t i = 0; i < F; i++) v[i] = s[i] - g[i] * invL;
+      for (size_t i = 0; i < n; i++) v[i] = s[i] - g[i] * invL;
       c = sc - gc/L;
 
-      // Proximal operator — operates on F-sized vectors
+      // Proximal operator
       update_ind_flat(lambda1/L, lambda2/L);
-      altra_inplace(x.data(), v.data(), F, ind_flat.data(), ind_flat_nodes);
+      altra_inplace(x.data(), v.data(), n, ind_flat.data(), ind_flat_nodes);
 
       // v = x - s (reuse v as difference for r_sum/l_sum)
-      for (size_t i = 0; i < F; i++) v[i] = x[i] - s[i];
+      for (size_t i = 0; i < n; i++) v[i] = x[i] - s[i];
 
-      // Ax = A * x  (F-sized input via matvec)
+      // Ax = A * x
       matvec(x.data(), Ax.data());
 
       // aa = -y % (Ax + c)
@@ -457,10 +457,10 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
       }
 
       // r_sum = (v^T * v + (c - sc)^2) / 2
-      r_sum = ((double)dotf(v.data(), v.data(), F) + std::pow(c - sc, 2)) / 2.0;
+      r_sum = ((double)dotf(v.data(), v.data(), n) + std::pow(c - sc, 2)) / 2.0;
 
       // l_sum = fun_x - fun_s - v^T * g - (c - sc) * gc
-      l_sum = fun_x - fun_s - (double)dotf(v.data(), g.data(), F) - (c - sc) * gc;
+      l_sum = fun_x - fun_s - (double)dotf(v.data(), g.data(), n) - (c - sc) * gc;
 
       if (r_sum <= std::pow(0.1, 20))
       {
@@ -481,13 +481,13 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
     ValueL[iterStep] = L;
 
     // xxp = x - xp;  ccp = c - cp
-    for (size_t i = 0; i < F; i++) xxp[i] = x[i] - xp[i];
+    for (size_t i = 0; i < n; i++) xxp[i] = x[i] - xp[i];
     ccp = c - cp;
 
     funVal[iterStep] = fun_x;
 
     update_ind_flat(lambda1, lambda2);
-    tree_norm = treeNorm_flat(x.data(), F, ind_flat.data(), ind_flat_nodes);
+    tree_norm = treeNorm_flat(x.data(), n, ind_flat.data(), ind_flat_nodes);
 
     funVal[iterStep] = fun_x + tree_norm;
 
@@ -516,38 +516,32 @@ arma::frowvec& OLSGLassoFP32::Train(const arma::fmat& A,
 	if ((iterStep+1) % opts_rStartNum == 0)
 	{
 	  alphap = 0;   alpha = 1;
-	  std::memcpy(xp.data(), x.data(), F * sizeof(float));
+	  std::memcpy(xp.data(), x.data(), n * sizeof(float));
 	  std::memcpy(Axp.data(), Ax.data(), m * sizeof(float));
-	  std::memset(xxp.data(), 0, F * sizeof(float));
+	  std::memset(xxp.data(), 0, n * sizeof(float));
 	  L = L/2;
 	}
   }
 
-  // Log timing
-  auto train_end = std::chrono::steady_clock::now();
-  double train_ms = std::chrono::duration<double, std::milli>(train_end - train_start).count();
-  std::cout << "  [ol_sg_lasso] converged in " << iterStep << " iterations, "
-            << std::fixed << std::setprecision(1) << train_ms << " ms\n";
-
   // Write results back to Armadillo members
-  std::cout << std::defaultfloat << std::setprecision(6) << "Intercept: " << c << std::endl;
+  std::cout << "Intercept: " << c << std::endl;
   this->intercept_value = c;
 
-  parameters.set_size(F);
-  std::memcpy(parameters.memptr(), x.data(), F * sizeof(float));
+  parameters.set_size(n);
+  std::memcpy(parameters.memptr(), x.data(), n * sizeof(float));
 
   this->nz_gene_count = countNonZeroGenes(parameters, weights);
 
   // Return value (kept for API compat; callers use Parameters() instead)
   static thread_local arma::frowvec x_row_ret;
-  x_row_ret = arma::frowvec(x.data(), F);
+  x_row_ret = arma::frowvec(x.data(), n);
   return x_row_ret;
 }
 
 
 
 
-const arma::fcolvec OLSGLassoFP32::altra(const arma::fcolvec& v_in,
+const arma::fcolvec SGLassoLogisticRFP32::altra(const arma::fcolvec& v_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
@@ -618,7 +612,7 @@ const arma::fcolvec OLSGLassoFP32::altra(const arma::fcolvec& v_in,
 }
 
 
-const double OLSGLassoFP32::treeNorm(const arma::frowvec& x_in,
+const double SGLassoLogisticRFP32::treeNorm(const arma::frowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
@@ -676,7 +670,7 @@ const double OLSGLassoFP32::treeNorm(const arma::frowvec& x_in,
 }
 
 
-const double OLSGLassoFP32::computeLambda2Max(const arma::frowvec& x_in,
+const double SGLassoLogisticRFP32::computeLambda2Max(const arma::frowvec& x_in,
                             const int n,
                             const arma::mat& ind_mat,
                             const int nodes) const
@@ -713,7 +707,7 @@ const double OLSGLassoFP32::computeLambda2Max(const arma::frowvec& x_in,
 }
 
 
-void OLSGLassoFP32::altra_inplace(float* x, const float* v, int n,
+void SGLassoLogisticRFP32::altra_inplace(float* x, const float* v, int n,
                                 const double* ind, int nodes) const
 {
     int i, j;
@@ -760,7 +754,7 @@ void OLSGLassoFP32::altra_inplace(float* x, const float* v, int n,
 }
 
 
-double OLSGLassoFP32::treeNorm_flat(const float* x, int n,
+double SGLassoLogisticRFP32::treeNorm_flat(const float* x, int n,
                                   const double* ind, int nodes) const
 {
     double tree_norm = 0;
@@ -796,7 +790,7 @@ double OLSGLassoFP32::treeNorm_flat(const float* x, int n,
 }
 
 
-double OLSGLassoFP32::computeLambda2Max_flat(const float* x, int n,
+double SGLassoLogisticRFP32::computeLambda2Max_flat(const float* x, int n,
                                            const double* ind, int nodes) const
 {
     int i, j;

@@ -2,11 +2,11 @@
 #include <armadillo>
 #include <stdexcept>
 
-class OLSGLassoFP64
+class OLSGLassoLogisticRvFP64
 {
  public:
 
-  OLSGLassoFP64(const arma::mat& features,
+  OLSGLassoLogisticRvFP64(const arma::mat& features,
                  const arma::rowvec& responses,
                  const arma::mat& weights,
                  const arma::rowvec& field,
@@ -14,7 +14,7 @@ class OLSGLassoFP64
                  std::map<std::string, std::string> slep_opts,
                  const bool intercept = true);
 
-  OLSGLassoFP64(const arma::mat& features,
+  OLSGLassoLogisticRvFP64(const arma::mat& features,
                  const arma::rowvec& responses,
                  const arma::mat& weights,
                  const arma::rowvec& field,
@@ -24,7 +24,7 @@ class OLSGLassoFP64
                  int xval_id,
                  const bool intercept = true);
 
-  OLSGLassoFP64() : lambda(), intercept(true) { }
+  OLSGLassoLogisticRvFP64() : lambda(), intercept(true) { }
 
   arma::rowvec& Train(const arma::mat& features,
                const arma::rowvec& responses,

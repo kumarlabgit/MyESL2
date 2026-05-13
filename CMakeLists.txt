@@ -20,16 +20,16 @@ set(SOURCES
     src/fasta_parser.cpp
     src/encoder.cpp
     src/regression.cpp
-    src/sg_lasso_fp32.cpp
-    src/sg_lasso_fp64.cpp
+    src/sg_lasso_logisticr_fp32.cpp
+    src/sg_lasso_logisticr_fp64.cpp
     src/sg_lasso_leastr_fp32.cpp
     src/sg_lasso_leastr_fp64.cpp
     src/overlapping_sg_lasso_leastr_fp32.cpp
     src/overlapping_sg_lasso_leastr_fp64.cpp
     src/overlapping_sg_lasso_logisticr_fp32.cpp
     src/overlapping_sg_lasso_logisticr_fp64.cpp
-    src/ol_sg_lasso_fp32.cpp
-    src/ol_sg_lasso_fp64.cpp
+    src/ol_sg_lasso_logisticr_fp32.cpp
+    src/ol_sg_lasso_logisticr_fp64.cpp
     src/ol_sg_lasso_leastr_fp32.cpp
     src/ol_sg_lasso_leastr_fp64.cpp
     src/gl_logisticr_fp32.cpp

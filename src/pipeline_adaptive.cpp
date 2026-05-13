@@ -118,7 +118,7 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
 {
     process_log::Section plog(enc_opts.output_dir / "process_log.txt", "adaptive_train");
     plog.param("max_mem_bytes",    enc_opts.max_mem)
-        .param("method",           train_opts.method.empty() ? std::string("sg_lasso") : train_opts.method)
+        .param("method",           train_opts.method.empty() ? std::string("sg_lasso_logisticr") : train_opts.method)
         .param("adaptive_l1_spec", train_opts.adaptive_l1_spec)
         .param("adaptive_l2_spec", train_opts.adaptive_l2_spec);
 
@@ -246,7 +246,7 @@ void adaptive_train(const EncodeOptions& enc_opts, const TrainOptions& train_opt
             // Train with 3x3 exploration grid
             TrainOptions train_combo;
             train_combo.output_dir           = combo_dir;
-            train_combo.method               = train_opts.method.empty() ? "sg_lasso" : train_opts.method;
+            train_combo.method               = train_opts.method.empty() ? "sg_lasso_logisticr" : train_opts.method;
             train_combo.precision            = train_opts.precision;
             train_combo.params               = train_opts.params;
             train_combo.lambda_grid_specs[0] = train_opts.adaptive_l1_spec;

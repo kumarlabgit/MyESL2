@@ -164,10 +164,13 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 
 | Method | Description |
 |--------|-------------|
-| `sg_lasso` | Sparse Group Lasso (float precision) |
-| `sg_lasso_leastr` | Sparse Group Lasso with least-squares refinement (double precision) |
-| `olsg_lasso_leastr` | Overlapping SG Lasso, least-squares (requires `--param field=<csv>`) |
-| `olsg_lasso_logisticr` | Overlapping SG Lasso, logistic regression (requires `--param field=<csv>`) |
+| `sg_lasso_logisticr` | Sparse Group Lasso, logistic regression |
+| `sg_lasso_leastr` | Sparse Group Lasso, least-squares |
+| `olsg_lasso_logisticr` | Overlapping SG Lasso (dual-variable), logistic regression (requires `--param field=<csv>`) |
+| `olsg_lasso_leastr` | Overlapping SG Lasso (dual-variable), least-squares (requires `--param field=<csv>`) |
+| `ol_sg_lasso_logisticr` | Overlapping SG Lasso (virtual-expansion), logistic regression |
+| `ol_sg_lasso_leastr` | Overlapping SG Lasso (virtual-expansion), least-squares |
+| `gl_logisticr` | Group Lasso, logistic regression |
 
 **Common `--param` options:**
 
@@ -319,7 +322,7 @@ myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 | `--gen-clade-list <lower,upper>` | Auto-generate clade list by leaf count range, e.g., `3,10` (tree mode only) |
 | `--class-bal <mode>` | Balancing strategy: `phylo` (default, tree mode only), `up`, `down`, or `weighted` |
 | `--datatype <type>` | Data type (default: `universal`) |
-| `--method <name>` | Regression method (default: `sg_lasso`) |
+| `--method <name>` | Regression method (default: `sg_lasso_logisticr`) |
 | `--min-groups N` | Minimum number of genes required in the model |
 | `--grid-rmse-cutoff <value>` | Maximum RMSE threshold for lambda filtering (default: 100.0) |
 | `--grid-acc-cutoff <value>` | Minimum accuracy threshold for lambda filtering (default: 0.0) |
@@ -354,7 +357,7 @@ myesl2 aim <list.txt> <hypothesis.txt> <output_dir> [options]
 | `--aim-window N` | Top-N features considered per iteration for dropout (default: 100) |
 
 All `train` options are accepted, including `--use-logspace` and the group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`). Lambda values must be in `(0,1)`. Defaults applied if not specified:
-- Method: `sg_lasso`
+- Method: `sg_lasso_logisticr`
 - Lambdas: `--lambda-grid 0.1,0.9,0.1 0.0001,0.0002,0.0001`
 
 **Outputs:**
@@ -393,7 +396,7 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 
 | Flag | Description |
 |------|-------------|
-| `--alignments-list <file>` | List file specifying overlapping groups of alignments — one group per line, comma-separated paths relative to `alignments_dir`. Without this flag, `alignments_dir` is enumerated and each file becomes its own group. Any group with more than one entry requires `--method olsg_lasso_logisticr` or `olsg_lasso_leastr`; otherwise the run errors out. The resolved field array is written to `<output_dir>/<base>_field.csv`. |
+| `--alignments-list <file>` | List file specifying overlapping groups of alignments — one group per line, comma-separated paths relative to `alignments_dir`. Without this flag, `alignments_dir` is enumerated and each file becomes its own group. Any group with more than one entry requires `--method olsg_lasso_logisticr`, `olsg_lasso_leastr`, `ol_sg_lasso_logisticr`, or `ol_sg_lasso_leastr`; otherwise the run errors out. The resolved field array is written to `<output_dir>/<base>_field.csv`. |
 
 **Species contrast source (exactly one required):**
 
@@ -440,7 +443,7 @@ myesl2 psc <alignments_dir> <output_dir> [options]
 
 | Flag | Description |
 |------|-------------|
-| `--method <name>` | Regression method (default: `sg_lasso`) |
+| `--method <name>` | Regression method (default: `sg_lasso_logisticr`) |
 | `--precision fp32\|fp64` | Arithmetic precision (default: fp32) |
 | `--maxiter N` | Max solver iterations (default: 100) |
 | `--threads N` | Worker threads |
@@ -498,7 +501,7 @@ myesl2 psc alignments/ output/ \
     --species-groups species_pairs.txt \
     --output-base-name analysis \
     --use-logspace --num-log-points 10 \
-    --method sg_lasso
+    --method sg_lasso_logisticr
 ```
 
 ---
@@ -567,13 +570,13 @@ species_B  -1.0        -0.75          0.10        -0.40     0.05
 ### Basic training run
 ```bash
 myesl2 train Fungi_data/aln.txt Fungi_data/A_B_Hyp.txt results/ \
-    --method sg_lasso --lambda 0.1 0.1
+    --method sg_lasso_logisticr --lambda 0.1 0.1
 ```
 
 ### Lambda grid search with cross-validation
 ```bash
 myesl2 train Fungi_data/aln.txt Fungi_data/A_B_Hyp.txt results/ \
-    --method sg_lasso_leastr \
+    --method sg_lasso_logisticr_leastr \
     --lambda-grid 0.1,0.9,0.1 0.0001,0.001,0.0001 \
     --nfolds 5 \
     --threads 8
@@ -595,7 +598,7 @@ myesl2 evaluate results/lambda_0/weights.txt Fungi_data/aln.txt predictions.txt 
 ```bash
 myesl2 train numeric_files.txt labels.txt results/ \
     --datatype numeric \
-    --method sg_lasso \
+    --method sg_lasso_logisticr \
     --lambda 0.05 0.1
 ```
 
@@ -603,7 +606,7 @@ myesl2 train numeric_files.txt labels.txt results/ \
 ```bash
 myesl2 drphylo Fungi_data/aln.txt Fungi_data/tree.nwk drphylo_out/ \
     --gen-clade-list 3,15 \
-    --method sg_lasso \
+    --method sg_lasso_logisticr \
     --lambda-grid 0.1,0.5,0.1 0.0001,0.001,0.0001
 ```
 

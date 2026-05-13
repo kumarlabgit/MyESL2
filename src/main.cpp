@@ -172,7 +172,7 @@ void print_usage(const char* prog_name) {
         "    --alignments-list <file>      list file specifying overlapping groups of alignments\n"
         "                                  (one group per line, comma-separated paths relative to\n"
         "                                  alignments_dir; requires --method olsg_lasso_logisticr,\n"
-        "                                  olsg_lasso_leastr, ol_sg_lasso, or ol_sg_lasso_leastr when any group has >1 entry)\n\n"
+        "                                  olsg_lasso_leastr, ol_sg_lasso_logisticr, or ol_sg_lasso_leastr when any group has >1 entry)\n\n"
         "  Species contrast source (exactly one required):\n"
         "    --species-groups <file>       species contrast pairs file\n"
         "    --response-file <file>        single response matrix\n"
@@ -201,7 +201,7 @@ void print_usage(const char* prog_name) {
         "    --outgroup-species <name>     outgroup for ancestral filtering\n"
         "    --min-pairs N                 (default: 2)\n\n"
         "  Solver:\n"
-        "    --method <name>               (default: sg_lasso)\n"
+        "    --method <name>               (default: sg_lasso_logisticr)\n"
         "    --precision fp32|fp64         (default: fp32)\n"
         "    --maxiter N                   (default: 100)\n"
         "    --threads N\n"
@@ -335,6 +335,18 @@ int main(int argc, char* argv[]) {
                 for (auto& c : gpt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
                     throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
+            }
+
+            // Resolve deprecated method aliases
+            if (!train_opts.method.empty()) {
+                bool was_alias = false;
+                auto resolved = regression::resolve_method_alias(train_opts.method, &was_alias);
+                if (was_alias) {
+                    std::cerr << "Note: --method " << train_opts.method
+                              << " is deprecated, use " << resolved
+                              << " (may stop working in a future release)\n";
+                    train_opts.method = resolved;
+                }
             }
 
             if (!train_opts.lambda_file_path.empty() && train_opts.lambda_explicitly_set)
@@ -489,7 +501,7 @@ int main(int argc, char* argv[]) {
             enc_opts_base.class_bal = "weighted";
 
             pipeline::TrainOptions train_opts_base;
-            train_opts_base.method     = "sg_lasso";
+            train_opts_base.method     = "sg_lasso_logisticr";
             train_opts_base.min_groups = 3;  // DrPhylo default
 
             double grid_rmse_cutoff = 100.0;
@@ -533,6 +545,17 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--final-gp-value"     && i+1<argc) train_opts_base.final_gp_value   = std::stod(argv[++i]);
                 else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
                 else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
+            }
+            // Resolve deprecated method aliases
+            {
+                bool was_alias = false;
+                auto resolved = regression::resolve_method_alias(train_opts_base.method, &was_alias);
+                if (was_alias) {
+                    std::cerr << "Note: --method " << train_opts_base.method
+                              << " is deprecated, use " << resolved
+                              << " (may stop working in a future release)\n";
+                    train_opts_base.method = resolved;
+                }
             }
             {
                 std::string gpt = train_opts_base.group_penalty_type;
@@ -672,7 +695,7 @@ int main(int argc, char* argv[]) {
             pipeline::EncodeOptions enc_opts_base;
 
             pipeline::TrainOptions train_opts_base;
-            train_opts_base.method = "sg_lasso";
+            train_opts_base.method = "sg_lasso_logisticr";
             bool has_lambda = false, has_method = false;
 
             for (int i = 5; i < argc; ++i) {
@@ -708,6 +731,17 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
                 else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
             }
+            // Resolve deprecated method aliases
+            {
+                bool was_alias = false;
+                auto resolved = regression::resolve_method_alias(train_opts_base.method, &was_alias);
+                if (was_alias) {
+                    std::cerr << "Note: --method " << train_opts_base.method
+                              << " is deprecated, use " << resolved
+                              << " (may stop working in a future release)\n";
+                    train_opts_base.method = resolved;
+                }
+            }
             {
                 std::string gpt = train_opts_base.group_penalty_type;
                 for (auto& c : gpt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -719,7 +753,7 @@ int main(int argc, char* argv[]) {
             if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
                 enc_opts_base.disable_mc = true;
             if (!has_lambda) { train_opts_base.lambda_grid_specs[0]="0.1,0.9,0.1"; train_opts_base.lambda_grid_specs[1]="0.0001,0.0002,0.0001"; train_opts_base.lambda_grid_set=true; }
-            if (!has_method) train_opts_base.method = "sg_lasso";
+            if (!has_method) train_opts_base.method = "sg_lasso_logisticr";
 
             // Lambda count for peak memory estimation
             if (train_opts_base.lambda_grid_set) {
@@ -1103,6 +1137,18 @@ int main(int argc, char* argv[]) {
 
             if (psc_opts.output_base_name.empty())
                 throw std::runtime_error("PSC requires --output-base-name");
+
+            // Resolve deprecated method aliases
+            {
+                bool was_alias = false;
+                auto resolved = regression::resolve_method_alias(psc_opts.method, &was_alias);
+                if (was_alias) {
+                    std::cerr << "Note: --method " << psc_opts.method
+                              << " is deprecated, use " << resolved
+                              << " (may stop working in a future release)\n";
+                    psc_opts.method = resolved;
+                }
+            }
 
             pipeline::psc::run_psc(psc_opts);
 

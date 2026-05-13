@@ -22,14 +22,26 @@ public:
     virtual double getInterceptValue() const = 0;
 };
 
+// Resolve deprecated method aliases.  Returns the canonical name,
+// or the input unchanged if it is not a known alias.
+// If an alias was resolved, sets *was_alias = true (when non-null).
+std::string resolve_method_alias(const std::string& method,
+                                 bool* was_alias = nullptr);
+
 // Factory: creates the appropriate RegressionAnalysis subclass for the given method.
 //
 // Supported methods:
-//   "sg_lasso"             - SGLasso           (float arithmetic)
-//   "sg_lasso_leastr"      - SGLassoLeastR     (double, least-squares)
-//   "olsg_lasso_leastr"    - OLSGLassoLeastR   (double, overlapping groups, least-squares)
-//   "olsg_lasso_logisticr" - OLSGLassoLogisticR(double, overlapping groups, logistic)
+//   "sg_lasso_logisticr"   - SGLassoLogisticR  (logistic, float/double arithmetic)
+//   "sg_lasso_leastr"      - SGLassoLeastR     (least-squares, float/double)
+//   "olsg_lasso_logisticr" - OLSGLassoLogisticR(dual-variable overlapping, logistic)
+//   "olsg_lasso_leastr"    - OLSGLassoLeastR   (dual-variable overlapping, least-squares)
+//   "ol_sg_lasso_logisticr"- OLSGLassoLogisticRv(virtual-expansion overlapping, logistic)
+//   "ol_sg_lasso_leastr"   - OLSGLassoLeastRv  (virtual-expansion overlapping, least-squares)
 //   "gl_logisticr"         - GLLogisticR       (group lasso, logistic)
+//
+// Deprecated aliases (auto-resolved with warning):
+//   "sg_lasso"    -> "sg_lasso_logisticr"
+//   "ol_sg_lasso" -> "ol_sg_lasso_logisticr"
 //
 // features:  rows=sequences, cols=encoded positions
 // responses: one value per sequence

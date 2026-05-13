@@ -125,7 +125,7 @@ struct PscOptions {
     size_t min_pairs = 2;
 
     // Solver
-    std::string method = "sg_lasso";
+    std::string method = "sg_lasso_logisticr";
     std::string precision_str = "fp32";
     int maxiter = 100;
     unsigned int threads = 0;

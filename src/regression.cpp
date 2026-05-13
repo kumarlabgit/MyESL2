@@ -5,22 +5,39 @@
 // These headers have no include guards, so they are included only here.
 #include <map>
 #include <string>
-#include "sg_lasso_fp32.hpp"
-#include "sg_lasso_fp64.hpp"
+#include "sg_lasso_logisticr_fp32.hpp"
+#include "sg_lasso_logisticr_fp64.hpp"
 #include "sg_lasso_leastr_fp32.hpp"
 #include "sg_lasso_leastr_fp64.hpp"
 #include "overlapping_sg_lasso_leastr_fp32.hpp"
 #include "overlapping_sg_lasso_leastr_fp64.hpp"
 #include "overlapping_sg_lasso_logisticr_fp32.hpp"
 #include "overlapping_sg_lasso_logisticr_fp64.hpp"
-#include "ol_sg_lasso_fp32.hpp"
-#include "ol_sg_lasso_fp64.hpp"
+#include "ol_sg_lasso_logisticr_fp32.hpp"
+#include "ol_sg_lasso_logisticr_fp64.hpp"
 #include "ol_sg_lasso_leastr_fp32.hpp"
 #include "ol_sg_lasso_leastr_fp64.hpp"
 #include "gl_logisticr_fp32.hpp"
 #include "gl_logisticr_fp64.hpp"
 
 namespace regression {
+
+// ---- Method alias resolution ------------------------------------------------
+
+std::string resolve_method_alias(const std::string& method, bool* was_alias) {
+    static const std::pair<const char*, const char*> aliases[] = {
+        {"sg_lasso",    "sg_lasso_logisticr"},
+        {"ol_sg_lasso", "ol_sg_lasso_logisticr"},
+    };
+    for (auto& [old_name, new_name] : aliases) {
+        if (method == old_name) {
+            if (was_alias) *was_alias = true;
+            return new_name;
+        }
+    }
+    if (was_alias) *was_alias = false;
+    return method;
+}
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -52,24 +69,24 @@ static arma::rowvec load_field(const std::map<std::string, std::string>& params)
     return field;
 }
 
-// ---- SGLassoFP32 wrapper ----------------------------------------------------
+// ---- SGLassoLogisticRFP32 wrapper ----------------------------------------------------
 
-class SGLassoFP32Wrapper : public RegressionAnalysis {
+class SGLassoLogisticRFP32Wrapper : public RegressionAnalysis {
     std::array<double, 2>       lambda_;
-    std::unique_ptr<SGLassoFP32> model_;
+    std::unique_ptr<SGLassoLogisticRFP32> model_;
 public:
-    SGLassoFP32Wrapper(const arma::fmat&                          features,
+    SGLassoLogisticRFP32Wrapper(const arma::fmat&                          features,
                        const arma::frowvec&                       responses,
                        const arma::mat&                           alg_table,
                        const std::map<std::string, std::string>&  params,
                        const std::array<double, 2>&               lambda)
         : lambda_(lambda),
-          model_(std::make_unique<SGLassoFP32>(
+          model_(std::make_unique<SGLassoLogisticRFP32>(
               features, responses, alg_table,
               lambda_.data(), slep_opts_from(params), intercept_from(params)))
     {}
 
-    SGLassoFP32Wrapper(const arma::fmat&                          features,
+    SGLassoLogisticRFP32Wrapper(const arma::fmat&                          features,
                        const arma::frowvec&                       responses,
                        const arma::mat&                           alg_table,
                        const std::map<std::string, std::string>&  params,
@@ -77,7 +94,7 @@ public:
                        const arma::rowvec&                        xval_idxs,
                        int                                        xval_id)
         : lambda_(lambda),
-          model_(std::make_unique<SGLassoFP32>(
+          model_(std::make_unique<SGLassoLogisticRFP32>(
               features, responses, alg_table,
               lambda_.data(), slep_opts_from(params), xval_idxs, xval_id,
               intercept_from(params)))
@@ -97,26 +114,26 @@ public:
     }
 };
 
-// ---- SGLassoFP64 wrapper ----------------------------------------------------
+// ---- SGLassoLogisticRFP64 wrapper ----------------------------------------------------
 
-class SGLassoFP64Wrapper : public RegressionAnalysis {
+class SGLassoLogisticRFP64Wrapper : public RegressionAnalysis {
     std::array<double, 2>       lambda_;
-    std::unique_ptr<SGLassoFP64> model_;
+    std::unique_ptr<SGLassoLogisticRFP64> model_;
 public:
-    SGLassoFP64Wrapper(const arma::fmat&                          features,
+    SGLassoLogisticRFP64Wrapper(const arma::fmat&                          features,
                        const arma::frowvec&                       responses,
                        const arma::mat&                           alg_table,
                        const std::map<std::string, std::string>&  params,
                        const std::array<double, 2>&               lambda)
         : lambda_(lambda),
-          model_(std::make_unique<SGLassoFP64>(
+          model_(std::make_unique<SGLassoLogisticRFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table,
               lambda_.data(), slep_opts_from(params), intercept_from(params)))
     {}
 
-    SGLassoFP64Wrapper(const arma::fmat&                          features,
+    SGLassoLogisticRFP64Wrapper(const arma::fmat&                          features,
                        const arma::frowvec&                       responses,
                        const arma::mat&                           alg_table,
                        const std::map<std::string, std::string>&  params,
@@ -124,7 +141,7 @@ public:
                        const arma::rowvec&                        xval_idxs,
                        int                                        xval_id)
         : lambda_(lambda),
-          model_(std::make_unique<SGLassoFP64>(
+          model_(std::make_unique<SGLassoLogisticRFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table,
@@ -432,26 +449,26 @@ public:
     }
 };
 
-// ---- OLSGLassoFP32 wrapper (virtual-expansion overlapping) ------------------
+// ---- OLSGLassoLogisticRvFP32 wrapper (virtual-expansion overlapping) ------------------
 
-class OLSGLassoFP32Wrapper : public RegressionAnalysis {
+class OLSGLassoLogisticRvFP32Wrapper : public RegressionAnalysis {
     std::array<double, 2>          lambda_;
-    std::unique_ptr<OLSGLassoFP32> model_;
+    std::unique_ptr<OLSGLassoLogisticRvFP32> model_;
 public:
-    OLSGLassoFP32Wrapper(const arma::fmat&                          features,
+    OLSGLassoLogisticRvFP32Wrapper(const arma::fmat&                          features,
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
                           const std::array<double, 2>&               lambda)
         : lambda_(lambda),
-          model_(std::make_unique<OLSGLassoFP32>(
+          model_(std::make_unique<OLSGLassoLogisticRvFP32>(
               features, responses,
               alg_table, load_field(params),
               lambda_.data(), slep_opts_from(params),
               intercept_from(params)))
     {}
 
-    OLSGLassoFP32Wrapper(const arma::fmat&                          features,
+    OLSGLassoLogisticRvFP32Wrapper(const arma::fmat&                          features,
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
@@ -459,7 +476,7 @@ public:
                           const arma::rowvec&                        xval_idxs,
                           int                                        xval_id)
         : lambda_(lambda),
-          model_(std::make_unique<OLSGLassoFP32>(
+          model_(std::make_unique<OLSGLassoLogisticRvFP32>(
               features, responses,
               alg_table, load_field(params),
               lambda_.data(), slep_opts_from(params), xval_idxs, xval_id,
@@ -480,19 +497,19 @@ public:
     }
 };
 
-// ---- OLSGLassoFP64 wrapper (virtual-expansion overlapping) ------------------
+// ---- OLSGLassoLogisticRvFP64 wrapper (virtual-expansion overlapping) ------------------
 
-class OLSGLassoFP64Wrapper : public RegressionAnalysis {
+class OLSGLassoLogisticRvFP64Wrapper : public RegressionAnalysis {
     std::array<double, 2>          lambda_;
-    std::unique_ptr<OLSGLassoFP64> model_;
+    std::unique_ptr<OLSGLassoLogisticRvFP64> model_;
 public:
-    OLSGLassoFP64Wrapper(const arma::fmat&                          features,
+    OLSGLassoLogisticRvFP64Wrapper(const arma::fmat&                          features,
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
                           const std::array<double, 2>&               lambda)
         : lambda_(lambda),
-          model_(std::make_unique<OLSGLassoFP64>(
+          model_(std::make_unique<OLSGLassoLogisticRvFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table, load_field(params),
@@ -500,7 +517,7 @@ public:
               intercept_from(params)))
     {}
 
-    OLSGLassoFP64Wrapper(const arma::fmat&                          features,
+    OLSGLassoLogisticRvFP64Wrapper(const arma::fmat&                          features,
                           const arma::frowvec&                       responses,
                           const arma::mat&                           alg_table,
                           const std::map<std::string, std::string>&  params,
@@ -508,7 +525,7 @@ public:
                           const arma::rowvec&                        xval_idxs,
                           int                                        xval_id)
         : lambda_(lambda),
-          model_(std::make_unique<OLSGLassoFP64>(
+          model_(std::make_unique<OLSGLassoLogisticRvFP64>(
               arma::conv_to<arma::mat>::from(features),
               arma::conv_to<arma::rowvec>::from(responses),
               alg_table, load_field(params),
@@ -733,49 +750,51 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysis(
     const std::array<double, 2>&              lambda,
     Precision                                 precision)
 {
-    if (method == "sg_lasso") {
+    const std::string m = resolve_method_alias(method);
+
+    if (m == "sg_lasso_logisticr") {
         if (precision == Precision::FP64)
-            return std::make_unique<SGLassoFP64Wrapper>(
+            return std::make_unique<SGLassoLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
-        return std::make_unique<SGLassoFP32Wrapper>(
+        return std::make_unique<SGLassoLogisticRFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "sg_lasso_leastr") {
+    if (m == "sg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<SGLassoLeastRFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
         return std::make_unique<SGLassoLeastRFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "olsg_lasso_leastr") {
+    if (m == "olsg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLeastRFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
         return std::make_unique<OLSGLassoLeastRFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "olsg_lasso_logisticr") {
+    if (m == "olsg_lasso_logisticr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
         return std::make_unique<OLSGLassoLogisticRFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "ol_sg_lasso") {
+    if (m == "ol_sg_lasso_logisticr") {
         if (precision == Precision::FP64)
-            return std::make_unique<OLSGLassoFP64Wrapper>(
+            return std::make_unique<OLSGLassoLogisticRvFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
-        return std::make_unique<OLSGLassoFP32Wrapper>(
+        return std::make_unique<OLSGLassoLogisticRvFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "ol_sg_lasso_leastr") {
+    if (m == "ol_sg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLeastRvFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
         return std::make_unique<OLSGLassoLeastRvFP32Wrapper>(
             features, responses, alg_table, params, lambda);
     }
-    if (method == "gl_logisticr") {
+    if (m == "gl_logisticr") {
         if (precision == Precision::FP64)
             return std::make_unique<GLLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda);
@@ -784,7 +803,7 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysis(
     }
     throw std::runtime_error(
         "Unknown regression method: '" + method +
-        "'. Valid: sg_lasso, sg_lasso_leastr, olsg_lasso_leastr, olsg_lasso_logisticr, ol_sg_lasso, ol_sg_lasso_leastr, gl_logisticr");
+        "'. Valid: sg_lasso_logisticr, sg_lasso_leastr, olsg_lasso_logisticr, olsg_lasso_leastr, ol_sg_lasso_logisticr, ol_sg_lasso_leastr, gl_logisticr");
 }
 
 std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
@@ -798,49 +817,51 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
     int                                       xval_id,
     Precision                                 precision)
 {
-    if (method == "sg_lasso") {
+    const std::string m = resolve_method_alias(method);
+
+    if (m == "sg_lasso_logisticr") {
         if (precision == Precision::FP64)
-            return std::make_unique<SGLassoFP64Wrapper>(
+            return std::make_unique<SGLassoLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
-        return std::make_unique<SGLassoFP32Wrapper>(
+        return std::make_unique<SGLassoLogisticRFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "sg_lasso_leastr") {
+    if (m == "sg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<SGLassoLeastRFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
         return std::make_unique<SGLassoLeastRFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "olsg_lasso_leastr") {
+    if (m == "olsg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLeastRFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
         return std::make_unique<OLSGLassoLeastRFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "olsg_lasso_logisticr") {
+    if (m == "olsg_lasso_logisticr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
         return std::make_unique<OLSGLassoLogisticRFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "ol_sg_lasso") {
+    if (m == "ol_sg_lasso_logisticr") {
         if (precision == Precision::FP64)
-            return std::make_unique<OLSGLassoFP64Wrapper>(
+            return std::make_unique<OLSGLassoLogisticRvFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
-        return std::make_unique<OLSGLassoFP32Wrapper>(
+        return std::make_unique<OLSGLassoLogisticRvFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "ol_sg_lasso_leastr") {
+    if (m == "ol_sg_lasso_leastr") {
         if (precision == Precision::FP64)
             return std::make_unique<OLSGLassoLeastRvFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
         return std::make_unique<OLSGLassoLeastRvFP32Wrapper>(
             features, responses, alg_table, params, lambda, xval_idxs, xval_id);
     }
-    if (method == "gl_logisticr") {
+    if (m == "gl_logisticr") {
         if (precision == Precision::FP64)
             return std::make_unique<GLLogisticRFP64Wrapper>(
                 features, responses, alg_table, params, lambda, xval_idxs, xval_id);
@@ -849,7 +870,7 @@ std::unique_ptr<RegressionAnalysis> createRegressionAnalysisXVal(
     }
     throw std::runtime_error(
         "Unknown regression method: '" + method +
-        "'. Valid: sg_lasso, sg_lasso_leastr, olsg_lasso_leastr, olsg_lasso_logisticr, ol_sg_lasso, ol_sg_lasso_leastr, gl_logisticr");
+        "'. Valid: sg_lasso_logisticr, sg_lasso_leastr, olsg_lasso_logisticr, olsg_lasso_leastr, ol_sg_lasso_logisticr, ol_sg_lasso_leastr, gl_logisticr");
 }
 
 } // namespace regression
