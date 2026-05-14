@@ -121,6 +121,27 @@ jobs:
               cp "$(realpath "$GFORT")" "$stage/libgfortran.so.5"
             fi
           fi
+          # ── libquadmath.so.0 defensive fallback (Linux) ──
+          # If any bundled lib NEEDED libquadmath but it isn't in stage, fall
+          # back to the system gcc. No-op on current Ubuntu (libgfortran
+          # absorbs libquadmath) but auto-handles a future toolchain split
+          # where libquadmath becomes a separate NEEDED entry again. Darwin
+          # is handled above in the gfortran fallback.
+          if [[ "$(uname -s)" == "Linux" ]] && ! ls "$stage"/libquadmath* 1>/dev/null 2>&1; then
+            NEEDS_QUAD=0
+            for f in "$stage"/libgfortran* "$stage"/libopenblas*; do
+              [ -f "$f" ] || continue
+              if objdump -p "$f" 2>/dev/null | grep -q 'NEEDED.*libquadmath'; then
+                NEEDS_QUAD=1
+                break
+              fi
+            done
+            if [ "$NEEDS_QUAD" = "1" ]; then
+              QUAD=$(gcc --print-file-name=libquadmath.so.0 2>/dev/null)
+              [ -f "$QUAD" ] || { echo "ERROR: libquadmath.so.0 needed by bundled libs but not findable" >&2; exit 1; }
+              cp "$(realpath "$QUAD")" "$stage/libquadmath.so.0"
+            fi
+          fi
           mkdir -p artifact
           tar -czf "artifact/${{ matrix.artifact }}.tar.gz" -C "$stage" .
 
@@ -216,6 +237,16 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
 
+          # ── libquadmath.so.0 from the container's GCC ──
+          # libgfortran on manylinux2014 has a NEEDED entry for libquadmath
+          # (the symbols get absorbed on modern Ubuntu but not here). Bundle
+          # it next to libgfortran so the runtime loader resolves it via
+          # $ORIGIN on deploy hosts that don't ship libquadmath in a default
+          # library path (e.g. RHEL 7 minimal, some SLURM worker nodes).
+          QUAD=$(gcc --print-file-name=libquadmath.so.0)
+          [ -f "$QUAD" ] || { echo "ERROR: libquadmath.so.0 not found in manylinux container" >&2; exit 1; }
+          cp "$(realpath "$QUAD")" build/bin/libquadmath.so.0
+
           # ── Regression test ──
           ./build/bin/myesl2 drphylo \
             Fungi_data/aln_200_linux.txt \
@@ -227,7 +258,7 @@ jobs:
           bash test/compare_golden.sh ci_output test/golden
 
           # ── Guardrail: fail if anything pulls in glibc > 2.17 ──
-          MAX=$(objdump -T build/bin/myesl2 build/bin/libopenblas.so.0 build/bin/libgfortran.so.5 \
+          MAX=$(objdump -T build/bin/myesl2 build/bin/libopenblas.so.0 build/bin/libgfortran.so.5 build/bin/libquadmath.so.0 \
                 | grep -oE 'GLIBC_[0-9.]+' | sort -V -u | tail -1)
           echo "Max GLIBC required across binary + bundled libs: $MAX"
           HIGHEST=$(printf 'GLIBC_2.17\n%s\n' "$MAX" | sort -V | tail -1)
@@ -246,6 +277,7 @@ jobs:
           cp build/bin/myesl2 "$stage/myesl2"
           cp build/bin/libopenblas* "$stage/" 2>/dev/null || true
           cp build/bin/libgfortran* "$stage/" 2>/dev/null || true
+          cp build/bin/libquadmath* "$stage/" 2>/dev/null || true
           mkdir -p artifact
           tar -czf artifact/myesl2-linux-x64-portable.tar.gz -C "$stage" .
 
