@@ -261,7 +261,8 @@ void write_svg(const GenePredictionsTable& table,
     o << "<?xml version='1.0' encoding='UTF-8'?>\n"
       << "<svg xmlns='http://www.w3.org/2000/svg' "
       << "width='" << svg_w << "' height='" << svg_h << "'>\n"
-      << "<style>text { font-family: monospace; font-size: 9px; }</style>\n";
+      << "<style>text { font-family: monospace; font-size: 9px; }</style>\n"
+      << "<rect width='100%' height='100%' fill='white'/>\n";
 
     // Row labels (left of grid)
     for (size_t ri = 0; ri < Ndisp; ++ri) {
@@ -417,7 +418,8 @@ void write_aim_svg(const AimVizData& data, const std::filesystem::path& out)
     o << "<?xml version='1.0' encoding='UTF-8'?>\n"
       << "<svg xmlns='http://www.w3.org/2000/svg' "
       << "width='" << total_w << "' height='" << total_h << "'>\n"
-      << "<style>text { font-family: monospace; font-size: 9px; }</style>\n";
+      << "<style>text { font-family: monospace; font-size: 9px; }</style>\n"
+      << "<rect width='100%' height='100%' fill='white'/>\n";
 
     // ── Top panel: heatmap ──────────────────────────────────────────────────
 
