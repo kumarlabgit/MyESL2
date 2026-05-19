@@ -1,4 +1,5 @@
 #pragma once
+#include <armadillo>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -152,6 +153,20 @@ inline double median_nonzero(std::vector<double> v) {  // by value intentional
     std::sort(nz.begin(), nz.end());
     size_t m = nz.size() / 2;
     return (nz.size() % 2 == 0) ? (nz[m-1] + nz[m]) * 0.5 : nz[m];
+}
+
+// Map each expanded position to its group index using alg_table ranges.
+// alg_table: 3 x n_groups (row 0 = 1-based start, row 1 = 1-based end).
+// Returns vector of size F where [j] = group index for expanded position j.
+inline std::vector<int> build_group_assignment(const arma::mat& alg_table, size_t F) {
+    std::vector<int> group_of(F, -1);
+    for (arma::uword gi = 0; gi < alg_table.n_cols; ++gi) {
+        int start = static_cast<int>(alg_table(0, gi)) - 1;
+        int end   = static_cast<int>(alg_table(1, gi)) - 1;
+        for (int j = start; j <= end && j < static_cast<int>(F); ++j)
+            group_of[j] = static_cast<int>(gi);
+    }
+    return group_of;
 }
 
 } // namespace pipeline_utils

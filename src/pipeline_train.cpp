@@ -84,15 +84,26 @@ std::vector<size_t> prune_skipped_lambdas(
 
 // Build an expanded map file for ol_sg_lasso: one line per field position,
 // with label = combined.map[field[j]-1].  Returns the path to expanded.map.
-static fs::path generate_expanded_map(const fs::path& output_dir) {
+static fs::path generate_expanded_map(const fs::path& output_dir, const arma::mat& alg_table) {
     fs::path exp_path = output_dir / "expanded.map";
-    if (fs::exists(exp_path)) return exp_path;
+
+    // Check if existing expanded.map already has the Group column
+    if (fs::exists(exp_path)) {
+        std::ifstream check(exp_path);
+        std::string header;
+        if (std::getline(check, header) && header.find("Group") != std::string::npos)
+            return exp_path;
+        // Stale 2-column file — regenerate
+    }
 
     // Load field.txt (1-based indices, one row CSV)
     fs::path field_path = output_dir / "field.txt";
     arma::rowvec field;
     if (!field.load(field_path.string(), arma::csv_ascii))
         throw std::runtime_error("Failed to load field file: " + field_path.string());
+
+    // Build group assignment: expanded position -> group index
+    auto group_of = pipeline_utils::build_group_assignment(alg_table, field.n_cols);
 
     // Load combined.map lines (skip header)
     std::vector<std::string> map_lines;
@@ -104,19 +115,58 @@ static fs::path generate_expanded_map(const fs::path& output_dir) {
             map_lines.push_back(line);
     }
 
-    // Write expanded.map
+    // Write expanded.map with Group column
     {
         std::ofstream ef(exp_path);
-        ef << "Position\tLabel\n";
+        ef << "Position\tLabel\tGroup\n";
         for (size_t j = 0; j < field.n_cols; ++j) {
             int phys = static_cast<int>(field(j)) - 1;
             if (phys >= 0 && phys < (int)map_lines.size())
-                ef << j << '\t' << map_lines[phys].substr(map_lines[phys].find('\t') + 1) << '\n';
+                ef << j << '\t' << map_lines[phys].substr(map_lines[phys].find('\t') + 1)
+                   << '\t' << group_of[j] << '\n';
             else
-                ef << j << '\t' << "unknown_" << phys << '\n';
+                ef << j << '\t' << "unknown_" << phys << '\t' << group_of[j] << '\n';
         }
     }
     return exp_path;
+}
+
+// Write weights_grouped.txt: label\tweight\tgroup for each non-zero expanded parameter.
+// Uses getParameters() from the solver and the augmented expanded.map (Position\tLabel\tGroup).
+static void write_grouped_weights(const regression::RegressionAnalysis& regr,
+                                  const fs::path& expanded_map_path,
+                                  const fs::path& output_path)
+{
+    arma::vec params = regr.getParameters();
+    double intercept = regr.getInterceptValue();
+
+    // Read augmented expanded.map (Position\tLabel\tGroup)
+    std::vector<std::pair<std::string, int>> label_group; // label, group per expanded position
+    {
+        std::ifstream mf(expanded_map_path);
+        std::string line;
+        std::getline(mf, line); // skip header
+        while (std::getline(mf, line)) {
+            if (line.empty()) continue;
+            auto t1 = line.find('\t');
+            if (t1 == std::string::npos) continue;
+            auto t2 = line.find('\t', t1 + 1);
+            std::string label = (t2 != std::string::npos)
+                ? line.substr(t1 + 1, t2 - t1 - 1)
+                : line.substr(t1 + 1);
+            int group = (t2 != std::string::npos) ? std::stoi(line.substr(t2 + 1)) : -1;
+            label_group.push_back({label, group});
+        }
+    }
+
+    std::ofstream wf(output_path);
+    wf << std::setprecision(17) << std::scientific;
+    size_t n = std::min(static_cast<size_t>(params.n_elem), label_group.size());
+    for (size_t i = 0; i < n; ++i) {
+        if (params(i) == 0.0) continue;
+        wf << label_group[i].first << '\t' << params(i) << '\t' << label_group[i].second << '\n';
+    }
+    wf << "Intercept\t" << intercept << "\t-1\n";
 }
 
 } // anonymous namespace
@@ -395,6 +445,154 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         return static_cast<int>(gss.size());
     };
 
+    // Step 8b: Helper — grouped sig scores for ol_sg_lasso methods
+    auto compute_sig_scores_grouped = [&](const fs::path& wg_path, const fs::path& lam_dir,
+                                          std::ostringstream& sout, int lam_idx) -> int {
+        bool is_numeric_mode = (enc.datatype == "numeric");
+
+        // Flat aggregates (backward-compat gss.txt / pss.txt)
+        std::map<std::string, double> gss;
+        std::map<std::string, double> pss;
+        // Grouped aggregates
+        std::map<std::pair<std::string, int>, double> gss_grp; // (stem, group) -> sum(|w|)
+        std::map<std::pair<std::string, int>, double> pss_grp; // (stem_pos key, group) -> sum(|w|)
+        std::map<int, double> oss;                              // group -> sum(|w|)
+        double hss = 0.0;
+
+        std::ifstream wf(wg_path);
+        std::string wline;
+        while (std::getline(wf, wline)) {
+            if (wline.empty()) continue;
+            auto tab1 = wline.find('\t');
+            if (tab1 == std::string::npos) continue;
+            std::string label = wline.substr(0, tab1);
+            if (label == "Intercept") continue;
+            auto tab2 = wline.find('\t', tab1 + 1);
+            double w = std::stod(wline.substr(tab1 + 1, tab2 == std::string::npos ? std::string::npos : tab2 - tab1 - 1));
+            int group = (tab2 != std::string::npos) ? std::stoi(wline.substr(tab2 + 1)) : -1;
+            double aw = std::abs(w);
+            hss += aw;
+
+            std::string stem, pos_str;
+            if (is_numeric_mode) {
+                for (auto& s : sorted_stems_desc) {
+                    if (label.size() > s.size() + 1 &&
+                        label.compare(0, s.size(), s) == 0 &&
+                        label[s.size()] == '_') {
+                        stem = s;
+                        break;
+                    }
+                }
+                if (stem.empty()) continue;
+            } else {
+                // Check for {stem}_minor label
+                if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
+                    stem = label.substr(0, label.size() - 6);
+                    gss[stem] += aw;
+                    gss_grp[{stem, group}] += aw;
+                    oss[group] += aw;
+                    continue;
+                }
+                // Check for tiered minor: {stem}_tminor_Xpct
+                if (label.find("_tminor_") != std::string::npos) {
+                    auto tpos = label.find("_tminor_");
+                    stem = label.substr(0, tpos);
+                    gss[stem] += aw;
+                    gss_grp[{stem, group}] += aw;
+                    oss[group] += aw;
+                    continue;
+                }
+                // FASTA: {stem}_{pos}_{allele}
+                size_t us2 = label.rfind('_');
+                if (us2 == std::string::npos || us2 == 0) continue;
+                size_t us1 = label.rfind('_', us2 - 1);
+                if (us1 == std::string::npos) continue;
+                stem    = label.substr(0, us1);
+                pos_str = label.substr(us1 + 1, us2 - us1 - 1);
+            }
+
+            gss[stem] += aw;
+            gss_grp[{stem, group}] += aw;
+            oss[group] += aw;
+            if (!is_numeric_mode && !pos_str.empty()) {
+                std::string pss_key = stem + "\t" + pos_str;
+                pss[pss_key] += aw;
+                pss_grp[{pss_key, group}] += aw;
+            }
+        }
+
+        // Write gss.txt (flat, backward compat)
+        {
+            std::vector<std::pair<double, std::string>> sorted_gss;
+            sorted_gss.reserve(gss.size());
+            for (auto& [g, v] : gss) sorted_gss.push_back({v, g});
+            std::sort(sorted_gss.rbegin(), sorted_gss.rend());
+            std::ofstream gf(lam_dir / "gss.txt");
+            gf << std::setprecision(15);
+            for (auto& [v, g] : sorted_gss) gf << g << '\t' << v << '\n';
+        }
+
+        // Write gss_grouped.txt: gene\tgroup\tvalue
+        {
+            std::vector<std::tuple<double, std::string, int>> sorted_gss_g;
+            sorted_gss_g.reserve(gss_grp.size());
+            for (auto& [key, v] : gss_grp) sorted_gss_g.push_back({v, key.first, key.second});
+            std::sort(sorted_gss_g.rbegin(), sorted_gss_g.rend());
+            std::ofstream gf(lam_dir / "gss_grouped.txt");
+            gf << std::setprecision(15);
+            for (auto& [v, g, gi] : sorted_gss_g) gf << g << '\t' << gi << '\t' << v << '\n';
+        }
+
+        // Write pss.txt (flat, backward compat)
+        if (!is_numeric_mode && !pss.empty()) {
+            std::vector<std::pair<std::string, double>> pss_entries(pss.begin(), pss.end());
+            std::sort(pss_entries.begin(), pss_entries.end(),
+                [](const auto& a, const auto& b) {
+                    auto ta = a.first.find('\t'), tb = b.first.find('\t');
+                    std::string sa = a.first.substr(0, ta), sb = b.first.substr(0, tb);
+                    if (sa != sb) return sa < sb;
+                    uint32_t pa = static_cast<uint32_t>(std::stoul(a.first.substr(ta + 1)));
+                    uint32_t pb = static_cast<uint32_t>(std::stoul(b.first.substr(tb + 1)));
+                    return pa < pb;
+                });
+            std::ofstream pf(lam_dir / "pss.txt");
+            pf << std::fixed << std::setprecision(15);
+            for (auto& [key, v] : pss_entries) {
+                auto tp = key.find('\t');
+                pf << key.substr(0, tp) << '_' << key.substr(tp + 1) << '\t' << v << '\n';
+            }
+        }
+
+        // Write pss_grouped.txt: gene_pos\tgroup\tvalue
+        if (!is_numeric_mode && !pss_grp.empty()) {
+            std::vector<std::tuple<std::string, int, double>> pss_g_entries;
+            pss_g_entries.reserve(pss_grp.size());
+            for (auto& [key, v] : pss_grp) {
+                auto tp = key.first.find('\t');
+                std::string label = key.first.substr(0, tp) + "_" + key.first.substr(tp + 1);
+                pss_g_entries.push_back({label, key.second, v});
+            }
+            std::sort(pss_g_entries.begin(), pss_g_entries.end());
+            std::ofstream pf(lam_dir / "pss_grouped.txt");
+            pf << std::fixed << std::setprecision(15);
+            for (auto& [label, gi, v] : pss_g_entries) pf << label << '\t' << gi << '\t' << v << '\n';
+        }
+
+        // Write oss.txt: group\tvalue
+        {
+            std::vector<std::pair<double, int>> sorted_oss;
+            sorted_oss.reserve(oss.size());
+            for (auto& [gi, v] : oss) sorted_oss.push_back({v, gi});
+            std::sort(sorted_oss.rbegin(), sorted_oss.rend());
+            std::ofstream of(lam_dir / "oss.txt");
+            of << std::setprecision(15);
+            for (auto& [v, gi] : sorted_oss) of << gi << '\t' << v << '\n';
+        }
+
+        sout << "  [" << lam_idx << "] HSS=" << std::fixed << std::setprecision(4) << hss << "\n";
+        return static_cast<int>(gss.size());
+    };
+
     // Step 9: Validate skip-ahead ordering if min_groups > 0
     bool skip_ahead_valid = true;
     if (opts.min_groups > 0 && lambdas.size() > 1) {
@@ -506,14 +704,18 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 {
                     std::ofstream wo(lam_dir / "weights.txt");
                     fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
-                        ? generate_expanded_map(output_dir)
+                        ? generate_expanded_map(output_dir, alg_table)
                         : (output_dir / "combined.map");
                     std::ifstream mi(map_path);
                     regr->writeSparseMappedWeightsToStream(wo, mi);
                 }
+                if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
+                    write_grouped_weights(*regr, output_dir / "expanded.map", lam_dir / "weights_grouped.txt");
                 out << "  [" << idx << "] lambda=[" << lam[0] << ","
                     << lam[1] << "] -> " << (lam_dir / "weights.txt").string() << "\n";
-                int gene_count = compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
+                int gene_count = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
+                    ? compute_sig_scores_grouped(lam_dir / "weights_grouped.txt", lam_dir, out, idx)
+                    : compute_sig_scores(lam_dir / "weights.txt", lam_dir, out, idx);
                 out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
                 std::cout << out.str();
 
@@ -537,11 +739,14 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     {
                         std::ofstream wo(fw);
                         fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
-                            ? generate_expanded_map(output_dir)
+                            ? generate_expanded_map(output_dir, alg_table)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
                         regr->writeSparseMappedWeightsToStream(wo, mi);
                     }
+                    if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
+                        write_grouped_weights(*regr, output_dir / "expanded.map",
+                            lam_dir / ("weights_fold_" + std::to_string(k) + "_grouped.txt"));
 
                     // Parse fold weights
                     double fold_intercept = 0.0;
@@ -660,14 +865,18 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     {
                         std::ofstream wo(wpath);
                         fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
-                            ? generate_expanded_map(output_dir)
+                            ? generate_expanded_map(output_dir, alg_table)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
                         regr->writeSparseMappedWeightsToStream(wo, mi);
                     }
+                    if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
+                        write_grouped_weights(*regr, output_dir / "expanded.map", lam_dir / "weights_grouped.txt");
                     out << "  [" << idx << "] lambda=[" << lam[0] << ","
                         << lam[1] << "] -> " << wpath.string() << "\n";
-                    int gene_count = compute_sig_scores(wpath, lam_dir, out, (int)idx);
+                    int gene_count = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
+                        ? compute_sig_scores_grouped(lam_dir / "weights_grouped.txt", lam_dir, out, (int)idx)
+                        : compute_sig_scores(wpath, lam_dir, out, (int)idx);
                     out << "  [" << idx << "] Non-zero gene count: " << gene_count << "\n";
 
                     per_idx_weights[idx] = wpath;
@@ -817,6 +1026,107 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 }
             }
             std::cout << "  bss_median.txt written (" << bss_written << " weights)\n";
+        }
+
+        // Grouped medians (only if gss_grouped.txt exists, i.e. ol_sg_lasso methods)
+        if (fs::exists(pen_dir / "lambda_0" / "gss_grouped.txt")) {
+            // gss_median_grouped.txt: median per (gene, group)
+            {
+                // key = "gene\tgroup" -> vector of values
+                std::unordered_map<std::string, std::vector<double>> gss_g_all;
+                for (size_t li = 0; li < lambdas.size(); ++li) {
+                    fs::path p = pen_dir / ("lambda_" + std::to_string(li)) / "gss_grouped.txt";
+                    std::ifstream gf(p);
+                    if (!gf) continue;
+                    std::string line;
+                    while (std::getline(gf, line)) {
+                        if (line.empty()) continue;
+                        auto t1 = line.find('\t');
+                        if (t1 == std::string::npos) continue;
+                        auto t2 = line.find('\t', t1 + 1);
+                        if (t2 == std::string::npos) continue;
+                        std::string key = line.substr(0, t2); // "gene\tgroup"
+                        double val = std::stod(line.substr(t2 + 1));
+                        if (val != 0.0) gss_g_all[key].push_back(val);
+                    }
+                }
+                std::vector<std::pair<double, std::string>> med;
+                for (auto& [k, v] : gss_g_all) {
+                    double m = pipeline_utils::median_nonzero(v);
+                    if (m != 0.0) med.push_back({m, k});
+                }
+                std::sort(med.rbegin(), med.rend());
+                std::ofstream mf(pen_dir / "gss_median_grouped.txt");
+                mf << std::fixed << std::setprecision(6);
+                for (auto& [val, k] : med) {
+                    auto t = k.find('\t');
+                    mf << k.substr(0, t) << '\t' << k.substr(t + 1) << '\t' << val << '\n';
+                }
+                std::cout << "  gss_median_grouped.txt written (" << med.size() << " entries)\n";
+            }
+
+            // pss_median_grouped.txt: median per (gene_pos, group)
+            if (enc.datatype != "numeric") {
+                std::unordered_map<std::string, std::vector<double>> pss_g_all;
+                for (size_t li = 0; li < lambdas.size(); ++li) {
+                    fs::path p = pen_dir / ("lambda_" + std::to_string(li)) / "pss_grouped.txt";
+                    std::ifstream pf(p);
+                    if (!pf) continue;
+                    std::string line;
+                    while (std::getline(pf, line)) {
+                        if (line.empty()) continue;
+                        auto t1 = line.find('\t');
+                        if (t1 == std::string::npos) continue;
+                        auto t2 = line.find('\t', t1 + 1);
+                        if (t2 == std::string::npos) continue;
+                        std::string key = line.substr(0, t2);
+                        double val = std::stod(line.substr(t2 + 1));
+                        if (val != 0.0) pss_g_all[key].push_back(val);
+                    }
+                }
+                std::vector<std::pair<std::string, double>> med;
+                for (auto& [k, v] : pss_g_all) {
+                    double m = pipeline_utils::median_nonzero(v);
+                    if (m != 0.0) med.push_back({k, m});
+                }
+                std::sort(med.begin(), med.end());
+                std::ofstream mf(pen_dir / "pss_median_grouped.txt");
+                mf << std::fixed << std::setprecision(6);
+                for (auto& [k, val] : med) {
+                    auto t = k.find('\t');
+                    mf << k.substr(0, t) << '\t' << k.substr(t + 1) << '\t' << val << '\n';
+                }
+                std::cout << "  pss_median_grouped.txt written (" << med.size() << " entries)\n";
+            }
+
+            // oss_median.txt: median per group
+            {
+                std::unordered_map<std::string, std::vector<double>> oss_all;
+                for (size_t li = 0; li < lambdas.size(); ++li) {
+                    fs::path p = pen_dir / ("lambda_" + std::to_string(li)) / "oss.txt";
+                    std::ifstream of(p);
+                    if (!of) continue;
+                    std::string line;
+                    while (std::getline(of, line)) {
+                        if (line.empty()) continue;
+                        auto tab = line.find('\t');
+                        if (tab == std::string::npos) continue;
+                        std::string group = line.substr(0, tab);
+                        double val = std::stod(line.substr(tab + 1));
+                        if (val != 0.0) oss_all[group].push_back(val);
+                    }
+                }
+                std::vector<std::pair<double, std::string>> med;
+                for (auto& [g, v] : oss_all) {
+                    double m = pipeline_utils::median_nonzero(v);
+                    if (m != 0.0) med.push_back({m, g});
+                }
+                std::sort(med.rbegin(), med.rend());
+                std::ofstream mf(pen_dir / "oss_median.txt");
+                mf << std::fixed << std::setprecision(6);
+                for (auto& [val, g] : med) mf << g << '\t' << val << '\n';
+                std::cout << "  oss_median.txt written (" << med.size() << " groups)\n";
+            }
         }
     }
 

@@ -89,6 +89,13 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
     std::map<std::string, double> species_sums;
     std::vector<std::string> eval_gene_order;
     std::map<std::string, std::map<std::string, double>> eval_gene_scores;
+    // Grouped accumulators (populated only when weights_grouped.txt is used)
+    // key = "stem[Gn]" for gene-per-group, "Gn" for group-level
+    std::map<std::string, std::map<std::string, double>> eval_gene_group_scores;
+    std::map<int, std::map<std::string, double>> eval_group_scores;
+    std::vector<std::string> eval_gene_group_order; // first-appearance order of "stem[Gn]" keys
+    int eval_max_group = -1;
+    bool has_grouped_weights = false;
 
     // -------------------------------------------------------------------------
     // Numeric branch
@@ -253,19 +260,23 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             uint32_t    pos;
             char        allele;
             double      weight;
+            int         group = -1;
         };
         struct MinorEntry {
             std::string stem;
             double      weight;
+            int         group = -1;
         };
         struct TieredMinorEntry {
             std::string stem;
             float       threshold;
             double      weight;
+            int         group = -1;
         };
         std::vector<ModelEntry> model_entries;
         std::vector<MinorEntry> minor_entries;
         std::vector<TieredMinorEntry> tiered_minor_entries;
+        int  max_group = -1;
 
         // Tiered minor suffix table for weight label matching
         static const std::pair<std::string, float> tier_suffixes[] = {
@@ -276,19 +287,37 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         };
 
         {
-            std::ifstream wf(weights_path);
-            if (!wf) throw std::runtime_error("Cannot open weights file: " + weights_path.string());
+            // Prefer weights_grouped.txt if it exists (ol_sg_lasso methods)
+            fs::path grouped_path = weights_path.parent_path() / "weights_grouped.txt";
+            fs::path effective_path = fs::exists(grouped_path) ? grouped_path : weights_path;
+            has_grouped_weights = (effective_path == grouped_path);
+
+            std::ifstream wf(effective_path);
+            if (!wf) throw std::runtime_error("Cannot open weights file: " + effective_path.string());
             std::string line;
             while (std::getline(wf, line)) {
                 if (line.empty()) continue;
-                size_t tab = line.find('\t');
-                if (tab == std::string::npos) continue;
-                std::string label = line.substr(0, tab);
-                double w = std::stod(line.substr(tab + 1));
+                size_t tab1 = line.find('\t');
+                if (tab1 == std::string::npos) continue;
+                std::string label = line.substr(0, tab1);
+
+                // Parse weight and optional group column
+                size_t tab2 = line.find('\t', tab1 + 1);
+                double w;
+                int group = -1;
+                if (tab2 != std::string::npos) {
+                    w = std::stod(line.substr(tab1 + 1, tab2 - tab1 - 1));
+                    group = std::stoi(line.substr(tab2 + 1));
+                } else {
+                    w = std::stod(line.substr(tab1 + 1));
+                }
+
                 if (label == "Intercept") { intercept_val = w; continue; }
+                if (group > max_group) max_group = group;
+
                 // Check for {stem}_minor label
                 if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
-                    minor_entries.push_back({label.substr(0, label.size() - 6), w});
+                    minor_entries.push_back({label.substr(0, label.size() - 6), w, group});
                     continue;
                 }
                 // Check for tiered minor labels: {stem}_tminor_*pct
@@ -297,7 +326,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                     if (label.size() > suffix.size() &&
                         label.compare(label.size() - suffix.size(), suffix.size(), suffix) == 0) {
                         std::string stem = label.substr(0, label.size() - suffix.size());
-                        tiered_minor_entries.push_back({stem, threshold, w});
+                        tiered_minor_entries.push_back({stem, threshold, w, group});
                         is_tiered = true;
                         break;
                     }
@@ -311,7 +340,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 if (us1 == std::string::npos) continue;
                 uint32_t pos = static_cast<uint32_t>(
                     std::stoul(label.substr(us1 + 1, us2 - us1 - 1)));
-                model_entries.push_back({label.substr(0, us1), pos, allele, w});
+                model_entries.push_back({label.substr(0, us1), pos, allele, w, group});
             }
         }
 
@@ -485,6 +514,28 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 if (!seen.count(te.stem)) { eval_gene_order.push_back(te.stem); seen.insert(te.stem); }
             }
         }
+        if (has_grouped_weights) {
+            eval_max_group = max_group;
+            std::set<std::string> seen_gg;
+            for (auto& e : model_entries) {
+                if (e.group >= 0) {
+                    std::string k = e.stem + "[G" + std::to_string(e.group) + "]";
+                    if (!seen_gg.count(k)) { eval_gene_group_order.push_back(k); seen_gg.insert(k); }
+                }
+            }
+            for (auto& me : minor_entries) {
+                if (me.group >= 0) {
+                    std::string k = me.stem + "[G" + std::to_string(me.group) + "]";
+                    if (!seen_gg.count(k)) { eval_gene_group_order.push_back(k); seen_gg.insert(k); }
+                }
+            }
+            for (auto& te : tiered_minor_entries) {
+                if (te.group >= 0) {
+                    std::string k = te.stem + "[G" + std::to_string(te.group) + "]";
+                    if (!seen_gg.count(k)) { eval_gene_group_order.push_back(k); seen_gg.insert(k); }
+                }
+            }
+        }
 
         std::map<std::string, std::vector<size_t>> stem_entry_indices;
         for (size_t i = 0; i < model_entries.size(); ++i)
@@ -524,6 +575,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                     if (c == entry.allele) {
                         species_sums[meta.seq_ids[si]] += entry.weight;
                         eval_gene_scores[stem][meta.seq_ids[si]] += entry.weight;
+                        if (has_grouped_weights && entry.group >= 0) {
+                            std::string gg_key = stem + "[G" + std::to_string(entry.group) + "]";
+                            eval_gene_group_scores[gg_key][meta.seq_ids[si]] += entry.weight;
+                            eval_group_scores[entry.group][meta.seq_ids[si]] += entry.weight;
+                        }
                     }
                 }
             }
@@ -569,6 +625,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 if (has_minor) {
                     species_sums[meta.seq_ids[si]] += me.weight;
                     eval_gene_scores[me.stem][meta.seq_ids[si]] += me.weight;
+                    if (has_grouped_weights && me.group >= 0) {
+                        std::string gg_key = me.stem + "[G" + std::to_string(me.group) + "]";
+                        eval_gene_group_scores[gg_key][meta.seq_ids[si]] += me.weight;
+                        eval_group_scores[me.group][meta.seq_ids[si]] += me.weight;
+                    }
                 }
             }
         }
@@ -622,6 +683,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                     if (has_tiered) {
                         species_sums[meta.seq_ids[si]] += te.weight;
                         eval_gene_scores[stem][meta.seq_ids[si]] += te.weight;
+                        if (has_grouped_weights && te.group >= 0) {
+                            std::string gg_key = stem + "[G" + std::to_string(te.group) + "]";
+                            eval_gene_group_scores[gg_key][meta.seq_ids[si]] += te.weight;
+                            eval_group_scores[te.group][meta.seq_ids[si]] += te.weight;
+                        }
                     }
                 }
             }
@@ -716,6 +782,73 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             }
         }
         std::cout << "Gene predictions -> " << gene_pred_path.string() << "\n";
+
+        // --- Write gene_predictions_grouped.txt (one col per ontology group) ---
+        if (has_grouped_weights && eval_max_group >= 0) {
+            fs::path gp_grouped = out_dir / (stem_base + "_gene_predictions_grouped.txt");
+            {
+                std::ofstream gf(gp_grouped);
+                gf << std::fixed << std::setprecision(15);
+                gf << "SeqID\tResponse\tPrediction";
+                for (int gi = 0; gi <= eval_max_group; ++gi)
+                    gf << "\tG" << gi;
+                gf << '\n';
+                for (auto& [species, sum] : species_sums) {
+                    double pred = intercept_val + sum;
+                    double resp = 0.0;
+                    auto tv = true_values.find(species);
+                    if (tv != true_values.end()) resp = tv->second;
+                    gf << species << '\t' << resp << '\t' << pred;
+                    for (int gi = 0; gi <= eval_max_group; ++gi) {
+                        auto git = eval_group_scores.find(gi);
+                        if (git != eval_group_scores.end()) {
+                            auto sit = git->second.find(species);
+                            if (sit != git->second.end())
+                                gf << '\t' << sit->second;
+                            else
+                                gf << "\tNaN";
+                        } else {
+                            gf << "\tNaN";
+                        }
+                    }
+                    gf << '\n';
+                }
+            }
+            std::cout << "Gene predictions (grouped) -> " << gp_grouped.string() << "\n";
+        }
+
+        // --- Write gene_predictions_by_gene.txt (one col per gene×group pair) ---
+        if (has_grouped_weights && !eval_gene_group_order.empty()) {
+            fs::path gp_bygene = out_dir / (stem_base + "_gene_predictions_by_gene.txt");
+            {
+                std::ofstream bf(gp_bygene);
+                bf << std::fixed << std::setprecision(15);
+                bf << "SeqID\tResponse\tPrediction";
+                for (auto& k : eval_gene_group_order) bf << '\t' << k;
+                bf << '\n';
+                for (auto& [species, sum] : species_sums) {
+                    double pred = intercept_val + sum;
+                    double resp = 0.0;
+                    auto tv = true_values.find(species);
+                    if (tv != true_values.end()) resp = tv->second;
+                    bf << species << '\t' << resp << '\t' << pred;
+                    for (auto& k : eval_gene_group_order) {
+                        auto gm = eval_gene_group_scores.find(k);
+                        if (gm != eval_gene_group_scores.end()) {
+                            auto sm = gm->second.find(species);
+                            if (sm != gm->second.end())
+                                bf << '\t' << sm->second;
+                            else
+                                bf << "\tNaN";
+                        } else {
+                            bf << "\tNaN";
+                        }
+                    }
+                    bf << '\n';
+                }
+            }
+            std::cout << "Gene predictions (by gene) -> " << gp_bygene.string() << "\n";
+        }
 
         // --- Write SPS_SPP.txt ---
         fs::path sps_path = out_dir / (stem_base + "_SPS_SPP.txt");
@@ -972,6 +1105,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
     // Filter qualifying lambda models
     // -------------------------------------------------------------------------
     std::vector<LamGP> qualifying;
+    std::vector<fs::path> qualifying_dirs;
     for (auto& ld : lambda_dirs) {
         fs::path gp_file = ld / "eval_gene_predictions.txt";
         if (!fs::exists(gp_file)) continue;
@@ -981,7 +1115,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
         std::cout << "  " << ld.filename().string()
                   << ": RMSE=" << std::fixed << std::setprecision(4) << lam.rmse
                   << " ACC=" << lam.acc << (ok ? " [OK]" : " [skip]") << "\n";
-        if (ok) qualifying.push_back(std::move(lam));
+        if (ok) { qualifying.push_back(std::move(lam)); qualifying_dirs.push_back(ld); }
     }
 
     if (qualifying.empty()) {
@@ -1066,6 +1200,91 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
             gp << '\n';
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Aggregate grouped gene prediction files (if present)
+    // -------------------------------------------------------------------------
+    auto aggregate_gp_file = [&](const std::string& filename) {
+        // Only aggregate from lambda dirs that passed the qualifying threshold
+        std::vector<LamGP> gq;
+        for (auto& ld : qualifying_dirs) {
+            fs::path f = ld / filename;
+            if (!fs::exists(f)) continue;
+            LamGP lam = parse_gp(f);
+            if (lam.seq_ids.empty()) continue;
+            // Reuse qualifying status: same lambda dirs that passed threshold
+            gq.push_back(std::move(lam));
+        }
+        if (gq.empty()) return;
+
+        // Union of column names
+        std::vector<std::string> cols;
+        {
+            std::unordered_map<std::string, size_t> seen;
+            for (auto& lam : gq)
+                for (auto& g : lam.gene_names)
+                    if (seen.find(g) == seen.end()) {
+                        seen[g] = cols.size();
+                        cols.push_back(g);
+                    }
+        }
+
+        size_t Ns = gq[0].seq_ids.size();
+        size_t Gs = cols.size();
+        size_t Ms = gq.size();
+
+        // Prediction: arithmetic mean
+        std::vector<double> pred_mean(Ns, 0.0);
+        for (auto& lam : gq)
+            for (size_t i = 0; i < Ns; ++i)
+                pred_mean[i] += lam.predictions[i] / static_cast<double>(Ms);
+
+        // Build per-model col→index map
+        std::vector<std::unordered_map<std::string, size_t>> col_maps(Ms);
+        for (size_t mi = 0; mi < Ms; ++mi)
+            for (size_t g = 0; g < gq[mi].gene_names.size(); ++g)
+                col_maps[mi][gq[mi].gene_names[g]] = g;
+
+        // Median of non-zero values per cell
+        std::vector<std::vector<double>> agg(Gs, std::vector<double>(Ns, 0.0));
+        std::vector<std::vector<bool>> pres(Gs, std::vector<bool>(Ns, false));
+        for (size_t g = 0; g < Gs; ++g) {
+            const std::string& cn = cols[g];
+            for (size_t i = 0; i < Ns; ++i) {
+                std::vector<double> vals;
+                for (size_t mi = 0; mi < Ms; ++mi) {
+                    auto it = col_maps[mi].find(cn);
+                    if (it == col_maps[mi].end()) continue;
+                    double v = gq[mi].gene_scores[it->second][i];
+                    if (!std::isnan(v)) { pres[g][i] = true; vals.push_back(v); }
+                }
+                agg[g][i] = pipeline_utils::median_nonzero(vals);
+            }
+        }
+
+        // Write aggregated file
+        fs::path out_file = run_dir / filename;
+        {
+            std::ofstream of(out_file);
+            of << std::fixed << std::setprecision(6);
+            of << "SeqID\tResponse\tPrediction_mean";
+            for (auto& c : cols) of << '\t' << c;
+            of << '\n';
+            for (size_t i = 0; i < Ns; ++i) {
+                of << gq[0].seq_ids[i] << '\t' << gq[0].responses[i] << '\t'
+                   << pred_mean[i];
+                for (size_t g = 0; g < Gs; ++g) {
+                    if (!pres[g][i]) of << "\tNaN";
+                    else of << '\t' << agg[g][i];
+                }
+                of << '\n';
+            }
+        }
+        std::cout << "Aggregated " << filename << " -> " << out_file.string() << "\n";
+    };
+
+    aggregate_gp_file("eval_gene_predictions_grouped.txt");
+    aggregate_gp_file("eval_gene_predictions_by_gene.txt");
 
     // -------------------------------------------------------------------------
     // Derive eval.txt from aggregated predictions
