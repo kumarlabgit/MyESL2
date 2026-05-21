@@ -112,7 +112,7 @@ for clade in Control Clade_X1; do
     # eval.txt: 3 cols header (SequenceID, PredictedValue, TrueValue) — 1 label col
     compare_tsv_floats "$ACTUAL/$clade/eval.txt" "$GOLDEN/$clade/eval.txt" 1 "$clade/eval.txt"
 
-    # eval_SPS_SPP.txt: 4 cols (SeqID, Response, SPS, SPP) — 1 label col
+    # eval_SPS_SPP.txt: 5 cols (SeqID, Response, SPS, SPP, SCP) — 1 label col
     compare_tsv_floats "$ACTUAL/$clade/eval_SPS_SPP.txt" "$GOLDEN/$clade/eval_SPS_SPP.txt" 1 "$clade/eval_SPS_SPP.txt"
 
     # eval_gene_predictions.txt: header + data (SeqID, Response, Prediction_mean, genes...) — 1 label col

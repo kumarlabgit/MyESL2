@@ -42,13 +42,14 @@ static void write_sps_spp_file(
     double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
     double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
     std::ofstream sf(out_path);
-    sf << std::fixed << std::setprecision(6) << "SeqID\tResponse\tSPS\tSPP\n";
+    sf << std::fixed << std::setprecision(6) << "SeqID\tResponse\tSPS\tSPP\tSCP\n";
     for (size_t i = 0; i < seq_ids.size(); ++i) {
         double ep  = expit(preds[i]);
         double spp = responses[i] > 0.0 ? (ep - 0.5) / norm_pos
                    : responses[i] < 0.0 ? (0.5 - ep) / norm_neg
                    : (ep - 0.5) / norm_pos;
-        sf << seq_ids[i] << '\t' << responses[i] << '\t' << preds[i] << '\t' << spp << '\n';
+        if (spp < 0.0) spp = 0.0;
+        sf << seq_ids[i] << '\t' << responses[i] << '\t' << preds[i] << '\t' << spp << '\t' << ep << '\n';
     }
 }
 
