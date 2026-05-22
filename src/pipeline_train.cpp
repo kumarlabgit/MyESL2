@@ -364,10 +364,26 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     auto compute_sig_scores = [&](const fs::path& wpath, const fs::path& lam_dir,
                                   std::ostringstream& sout, int lam_idx) -> int {
         bool is_numeric_mode = (enc.datatype == "numeric");
+        bool is_olsg = (method == "olsg_lasso_logisticr" || method == "olsg_lasso_leastr");
         std::map<std::string, double> gss; // stem -> sum(|w|)
         // PSS key = "stem\tpos_str" -> sum(|w|)
         std::map<std::string, double> pss;
+        // OSS: per-group sum of |w| (olsg_lasso methods only)
+        std::map<int, double> oss;
         double hss = 0.0;
+
+        // Build col->group lookup for olsg_lasso OSS
+        std::vector<int> col_group;
+        if (is_olsg && alg_table.n_cols > 0) {
+            size_t n_cols = static_cast<size_t>(alg_table(1, alg_table.n_cols - 1));
+            col_group.assign(n_cols, -1);
+            for (arma::uword gi = 0; gi < alg_table.n_cols; ++gi) {
+                int start = static_cast<int>(alg_table(0, gi)) - 1; // 1-based to 0-based
+                int end   = static_cast<int>(alg_table(1, gi)) - 1;
+                for (int j = start; j <= end && j < static_cast<int>(n_cols); ++j)
+                    col_group[j] = static_cast<int>(gi);
+            }
+        }
 
         std::ifstream wf(wpath);
         std::string wline;
@@ -380,6 +396,15 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             if (label == "Intercept") continue;
             double aw = std::abs(w);
             hss += aw;
+
+            // Accumulate per-group OSS for olsg_lasso methods
+            if (is_olsg && !col_group.empty()) {
+                auto cit = label_to_col.find(label);
+                if (cit != label_to_col.end() && cit->second < col_group.size()) {
+                    int gi = col_group[cit->second];
+                    if (gi >= 0) oss[gi] += aw;
+                }
+            }
 
             if (is_numeric_mode) {
                 // Longest-prefix match against known stems
@@ -439,6 +464,13 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 auto tp = key.find('\t');
                 pf << key.substr(0, tp) << '_' << key.substr(tp + 1) << '\t' << v << '\n';
             }
+        }
+
+        // Write oss.txt (olsg_lasso methods): group\tsum(GSS), sorted by group index
+        if (!oss.empty()) {
+            std::ofstream of(lam_dir / "oss.txt");
+            of << std::setprecision(15);
+            for (auto& [gi, v] : oss) of << gi << '\t' << v << '\n';
         }
 
         sout << "  [" << lam_idx << "] HSS=" << std::fixed << std::setprecision(4) << hss << "\n";
@@ -1026,6 +1058,36 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 }
             }
             std::cout << "  bss_median.txt written (" << bss_written << " weights)\n";
+        }
+
+        // oss_median.txt for olsg_lasso methods (oss.txt exists but no gss_grouped.txt)
+        if (!fs::exists(pen_dir / "lambda_0" / "gss_grouped.txt")
+            && fs::exists(pen_dir / "lambda_0" / "oss.txt")) {
+            std::unordered_map<std::string, std::vector<double>> oss_all;
+            for (size_t li = 0; li < lambdas.size(); ++li) {
+                fs::path p = pen_dir / ("lambda_" + std::to_string(li)) / "oss.txt";
+                std::ifstream of(p);
+                if (!of) continue;
+                std::string line;
+                while (std::getline(of, line)) {
+                    if (line.empty()) continue;
+                    auto tab = line.find('\t');
+                    if (tab == std::string::npos) continue;
+                    std::string group = line.substr(0, tab);
+                    double val = std::stod(line.substr(tab + 1));
+                    if (val != 0.0) oss_all[group].push_back(val);
+                }
+            }
+            std::vector<std::pair<double, std::string>> med;
+            for (auto& [g, v] : oss_all) {
+                double m = pipeline_utils::median_nonzero(v);
+                if (m != 0.0) med.push_back({m, g});
+            }
+            std::sort(med.rbegin(), med.rend());
+            std::ofstream mf(pen_dir / "oss_median.txt");
+            mf << std::fixed << std::setprecision(6);
+            for (auto& [val, g] : med) mf << g << '\t' << val << '\n';
+            std::cout << "  oss_median.txt written (" << med.size() << " groups)\n";
         }
 
         // Grouped medians (only if gss_grouped.txt exists, i.e. ol_sg_lasso methods)
