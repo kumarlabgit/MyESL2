@@ -1570,10 +1570,12 @@ void run_psc(const PscOptions& opts) {
         for (auto& g : alignment_groups) if (g.size() > 1) { any_overlap = true; break; }
         if (any_overlap
             && opts.method != "olsg_lasso_logisticr"
-            && opts.method != "olsg_lasso_leastr") {
+            && opts.method != "olsg_lasso_leastr"
+            && opts.method != "ol_sg_lasso_logisticr"
+            && opts.method != "ol_sg_lasso_leastr") {
             throw std::runtime_error(
-                "Overlapping groups require --method olsg_lasso_logisticr or olsg_lasso_leastr "
-                "(got --method " + opts.method + ")");
+                "Overlapping groups require --method olsg_lasso_logisticr, olsg_lasso_leastr, "
+                "ol_sg_lasso_logisticr, or ol_sg_lasso_leastr (got --method " + opts.method + ")");
         }
     }
 
