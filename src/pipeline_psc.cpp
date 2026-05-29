@@ -1796,6 +1796,23 @@ void run_psc(const PscOptions& opts) {
                     result.intercept = regr->getInterceptValue();
                     result.beta.assign(params.begin(), params.end());
 
+                    // Virtual-expansion overlap solvers (ol_sg_lasso_*) return a weight vector of
+                    // length = field array length (one entry per expanded feature copy), not the
+                    // original feature column count. Sum the expanded copies back into the original
+                    // feature space so downstream code (dump-weights, gene_gss, predictions) stays
+                    // 1:1 with prep.feature_metas. Sum (not max) preserves the model's prediction:
+                    // for original feature i appearing at expanded indices {j1,j2,...}, the model
+                    // computes sum_j(beta[j] * x[i]) = (sum_j beta[j]) * x[i].
+                    if (prep.overlap_active && result.beta.size() != prep.feature_metas.size()) {
+                        std::vector<double> orig_beta(prep.feature_metas.size(), 0.0);
+                        for (size_t j = 0; j < result.beta.size() && j < prep.field.n_elem; ++j) {
+                            size_t orig_idx = static_cast<size_t>(prep.field[j]) - 1;
+                            if (orig_idx < orig_beta.size())
+                                orig_beta[orig_idx] += result.beta[j];
+                        }
+                        result.beta = std::move(orig_beta);
+                    }
+
                     // Dump per-run weights as <pen_dir>/lambda_<li>/weights.tsv when --dump-weights is set.
                     // fs::create_directories is idempotent and tolerates concurrent calls; each worker
                     // writes a unique leaf file, so no synchronization is needed.
