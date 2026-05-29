@@ -116,7 +116,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 std::string label = line.substr(0, tab);
                 double w = std::stod(line.substr(tab + 1));
                 if (label == "Intercept") { intercept_val = w; continue; }
-                raw_weights[label] = w;
+                // Accumulate (not overwrite) so virtual-expansion overlap methods
+                // (ol_sg_lasso_*) that emit multiple rows for the same feature label
+                // sum correctly. std::map<>::operator[] zero-initializes on first
+                // access, so this also handles the unique-label case.
+                raw_weights[label] += w;
             }
         }
 
