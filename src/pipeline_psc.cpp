@@ -1799,16 +1799,21 @@ void run_psc(const PscOptions& opts) {
                     // Virtual-expansion overlap solvers (ol_sg_lasso_*) return a weight vector of
                     // length = field array length (one entry per expanded feature copy), not the
                     // original feature column count. Sum the expanded copies back into the original
-                    // feature space so downstream code (dump-weights, gene_gss, predictions) stays
-                    // 1:1 with prep.feature_metas. Sum (not max) preserves the model's prediction:
-                    // for original feature i appearing at expanded indices {j1,j2,...}, the model
-                    // computes sum_j(beta[j] * x[i]) = (sum_j beta[j]) * x[i].
-                    if (prep.overlap_active && result.beta.size() != prep.feature_metas.size()) {
+                    // feature space so downstream code that needs 1:1 alignment with feature_metas
+                    // (dump-weights, predictions) stays correct. Sum (not max) preserves the model's
+                    // prediction: for original feature i appearing at expanded indices {j1,j2,...},
+                    // the model computes sum_j(beta[j] * x[i]) = (sum_j beta[j]) * x[i].
+                    // gene_gss is computed below directly from the un-aggregated `params` to match
+                    // train's sum_j |beta_j| semantic.
+                    bool overlap_expanded = prep.overlap_active
+                        && params.n_elem == prep.field.n_elem
+                        && params.n_elem != prep.feature_metas.size();
+                    if (overlap_expanded) {
                         std::vector<double> orig_beta(prep.feature_metas.size(), 0.0);
-                        for (size_t j = 0; j < result.beta.size() && j < prep.field.n_elem; ++j) {
+                        for (size_t j = 0; j < params.n_elem; ++j) {
                             size_t orig_idx = static_cast<size_t>(prep.field[j]) - 1;
                             if (orig_idx < orig_beta.size())
-                                orig_beta[orig_idx] += result.beta[j];
+                                orig_beta[orig_idx] += params[j];
                         }
                         result.beta = std::move(orig_beta);
                     }
@@ -1831,14 +1836,22 @@ void run_psc(const PscOptions& opts) {
                         }
                     }
 
-                    // Compute per-gene GSS and selected sites
+                    // Compute per-gene GSS = sum_j |beta_j| over the raw (un-aggregated)
+                    // solver output, matching train/drphylo/aim's compute_sig_scores_grouped
+                    // (pipeline_train.cpp:481). For ol_sg_lasso_* this sums |w| over each
+                    // expanded copy via the field array; for all other methods params is
+                    // already n-length and the field branch is bypassed.
                     result.gene_gss.assign(n_genes, 0.0);
                     result.gene_selected_sites.resize(n_genes);
 
-                    for (size_t j = 0; j < result.beta.size(); ++j) {
-                        if (result.beta[j] == 0.0) continue;
-                        auto& fm = prep.feature_metas[j];
-                        double aw = std::abs(result.beta[j]);
+                    for (size_t j = 0; j < params.n_elem; ++j) {
+                        if (params[j] == 0.0) continue;
+                        size_t orig_idx = overlap_expanded
+                            ? static_cast<size_t>(prep.field[j]) - 1
+                            : j;
+                        if (orig_idx >= prep.feature_metas.size()) continue;
+                        auto& fm = prep.feature_metas[orig_idx];
+                        double aw = std::abs(params[j]);
                         result.gene_gss[fm.gene_idx] += aw;
                         auto& slot = result.gene_selected_sites[fm.gene_idx][fm.position];
                         if (aw > slot) slot = aw;

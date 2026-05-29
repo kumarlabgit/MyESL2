@@ -121,6 +121,16 @@ PSC's group-penalty system (`std`/`sqrt`/`linear`/`median`) is shared with these
 - `--alignments-list <file>`: list file specifying overlapping groups of alignments (one group per line, comma-separated paths relative to `alignments_dir`). Required for the olsg solvers when groups have >1 entry; resolved field array is written to `<output_dir>/<base>_field.csv` and injected via `params["field"]` (does not overwrite a user-supplied `--param field=`). Without the flag, the legacy directory-enumeration path is preserved byte-for-byte.
 - `--dump-weights`: opt-in TSV dump of the full feature-weight vector from every solver call to `<output_dir>/[combo_N/][penalty_P/]lambda_L/weights.tsv`. The `combo_N/` and `penalty_P/` layers are skipped when there is only one combo or only one penalty term. Each worker writes a unique leaf file, so the parallel grid path needs no additional synchronization.
 
+### Virtual-expansion overlap methods (ol_sg_lasso_*)
+
+The `ol_sg_lasso_logisticr` / `ol_sg_lasso_leastr` solvers return an F-length parameter vector where F = expanded-field length (one entry per (feature, group) pair). The original feature count n ≤ F whenever any feature appears in more than one group.
+
+- **PSC** (`pipeline_psc.cpp:1799-1855`): keeps the un-aggregated `params` vector for gene_gss / selected_sites computation (so reporting matches train's `sum_j |beta_j|`), and separately sums the expanded copies into an original-feature `result.beta` for predictions and dump-weights. Sum (not max) preserves the model's prediction since each expanded copy multiplies the same input column: `(sum_j beta_j) * x[i]`.
+- **Train/drphylo/aim/adaptive** (`pipeline_train.cpp:738-745`): write `weights.txt` (one row per expanded copy via `expanded.map`) plus `weights_grouped.txt` (same rows with a Group column). No in-place aggregation — duplicate-label rows are emitted and downstream consumers sum at read time.
+- **Evaluate** (`pipeline_evaluate.cpp`): FASTA branch prefers `weights_grouped.txt` and accumulates via `+=` at scoring time (line 577-578). Numeric branch uses `raw_weights[label] += w` to accumulate (line 119).
+
+Per-gene significance reporting (`gene_gss`) is `sum_j |beta_j|` over expanded copies in both PSC and train — same value in both paths.
+
 ## Code Architecture
 
 ### PFF (Parsed FASTA File) Format
