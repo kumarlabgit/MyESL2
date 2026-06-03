@@ -1834,6 +1834,39 @@ void run_psc(const PscOptions& opts) {
                                 wo << prep.feature_metas[j].label << "\t" << result.beta[j] << "\n";
                             }
                         }
+
+                        // For ol_sg_lasso_* virtual-expansion solvers, the raw `params` vector
+                        // has one entry per (feature, group) pair (length = field array). The
+                        // aggregated weights.tsv collapses these to one row per original feature.
+                        // weights_ungrouped.tsv preserves the per-copy decomposition with a group
+                        // column so a consumer can recover the per-group contribution.
+                        if (overlap_expanded) {
+                            // Precompute group index per expanded position from alg_table
+                            // (row 0/1 are 1-based inclusive ranges into the field array, and
+                            // groups partition the field contiguously in PSC's encoder).
+                            std::vector<int> group_of(params.n_elem, -1);
+                            for (arma::uword gi = 0; gi < prep.alg_table.n_cols; ++gi) {
+                                size_t s = static_cast<size_t>(prep.alg_table(0, gi));
+                                size_t e = static_cast<size_t>(prep.alg_table(1, gi));
+                                if (s == 0) continue;
+                                for (size_t k = s - 1; k < e && k < group_of.size(); ++k)
+                                    group_of[k] = static_cast<int>(gi);
+                            }
+                            std::ofstream wu(lam_dir / "weights_ungrouped.tsv");
+                            if (wu) {
+                                wu << "feature_label\tfeature_weight\tgroup\n";
+                                wu << std::scientific << std::setprecision(10);
+                                wu << "__intercept__\t" << result.intercept << "\t-1\n";
+                                for (size_t j = 0; j < params.n_elem; ++j) {
+                                    if (params[j] == 0.0) continue;
+                                    size_t orig_idx = static_cast<size_t>(prep.field[j]) - 1;
+                                    if (orig_idx >= prep.feature_metas.size()) continue;
+                                    wu << prep.feature_metas[orig_idx].label << "\t"
+                                       << params[j] << "\t"
+                                       << group_of[j] << "\n";
+                                }
+                            }
+                        }
                     }
 
                     // Compute per-gene GSS = sum_j |beta_j| over the raw (un-aggregated)
