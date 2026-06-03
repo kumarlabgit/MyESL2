@@ -898,6 +898,8 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
     // -------------------------------------------------------------------------
     if (!true_values.empty()) {
         int tp = 0, tn = 0, fp = 0, fn = 0, unmatched = 0;
+        std::vector<std::pair<double,int>> score_label;  // (prediction, 1=pos / 0=neg)
+        score_label.reserve(true_values.size());
         for (auto& [species, truth] : true_values) {
             auto it = species_sums.find(species);
             if (it == species_sums.end()) { ++unmatched; continue; }
@@ -908,6 +910,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             else if (!true_pos && !pred_pos) ++tn;
             else if (!true_pos &&  pred_pos) ++fp;
             else                              ++fn;
+            score_label.emplace_back(pred, true_pos ? 1 : 0);
         }
         if (unmatched > 0)
             std::cerr << "Warning: " << unmatched
@@ -917,6 +920,30 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         double tnr = (tn + fp) > 0 ? static_cast<double>(tn) / (tn + fp) : 0.0;
         double fpr = (tn + fp) > 0 ? static_cast<double>(fp) / (tn + fp) : 0.0;
         double fnr = (tp + fn) > 0 ? static_cast<double>(fn) / (tp + fn) : 0.0;
+        int total = tp + tn + fp + fn;
+        double accuracy = total > 0 ? static_cast<double>(tp + tn) / total : 0.0;
+
+        // Mann-Whitney rank-based AUC with tie handling.
+        // AUC = (sum of ranks of positives - n_pos*(n_pos+1)/2) / (n_pos * n_neg).
+        double auc = std::numeric_limits<double>::quiet_NaN();
+        size_t n_pos = 0, n_neg = 0;
+        for (auto& [s, lbl] : score_label) { if (lbl) ++n_pos; else ++n_neg; }
+        if (n_pos > 0 && n_neg > 0) {
+            std::sort(score_label.begin(), score_label.end(),
+                      [](const auto& a, const auto& b){ return a.first < b.first; });
+            double rank_sum_pos = 0.0;
+            size_t i = 0;
+            while (i < score_label.size()) {
+                size_t j = i + 1;
+                while (j < score_label.size() && score_label[j].first == score_label[i].first) ++j;
+                double avg_rank = (static_cast<double>(i + 1) + static_cast<double>(j)) / 2.0;
+                for (size_t k = i; k < j; ++k)
+                    if (score_label[k].second == 1) rank_sum_pos += avg_rank;
+                i = j;
+            }
+            auc = (rank_sum_pos - static_cast<double>(n_pos) * (n_pos + 1) / 2.0)
+                  / (static_cast<double>(n_pos) * static_cast<double>(n_neg));
+        }
 
         std::cout << std::fixed << std::setprecision(4);
         std::cout << "\n--- Classification metrics (threshold = 0) ---\n";
@@ -926,11 +953,18 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         std::cout << "  True negative rate (specificity): " << tnr << "\n";
         std::cout << "  False positive rate:              " << fpr << "\n";
         std::cout << "  False negative rate:              " << fnr << "\n";
+        std::cout << "  Accuracy:                         " << accuracy << "\n";
+        if (std::isnan(auc))
+            std::cout << "  AUC:                              N/A (single-class)\n";
+        else
+            std::cout << "  AUC:                              " << auc << "\n";
 
         result.tp  = tp;  result.tn  = tn;
         result.fp  = fp;  result.fn  = fn;
         result.tpr = tpr; result.tnr = tnr;
         result.fpr = fpr; result.fnr = fnr;
+        result.accuracy = accuracy;
+        result.auc      = auc;
     }
 
     // -------------------------------------------------------------------------
@@ -990,7 +1024,12 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                << "fp = "  << result.fp  << "\n"
                << "fn = "  << result.fn  << "\n"
                << "tpr = " << result.tpr << "\n"
-               << "tnr = " << result.tnr << "\n";
+               << "tnr = " << result.tnr << "\n"
+               << "accuracy = " << result.accuracy << "\n";
+        if (std::isnan(result.auc))
+            plog_m << "auc = NaN\n";
+        else
+            plog_m << "auc = " << result.auc << "\n";
     }
     plog.finish(plog_m.str());
     return result;

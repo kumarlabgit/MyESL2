@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,8 @@ struct EvaluateResult {
     fs::path     svg_path;
     int tp=0, tn=0, fp=0, fn=0;
     double tpr=0.0, tnr=0.0, fpr=0.0, fnr=0.0;
+    double accuracy = 0.0;
+    double auc      = std::numeric_limits<double>::quiet_NaN();  // NaN when single-class
 };
 
 struct EvaluateOptions {
