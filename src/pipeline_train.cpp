@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include <limits>
 #include <cmath>
+#include <numeric>
+#include <random>
 
 namespace pipeline {
 
@@ -350,10 +352,87 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     pipeline_utils::log_rss("train: after label_to_col");
 
     // Step 6: Build xval_idxs if nfolds > 0
+    //   priority: --cv-assignments file > --cv-seed shuffle > legacy i % nfolds
     arma::rowvec xval_idxs(N);
-    if (opts.nfolds > 0)
-        for (uint32_t i = 0; i < N; ++i)
-            xval_idxs(i) = static_cast<double>(i % opts.nfolds);
+    if (opts.nfolds > 0) {
+        if (!opts.cv_assignments_path.empty()) {
+            std::ifstream af(opts.cv_assignments_path);
+            if (!af) throw std::runtime_error(
+                "Cannot open --cv-assignments file: " + opts.cv_assignments_path);
+
+            // Parse header to locate SequenceID and Fold columns. If no header,
+            // assume two-column (SequenceID, Fold).
+            std::string line;
+            int seq_col = 0, fold_col = 1;
+            std::streampos data_start = af.tellg();
+            if (std::getline(af, line)) {
+                if (line.find("SequenceID") != std::string::npos
+                        && line.find("Fold") != std::string::npos) {
+                    seq_col = -1; fold_col = -1;
+                    std::stringstream ss(line);
+                    std::string tok;
+                    int idx = 0;
+                    while (std::getline(ss, tok, '\t')) {
+                        if (tok == "SequenceID") seq_col = idx;
+                        else if (tok == "Fold")  fold_col = idx;
+                        ++idx;
+                    }
+                    if (seq_col < 0 || fold_col < 0)
+                        throw std::runtime_error(
+                            "--cv-assignments file header must contain both 'SequenceID' and 'Fold' columns");
+                    data_start = af.tellg();
+                }
+            }
+            af.clear();
+            af.seekg(data_start);
+
+            std::unordered_map<std::string, int> assigns;
+            while (std::getline(af, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::vector<std::string> cols;
+                std::stringstream ss(line);
+                std::string tok;
+                while (std::getline(ss, tok, '\t')) cols.push_back(tok);
+                if (static_cast<int>(cols.size()) <= std::max(seq_col, fold_col)) continue;
+                int fold;
+                try { fold = std::stoi(cols[fold_col]); }
+                catch (...) { throw std::runtime_error(
+                    "--cv-assignments: cannot parse Fold value '" + cols[fold_col] +
+                    "' for sample '" + cols[seq_col] + "'"); }
+                if (fold < 0 || fold >= opts.nfolds)
+                    throw std::runtime_error(
+                        "--cv-assignments: Fold " + std::to_string(fold) + " for sample '" +
+                        cols[seq_col] + "' is out of range [0, " + std::to_string(opts.nfolds - 1) + "]");
+                assigns[cols[seq_col]] = fold;
+            }
+
+            std::vector<std::string> missing;
+            for (uint32_t i = 0; i < N; ++i) {
+                auto it = assigns.find(enc.seq_names[i]);
+                if (it == assigns.end()) { missing.push_back(enc.seq_names[i]); continue; }
+                xval_idxs(i) = static_cast<double>(it->second);
+            }
+            if (!missing.empty()) {
+                std::string msg = std::to_string(missing.size())
+                    + " sample(s) missing from --cv-assignments file:\n";
+                for (auto& m : missing) msg += "  " + m + "\n";
+                throw std::runtime_error(msg);
+            }
+            std::cout << "CV assignments loaded from " << opts.cv_assignments_path
+                      << " (" << N << " samples, " << opts.nfolds << " folds)\n";
+        } else if (opts.cv_seed >= 0) {
+            std::vector<uint32_t> perm(N);
+            std::iota(perm.begin(), perm.end(), 0u);
+            std::mt19937 rng(static_cast<uint32_t>(opts.cv_seed));
+            std::shuffle(perm.begin(), perm.end(), rng);
+            for (uint32_t i = 0; i < N; ++i)
+                xval_idxs(perm[i]) = static_cast<double>(i % opts.nfolds);
+            std::cout << "CV fold assignment: shuffled round-robin (seed=" << opts.cv_seed << ")\n";
+        } else {
+            for (uint32_t i = 0; i < N; ++i)
+                xval_idxs(i) = static_cast<double>(i % opts.nfolds);
+        }
+    }
 
     // Step 7: Build sorted_stems_desc for numeric longest-prefix matching
     std::vector<std::string> sorted_stems_desc = enc.all_stems_ordered;
@@ -819,11 +898,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 {
                     std::ofstream cv_out(lam_dir / "cv_predictions.txt");
                     cv_out << std::fixed << std::setprecision(6);
-                    cv_out << "SequenceID\tPredictedValue\tTrueValue\n";
+                    cv_out << "SequenceID\tPredictedValue\tTrueValue\tFold\n";
                     for (uint32_t i = 0; i < N; ++i)
                         cv_out << enc.seq_names[i] << '\t'
                                << cv_preds[i] << '\t'
-                               << enc.hyp_values[i] << '\n';
+                               << enc.hyp_values[i] << '\t'
+                               << static_cast<int>(xval_idxs(i)) << '\n';
                 }
 
                 // Classification metrics

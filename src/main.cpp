@@ -76,6 +76,11 @@ void print_usage(const char* prog_name) {
         "      Note: every lambda value (single, file, or grid) must lie in the open\n"
         "      interval (0,1); out-of-range values raise an error.\n"
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
+        "    --cv-seed N                  shuffle samples with mt19937(N) before fold round-robin\n"
+        "                                 (default: -1 = legacy unshuffled i % nfolds assignment)\n"
+        "    --cv-assignments <file>      load fold assignments from TSV (cols: SequenceID, Fold;\n"
+        "                                 header auto-detected; cv_predictions.txt from a prior\n"
+        "                                 run can be passed directly). Overrides --cv-seed.\n"
         "    --min-groups N               skip lambdas selecting fewer than N non-zero groups\n"
         "    --prune-skipped-lambda       with --threads > 1 and --min-groups > 0, after the\n"
         "                                 parallel grid finishes, delete contents of lambda_N/\n"
@@ -145,7 +150,7 @@ void print_usage(const char* prog_name) {
         "    --species-limit N            max species displayed in aggregated eval.svg (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
-        "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
@@ -160,7 +165,7 @@ void print_usage(const char* prog_name) {
         "    --aim-window N        top-N features considered per iteration (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
-        "    --param, --nfolds, --min-groups, --prune-skipped-lambda\n"
+        "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
@@ -299,6 +304,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--use-logspace") train_opts.use_logspace = true;
                 else if (arg == "--param"      && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts.params[kv.substr(0,eq)]=kv.substr(eq+1); else std::cerr<<"Warning: --param '"<<kv<<"' has no '=', ignoring\n"; }
                 else if (arg == "--nfolds"     && i+1<argc) { train_opts.nfolds=std::stoi(argv[++i]); if(train_opts.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
+                else if (arg == "--cv-seed"    && i+1<argc) train_opts.cv_seed = std::stoi(argv[++i]);
+                else if (arg == "--cv-assignments" && i+1<argc) train_opts.cv_assignments_path = argv[++i];
                 else if (arg == "--min-groups" && i+1<argc) train_opts.min_groups = std::stoi(argv[++i]);
                 else if (arg == "--auto-bit-ct"&& i+1<argc) enc_opts.auto_bit_ct = std::stod(argv[++i]);
                 else if (arg == "--drop-major-allele") enc_opts.drop_major = true;
@@ -530,6 +537,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--use-logspace") train_opts_base.use_logspace = true;
                 else if (arg == "--param"            && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts_base.params[kv.substr(0,eq)]=kv.substr(eq+1); }
                 else if (arg == "--nfolds"           && i+1<argc) { train_opts_base.nfolds=std::stoi(argv[++i]); if(train_opts_base.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
+                else if (arg == "--cv-seed"          && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
+                else if (arg == "--cv-assignments"   && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
                 else if (arg == "--min-groups"       && i+1<argc) { train_opts_base.min_groups=std::stoi(argv[++i]); min_groups_set=true; }
                 else if (arg == "--grid-rmse-cutoff" && i+1<argc) grid_rmse_cutoff = std::stod(argv[++i]);
                 else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
@@ -718,6 +727,8 @@ int main(int argc, char* argv[]) {
                 else if (arg == "--use-logspace") train_opts_base.use_logspace = true;
                 else if (arg == "--param"          && i+1<argc) { std::string kv=argv[++i]; auto eq=kv.find('='); if(eq!=std::string::npos) train_opts_base.params[kv.substr(0,eq)]=kv.substr(eq+1); }
                 else if (arg == "--nfolds"         && i+1<argc) train_opts_base.nfolds = std::stoi(argv[++i]);
+                else if (arg == "--cv-seed"        && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
+                else if (arg == "--cv-assignments" && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
                 else if (arg == "--min-groups"     && i+1<argc) train_opts_base.min_groups = std::stoi(argv[++i]);
                 else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
                 else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;

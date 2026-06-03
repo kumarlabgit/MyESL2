@@ -23,6 +23,15 @@ struct TrainOptions {
     bool         use_logspace       = false;
     int          nfolds             = 0;
     int          min_groups         = 0;
+    // Cross-validation fold assignment controls (only used when nfolds > 0):
+    //   cv_seed = -1 (default): legacy round-robin i % nfolds (order-dependent)
+    //   cv_seed >= 0          : shuffle samples with std::mt19937(cv_seed) then round-robin
+    //   cv_assignments_path   : if non-empty, load assignments from file (overrides cv_seed).
+    //                           File format: TSV with "SequenceID" and "Fold" columns
+    //                           (header required when 'Fold' isn't column 2). cv_predictions.txt
+    //                           from a previous run can be passed directly.
+    int          cv_seed             = -1;
+    std::string  cv_assignments_path;
     std::map<std::string, std::string> params;  // slep opts, merged with enc.extra_params
     bool        adaptive_sparsification = false;
     std::string adaptive_l1_spec = "0.1,0.3,0.1";    // produces 0.1, 0.2, 0.3
