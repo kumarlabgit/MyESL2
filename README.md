@@ -246,32 +246,37 @@ When `--nfolds` is used, each `lambda_N/` also contains:
 myesl2 evaluate <weights.txt> <list.txt> <output_file> [options]
 ```
 
-**Required arguments:**
+Apply a trained model to a set of species and write per-species predictions.
+Optionally compare those predictions to known labels for accuracy assessment.
 
-| Argument | Description |
-|----------|-------------|
-| `weights.txt` | Weights file from a `train` run |
-| `list.txt` | Alignment or numeric data file list (same format as training) |
-| `output_file` | Path for the output predictions file |
+**Required positional arguments** (all three are required; the first two are inputs, the third is an output):
 
-**Options:**
+| Argument | Direction | Description |
+|----------|-----------|-------------|
+| `weights.txt` | **Input** | Trained model weights from a `train` run (e.g. `<train_out>/lambda_0/weights.txt`) |
+| `list.txt` | **Input** | List of alignment or numeric data files for the species you want to predict (same format as training's `list.txt`) |
+| `output_file` | **Output** | Path where the per-species predictions TSV will be written (you choose the name) |
 
-| Flag | Description |
-|------|-------------|
-| `--hypothesis <file>` | Compare predictions to known labels; enables TPR/TNR/FPR/FNR metrics |
-| `--cache-dir <dir>` | Cache directory (default: `pff_cache`) |
-| `--datatype <type>` | Must match the datatype used during training |
-| `--threads N` | Worker threads (default: all cores) |
-| `--no-visualize` | Skip automatic SVG heatmap generation |
-| `--minor-alleles <file>` | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
-| `--tiered-minor-alleles <file>` | Path to `tiered_minor_alleles.txt` from training (auto-detected if omitted) |
-| `--gene-limit N` | Maximum genes displayed in auto-generated SVG (default: 100) |
-| `--species-limit N` | Maximum species displayed in auto-generated SVG (default: 100) |
+**Optional flags:**
 
-**Outputs:**
-- `<output_file>` — TSV with columns: `SeqID`, `Prediction`, `Probability`, `ClassPrediction` (plus accuracy metrics if `--hypothesis` provided)
-- `<output_file>.svg` — Heatmap visualization of per-gene contributions (auto-generated unless `--no-visualize`)
+| Flag | Direction | Description |
+|------|-----------|-------------|
+| `--hypothesis <file>` | **Input** (optional) | Known class labels for the species in `list.txt`. **Only required if you want accuracy metrics.** When supplied, evaluate also prints TP/TN/FP/FN, TPR/TNR/FPR/FNR, accuracy, and AUC, and writes them to `process_log.txt`. Omit to run prediction-only with no accuracy assessment. |
+| `--cache-dir <dir>` | | Cache directory (default: `pff_cache`) |
+| `--datatype <type>` | | Must match the datatype used during training |
+| `--threads N` | | Worker threads (default: all cores) |
+| `--no-visualize` | | Skip automatic SVG heatmap generation |
+| `--minor-alleles <file>` | Input | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
+| `--tiered-minor-alleles <file>` | Input | Path to `tiered_minor_alleles.txt` from training (auto-detected if omitted) |
+| `--gene-limit N` | | Maximum genes displayed in auto-generated SVG (default: 100) |
+| `--species-limit N` | | Maximum species displayed in auto-generated SVG (default: 100) |
+
+**Outputs** (all written next to `<output_file>` in the same directory):
+- `<output_file>` — TSV with columns: `SequenceID`, `PredictedValue`, and (only when `--hypothesis` is supplied) `TrueValue`
 - `eval_gene_predictions.txt` — Per-sample per-gene scores used by `drphylo` and `aim`
+- `eval_SPS_SPP.txt` — Species-level prediction summary
+- `<basename>.svg` — Heatmap visualization of per-gene contributions (auto-generated unless `--no-visualize`)
+- `process_log.txt` — Run metadata; includes classification metrics when `--hypothesis` was supplied
 
 ---
 
