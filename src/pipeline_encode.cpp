@@ -527,11 +527,11 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
-        // Sanity check: at least 2 feature positions
-        if (total_cols < 2)
+        // Sanity check: at least 1 feature position
+        if (total_cols < 1)
             throw std::runtime_error("Feature set covers only "
                 + std::to_string(total_cols)
-                + " feature position(s); need at least 2");
+                + " feature position(s); need at least 1");
 
     } else {
         // ---- FASTA branch (two-pass encoding) ----
@@ -725,7 +725,7 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
-        // Sanity check: features must span at least 2 distinct alignment positions
+        // Sanity check: features must span at least 1 distinct alignment position
         {
             std::unordered_set<std::string> distinct_positions;
             for (int ri = 0; ri < total_encode; ++ri) {
@@ -733,10 +733,10 @@ EncodeResult encode(const EncodeOptions& opts)
                 for (auto& [pos, allele] : metas[ri].map)
                     distinct_positions.insert(metas[ri].stem + "_" + std::to_string(pos));
             }
-            if (distinct_positions.size() < 2)
+            if (distinct_positions.size() < 1)
                 throw std::runtime_error("Feature set covers only "
                     + std::to_string(distinct_positions.size())
-                    + " distinct alignment position(s); need at least 2");
+                    + " distinct alignment position(s); need at least 1");
         }
 
         // Compute per-gene column offsets in the features matrix
