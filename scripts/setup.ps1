@@ -6,10 +6,16 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Tag v0.1.2
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Channel dev
 #
-# Channel selection:
-#   - Auto-detected from `git rev-parse --abbrev-ref HEAD`: `dev` branch
-#     → dev channel, anything else → main channel.
-#   - Override with -Channel main|dev.
+# Channel selection (highest priority first):
+#   1. -Channel main|dev                explicit override
+#   2. .release-channel file at repo root (committed per branch: `main` on
+#      main, `dev` on dev). This is the canonical signal — it survives any
+#      extraction method, including GitHub source tarballs/zips that drop
+#      the .git directory.
+#   3. git rev-parse --abbrev-ref HEAD  fallback for checkouts without the
+#      marker file (older snapshots).
+#   4. main                             default when no signal is available.
+#
 #   - main channel pulls `v*` releases via /releases/latest.
 #   - dev  channel pulls `dev-v*` releases via /releases?per_page=100.
 #
@@ -30,9 +36,16 @@ $repoRoot  = Resolve-Path (Join-Path $scriptDir "..")
 $binDir    = Join-Path $repoRoot "bin"
 
 # ── Channel autodetect ───────────────────────────────────────────
-# If -Channel wasn't supplied, infer from the checked-out git branch.
-# Defaults to `main` for detached HEAD, feature branches, and non-git
-# checkouts so the dev channel is strictly opt-in.
+# Priority: -Channel flag > .release-channel file > git branch > main.
+# The marker file is the canonical signal because it travels with the
+# source even when extracted from a tarball/zip (no .git directory).
+if (-not $Channel) {
+    $channelFile = Join-Path $repoRoot ".release-channel"
+    if (Test-Path $channelFile) {
+        $fileVal = (Get-Content -LiteralPath $channelFile -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($fileVal) { $Channel = $fileVal.Trim() }
+    }
+}
 if (-not $Channel) {
     $gitBranch = ""
     try {

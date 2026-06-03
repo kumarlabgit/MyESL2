@@ -7,10 +7,16 @@
 #          bash scripts/setup.sh --tag v0.1.2          # specific main tag
 #          bash scripts/setup.sh --channel dev         # latest dev-v* release
 #
-# Channel selection:
-#   - Auto-detected from `git rev-parse --abbrev-ref HEAD`: `dev` branch → dev
-#     channel, anything else (main, detached HEAD, no git) → main channel.
-#   - Override with --channel main|dev.
+# Channel selection (highest priority first):
+#   1. --channel main|dev               explicit override
+#   2. .release-channel file at repo root (committed per branch: `main` on
+#      main, `dev` on dev). This is the canonical signal — it survives any
+#      extraction method, including GitHub source tarballs/zips that drop
+#      the .git directory.
+#   3. git rev-parse --abbrev-ref HEAD  fallback for checkouts without the
+#      marker file (older snapshots).
+#   4. main                             default when no signal is available.
+#
 #   - main channel pulls `v*` releases via /releases/latest.
 #   - dev  channel pulls `dev-v*` releases via /releases?per_page=100.
 #
@@ -39,9 +45,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Channel autodetect ────────────────────────────────────────────
-# If --channel wasn't supplied, infer from the checked-out git branch.
-# Defaults to `main` for detached HEAD, feature branches, and non-git
-# checkouts so the dev channel is strictly opt-in.
+# Priority: --channel flag > .release-channel file > git branch > main.
+# The marker file is the canonical signal because it travels with the
+# source even when extracted from a tarball/zip (no .git directory).
+if [[ -z "$CHANNEL" ]]; then
+    CHANNEL_FILE="$REPO_ROOT/.release-channel"
+    if [[ -f "$CHANNEL_FILE" ]]; then
+        CHANNEL=$(head -1 "$CHANNEL_FILE" | tr -d '[:space:]')
+    fi
+fi
 if [[ -z "$CHANNEL" ]]; then
     GIT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [[ "$GIT_BRANCH" == "dev" ]]; then CHANNEL="dev"; else CHANNEL="main"; fi

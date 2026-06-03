@@ -40,11 +40,15 @@ MyESL2 publishes two release streams:
 | `main` (stable) | `v*` (e.g. `v0.2.3`) | Linux x64 (regular + portable), macOS arm64, Windows x64 | Default for any checkout that isn't `dev` |
 | `dev` (preview) | `dev-v*` (e.g. `dev-v0.3.0-rc1`) | Linux x64 (regular + portable), Windows x64 (no macOS) | Auto-selected on `git checkout dev` |
 
-The setup scripts auto-detect the channel from the current git branch
-(`dev` → dev channel, everything else → main). Override explicitly with
-`--channel dev` (bash) or `-Channel dev` (PowerShell). The scripts also
-refuse to mix channels with a wrong-prefix `--tag` / `-Tag`, so you can't
-accidentally fetch a `dev-v*` tarball with `--channel main`.
+The setup scripts auto-detect the channel using this precedence:
+
+1. **`--channel main|dev` / `-Channel main|dev`** — explicit override (highest priority).
+2. **`.release-channel` file at the repo root** — committed per branch (`main` on main, `dev` on dev). This is the canonical signal and travels with the source even when you download a GitHub source tarball/zip without using `git clone`.
+3. **Current git branch** (`dev` → dev channel, anything else → main) — fallback for older checkouts without the marker file.
+4. **`main`** — default when no signal is available.
+
+The scripts also refuse to mix channels with a wrong-prefix `--tag` / `-Tag`,
+so you can't accidentally fetch a `dev-v*` tarball with `--channel main`.
 
 ### 2. Run
 
