@@ -4,6 +4,7 @@
 #include "numeric_parser.hpp"
 #include "newick.hpp"
 #include "process_log.hpp"
+#include "input_detection.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -109,46 +110,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
                 "No chars defined for '" + resolved.datatype + "' in data_defs.ini");
     }
 
-    // --- Read list file — supports overlapping groups (comma-separated files per line) ---
-    std::vector<fs::path> all_fasta_paths;
-    std::vector<std::vector<fs::path>> groups;
-    std::unordered_map<std::string, size_t> stem_to_unique_idx;
-    {
-        std::ifstream list_file(resolved.list_path);
-        if (!list_file)
-            throw std::runtime_error(
-                "Cannot open list file: " + resolved.list_path.string());
-        fs::path list_dir = resolved.list_path.parent_path();
-        std::string line;
-        while (std::getline(list_file, line)) {
-            if (line.empty()) continue;
-            std::vector<fs::path> group;
-            std::stringstream ss(line);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-                    token.erase(token.begin());
-                while (!token.empty() &&
-                       (token.back() == ' ' || token.back() == '\t' || token.back() == '\r'))
-                    token.pop_back();
-                if (token.empty()) continue;
-                for (char& c : token) if (c == '\\') c = '/';
-                fs::path p = list_dir / token;
-                group.push_back(p);
-                std::string stem = p.stem().string();
-                if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
-                    stem_to_unique_idx[stem] = all_fasta_paths.size();
-                    all_fasta_paths.push_back(p);
-                }
-            }
-            if (!group.empty()) groups.push_back(std::move(group));
-        }
-    }
-
-    // --- Phase 1: Conversion ---
-    int conv_converted = 0, conv_failed = 0;
-    int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0, total_to_convert = 0;
-
+    // --- Open log section before list parsing so the auto-detect warning can be recorded ---
     process_log::Section plog(resolved.output_dir / "process_log.txt", "preprocess");
     plog.param("list_path",   resolved.list_path)
         .param("cache_dir",   resolved.cache_dir)
@@ -157,6 +119,60 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         .param("min_minor",   resolved.min_minor)
         .param("use_dlt",     resolved.use_dlt);
     if (!resolved.tree_path.empty()) plog.param("tree_path", resolved.tree_path);
+
+    // --- Read list file — supports overlapping groups (comma-separated files per line) ---
+    // If the path actually points at a single FASTA or single tabular numeric file,
+    // synthesize a 1-entry list and warn (instead of failing with a misleading error).
+    std::vector<fs::path> all_fasta_paths;
+    std::vector<std::vector<fs::path>> groups;
+    std::unordered_map<std::string, size_t> stem_to_unique_idx;
+    {
+        std::string detected = input_detection::maybe_warn_single_file(
+            resolved.list_path, resolved.datatype);
+        if (!detected.empty()) {
+            plog.param("auto_detected_single_input",
+                       detected + ": " + resolved.list_path.string());
+            fs::path p = resolved.list_path;
+            std::string stem = p.stem().string();
+            stem_to_unique_idx[stem] = 0;
+            all_fasta_paths.push_back(p);
+            groups.push_back({ p });
+        } else {
+            std::ifstream list_file(resolved.list_path);
+            if (!list_file)
+                throw std::runtime_error(
+                    "Cannot open list file: " + resolved.list_path.string());
+            fs::path list_dir = resolved.list_path.parent_path();
+            std::string line;
+            while (std::getline(list_file, line)) {
+                if (line.empty()) continue;
+                std::vector<fs::path> group;
+                std::stringstream ss(line);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+                        token.erase(token.begin());
+                    while (!token.empty() &&
+                           (token.back() == ' ' || token.back() == '\t' || token.back() == '\r'))
+                        token.pop_back();
+                    if (token.empty()) continue;
+                    for (char& c : token) if (c == '\\') c = '/';
+                    fs::path p = list_dir / token;
+                    group.push_back(p);
+                    std::string stem = p.stem().string();
+                    if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
+                        stem_to_unique_idx[stem] = all_fasta_paths.size();
+                        all_fasta_paths.push_back(p);
+                    }
+                }
+                if (!group.empty()) groups.push_back(std::move(group));
+            }
+        }
+    }
+
+    // --- Phase 1: Conversion ---
+    int conv_converted = 0, conv_failed = 0;
+    int skipped_done = 0, skipped_error = 0, skipped_mismatch = 0, total_to_convert = 0;
 
     try {
 

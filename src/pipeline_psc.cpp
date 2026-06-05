@@ -1,6 +1,7 @@
 #include "pipeline_psc.hpp"
 #include "encoder.hpp"
 #include "group_penalty.hpp"
+#include "input_detection.hpp"
 #include "newick.hpp"
 #include "regression.hpp"
 
@@ -1545,17 +1546,43 @@ void run_psc(const PscOptions& opts) {
     if (!opts.limited_genes_list.empty())
         limited_genes = load_limited_genes(opts.limited_genes_list);
 
-    // Load alignments — either from a directory (legacy) or from a list file (overlap support)
+    // Load alignments — either from a directory (legacy) or from a list file (overlap support).
+    // If the user passed a single FASTA file in place of a directory or list, auto-detect it
+    // and treat it as a 1-entry input (with warning).
     std::vector<GeneAlignment> train_alignments;
     std::vector<std::vector<size_t>> alignment_groups;  // empty in non-overlap mode
     if (!opts.alignments_list_file.empty()) {
-        std::cout << "  Loading alignments from list " << opts.alignments_list_file.string()
-                  << " (base dir: " << opts.alignments_dir.string() << ")\n";
-        auto loaded = load_alignments_from_list(opts.alignments_dir, opts.alignments_list_file, limited_genes);
-        train_alignments = std::move(loaded.first);
-        alignment_groups = std::move(loaded.second);
-        std::cout << "  Loaded " << train_alignments.size() << " unique alignments in "
-                  << alignment_groups.size() << " group(s)\n";
+        if (input_detection::is_single_fasta(opts.alignments_list_file)) {
+            std::cerr << "[Warning] --alignments-list " << opts.alignments_list_file
+                      << " is a single FASTA file rather than a list of paths. "
+                      << "Treating it as a 1-entry list.\n";
+            auto [seq_map, seq_len] = read_fasta_map(opts.alignments_list_file);
+            std::string gene_name = opts.alignments_list_file.stem().string();
+            train_alignments.push_back({std::move(gene_name), seq_len, std::move(seq_map)});
+            alignment_groups.push_back({0});
+            std::cout << "  Loaded 1 alignment in 1 group (auto-detected single FASTA)\n";
+        } else {
+            std::cout << "  Loading alignments from list " << opts.alignments_list_file.string()
+                      << " (base dir: " << opts.alignments_dir.string() << ")\n";
+            auto loaded = load_alignments_from_list(opts.alignments_dir, opts.alignments_list_file, limited_genes);
+            train_alignments = std::move(loaded.first);
+            alignment_groups = std::move(loaded.second);
+            std::cout << "  Loaded " << train_alignments.size() << " unique alignments in "
+                      << alignment_groups.size() << " group(s)\n";
+        }
+    } else if (fs::is_directory(opts.alignments_dir)) {
+        std::cout << "  Loading alignments from " << opts.alignments_dir.string() << "\n";
+        train_alignments = load_alignments(opts.alignments_dir, limited_genes);
+        std::cout << "  Loaded " << train_alignments.size() << " gene alignments\n";
+    } else if (fs::is_regular_file(opts.alignments_dir)
+               && input_detection::is_single_fasta(opts.alignments_dir)) {
+        std::cerr << "[Warning] " << opts.alignments_dir
+                  << " is a single FASTA file rather than a directory. "
+                  << "Treating it as a 1-entry input.\n";
+        auto [seq_map, seq_len] = read_fasta_map(opts.alignments_dir);
+        std::string gene_name = opts.alignments_dir.stem().string();
+        train_alignments.push_back({std::move(gene_name), seq_len, std::move(seq_map)});
+        std::cout << "  Loaded 1 gene alignment (auto-detected single FASTA)\n";
     } else {
         std::cout << "  Loading alignments from " << opts.alignments_dir.string() << "\n";
         train_alignments = load_alignments(opts.alignments_dir, limited_genes);
@@ -1584,8 +1611,18 @@ void run_psc(const PscOptions& opts) {
     std::vector<GeneAlignment> pred_alignments_owned;
     if (!opts.no_pred_output && !opts.prediction_alignments_dir.empty()
         && opts.prediction_alignments_dir != opts.alignments_dir) {
-        std::cout << "  Loading prediction alignments from " << opts.prediction_alignments_dir.string() << "\n";
-        pred_alignments_owned = load_alignments(opts.prediction_alignments_dir, limited_genes);
+        if (fs::is_regular_file(opts.prediction_alignments_dir)
+            && input_detection::is_single_fasta(opts.prediction_alignments_dir)) {
+            std::cerr << "[Warning] " << opts.prediction_alignments_dir
+                      << " is a single FASTA file rather than a directory. "
+                      << "Treating it as a 1-entry input.\n";
+            auto [seq_map, seq_len] = read_fasta_map(opts.prediction_alignments_dir);
+            std::string gene_name = opts.prediction_alignments_dir.stem().string();
+            pred_alignments_owned.push_back({std::move(gene_name), seq_len, std::move(seq_map)});
+        } else {
+            std::cout << "  Loading prediction alignments from " << opts.prediction_alignments_dir.string() << "\n";
+            pred_alignments_owned = load_alignments(opts.prediction_alignments_dir, limited_genes);
+        }
         prediction_alignments = &pred_alignments_owned;
     }
 

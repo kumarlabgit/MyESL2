@@ -142,8 +142,8 @@ void print_usage(const char* prog_name) {
         "    --no-visualize          skip automatic SVG generation\n"
         "    --minor-alleles <file>  minor_alleles.txt from training (auto-detected if omitted)\n"
         "    --tiered-minor-alleles <file>  tiered_minor_alleles.txt from training (auto-detected)\n"
-        "    --gene-limit N          max genes displayed in auto-generated SVG (default: 100)\n"
-        "    --species-limit N       max species displayed in auto-generated SVG (default: 100)\n"
+        "    --gene-limit N          max genes displayed in auto-generated SVG (default: 20)\n"
+        "    --species-limit N       max species displayed in auto-generated SVG (default: 20)\n"
         "    --cache-dir DIR\n"
         "    --threads N\n"
         "    --datatype <type>\n\n"
@@ -159,8 +159,10 @@ void print_usage(const char* prog_name) {
         "  DrPhylo-specific:\n"
         "    --grid-rmse-cutoff X         exclude lambda results above RMSE threshold (default: 100)\n"
         "    --grid-acc-cutoff X          exclude lambda results below accuracy threshold (default: 0)\n"
-        "    --gene-limit N               max genes displayed in aggregated eval.svg (default: 100)\n"
-        "    --species-limit N            max species displayed in aggregated eval.svg (default: 100)\n"
+        "    --gene-limit N               max genes displayed in aggregated eval.svg (default: 20)\n"
+        "    --species-limit N            max species displayed in aggregated eval.svg (default: 20)\n"
+        "  Default lambda grid (when none of --lambda/--lambda-grid/--lambda-file given):\n"
+        "    --lambda-grid 0.1,0.9,0.1 0.1,0.9,0.1   (81-cell sweep)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
         "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
@@ -526,8 +528,8 @@ int main(int argc, char* argv[]) {
 
             double grid_rmse_cutoff = 100.0;
             double grid_acc_cutoff  = 0.0;
-            int    viz_gene_limit    = 100;
-            int    viz_species_limit = 100;
+            int    viz_gene_limit    = 20;
+            int    viz_species_limit = 20;
             bool min_groups_set = false;
 
             for (int i = extra_start; i < argc; ++i) {
@@ -590,6 +592,16 @@ int main(int argc, char* argv[]) {
             if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
                 enc_opts_base.disable_mc = true;
             if (!min_groups_set) train_opts_base.min_groups = 3;
+
+            // DrPhylo default lambda grid: 9x9 sweep matching original MyESL's
+            // DrPhylo default ("0.1,1.0,0.1" with strict <1.0 filter -> 0.1..0.9).
+            if (!train_opts_base.lambda_grid_set
+                && !train_opts_base.lambda_explicitly_set
+                && train_opts_base.lambda_file_path.empty()) {
+                train_opts_base.lambda_grid_specs[0] = "0.1,0.9,0.1";
+                train_opts_base.lambda_grid_specs[1] = "0.1,0.9,0.1";
+                train_opts_base.lambda_grid_set = true;
+            }
 
             // Lambda count for peak memory estimation
             if (train_opts_base.lambda_grid_set) {
