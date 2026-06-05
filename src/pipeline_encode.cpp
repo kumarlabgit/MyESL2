@@ -3,6 +3,7 @@
 #include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "encoder.hpp"
+#include "input_detection.hpp"
 #include "numeric_parser.hpp"
 #include "fasta_parser.hpp"
 #include "pff_format.hpp"
@@ -139,31 +140,39 @@ EncodeResult encode(const EncodeOptions& opts)
     std::vector<std::vector<fs::path>> groups;
     std::unordered_map<std::string, size_t> stem_to_unique_idx;
     {
-        std::ifstream list_file(list_path);
-        if (!list_file)
-            throw std::runtime_error("Cannot open list file: " + list_path.string());
-        fs::path list_dir = list_path.parent_path();
-        std::string line;
-        while (std::getline(list_file, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
-            std::vector<fs::path> group;
-            std::stringstream ss(line);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.erase(token.begin());
-                while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
-                if (token.empty()) continue;
-                for (char& c : token) if (c == '\\') c = '/';
-                fs::path p = list_dir / token;
-                group.push_back(p);
-                std::string stem = p.stem().string();
-                if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
-                    stem_to_unique_idx[stem] = all_fasta_paths.size();
-                    all_fasta_paths.push_back(p);
+        std::string detected = input_detection::maybe_warn_single_file(list_path, pre.datatype);
+        if (!detected.empty()) {
+            fs::path p = list_path;
+            stem_to_unique_idx[p.stem().string()] = 0;
+            all_fasta_paths.push_back(p);
+            groups.push_back({ p });
+        } else {
+            std::ifstream list_file(list_path);
+            if (!list_file)
+                throw std::runtime_error("Cannot open list file: " + list_path.string());
+            fs::path list_dir = list_path.parent_path();
+            std::string line;
+            while (std::getline(list_file, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                std::vector<fs::path> group;
+                std::stringstream ss(line);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.erase(token.begin());
+                    while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
+                    if (token.empty()) continue;
+                    for (char& c : token) if (c == '\\') c = '/';
+                    fs::path p = list_dir / token;
+                    group.push_back(p);
+                    std::string stem = p.stem().string();
+                    if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
+                        stem_to_unique_idx[stem] = all_fasta_paths.size();
+                        all_fasta_paths.push_back(p);
+                    }
                 }
+                if (!group.empty()) groups.push_back(std::move(group));
             }
-            if (!group.empty()) groups.push_back(std::move(group));
         }
     }
 
@@ -1185,27 +1194,32 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
 
     std::vector<fs::path> all_fasta_paths;
     {
-        std::unordered_map<std::string, size_t> stem_to_unique_idx;
-        std::ifstream list_file(list_path);
-        if (!list_file)
-            throw std::runtime_error("Cannot open list file: " + list_path.string());
-        fs::path list_dir = list_path.parent_path();
-        std::string line;
-        while (std::getline(list_file, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
-            std::stringstream ss(line);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.erase(token.begin());
-                while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
-                if (token.empty()) continue;
-                for (char& c : token) if (c == '\\') c = '/';
-                fs::path p = list_dir / token;
-                std::string stem = p.stem().string();
-                if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
-                    stem_to_unique_idx[stem] = all_fasta_paths.size();
-                    all_fasta_paths.push_back(p);
+        std::string detected = input_detection::maybe_warn_single_file(list_path, pre.datatype);
+        if (!detected.empty()) {
+            all_fasta_paths.push_back(list_path);
+        } else {
+            std::unordered_map<std::string, size_t> stem_to_unique_idx;
+            std::ifstream list_file(list_path);
+            if (!list_file)
+                throw std::runtime_error("Cannot open list file: " + list_path.string());
+            fs::path list_dir = list_path.parent_path();
+            std::string line;
+            while (std::getline(list_file, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                std::stringstream ss(line);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) token.erase(token.begin());
+                    while (!token.empty() && (token.back() == ' ' || token.back() == '\t' || token.back() == '\r')) token.pop_back();
+                    if (token.empty()) continue;
+                    for (char& c : token) if (c == '\\') c = '/';
+                    fs::path p = list_dir / token;
+                    std::string stem = p.stem().string();
+                    if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
+                        stem_to_unique_idx[stem] = all_fasta_paths.size();
+                        all_fasta_paths.push_back(p);
+                    }
                 }
             }
         }

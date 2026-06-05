@@ -272,8 +272,8 @@ Optionally compare those predictions to known labels for accuracy assessment.
 | `--no-visualize` | | Skip automatic SVG heatmap generation |
 | `--minor-alleles <file>` | Input | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
 | `--tiered-minor-alleles <file>` | Input | Path to `tiered_minor_alleles.txt` from training (auto-detected if omitted) |
-| `--gene-limit N` | | Maximum genes displayed in auto-generated SVG (default: 100) |
-| `--species-limit N` | | Maximum species displayed in auto-generated SVG (default: 100) |
+| `--gene-limit N` | | Maximum genes displayed in auto-generated SVG (default: 20) |
+| `--species-limit N` | | Maximum species displayed in auto-generated SVG (default: 20) |
 
 **Outputs** (all written next to `<output_file>` in the same directory):
 - `<output_file>` — TSV with columns: `SequenceID`, `PredictedValue`, and (only when `--hypothesis` is supplied) `TrueValue`
@@ -301,8 +301,8 @@ myesl2 visualize <gene_predictions.txt> <output.svg> [options]
 
 | Flag | Description |
 |------|-------------|
-| `--gene-limit N` | Maximum genes to display, sorted by relevance (default: 100) |
-| `--species-limit N` | Maximum species to display, sorted by classification probability (default: 100) |
+| `--gene-limit N` | Maximum genes to display, sorted by relevance (default: 20) |
+| `--species-limit N` | Maximum species to display, sorted by classification probability (default: 20) |
 | `--ssq-threshold <value>` | Exclude genes below this sum-of-squares threshold (default: 0.0) |
 | `--m-grid` | DrPhylo mode: show only positive-class samples |
 
@@ -335,8 +335,8 @@ myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 | `--min-groups N` | Minimum number of genes required in the model |
 | `--grid-rmse-cutoff <value>` | Maximum RMSE threshold for lambda filtering (default: 100.0) |
 | `--grid-acc-cutoff <value>` | Minimum accuracy threshold for lambda filtering (default: 0.0) |
-| `--gene-limit N` | Maximum genes displayed in aggregated eval.svg (default: 100) |
-| `--species-limit N` | Maximum species displayed in aggregated eval.svg (default: 100) |
+| `--gene-limit N` | Maximum genes displayed in aggregated eval.svg (default: 20) |
+| `--species-limit N` | Maximum species displayed in aggregated eval.svg (default: 20) |
 
 All `--lambda`, `--lambda-grid`, `--lambda-file`, `--use-logspace`, `--param`, `--cache-dir`, `--threads`, group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`), and encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`) from `train` are also accepted. Lambda values must be in `(0,1)`.
 

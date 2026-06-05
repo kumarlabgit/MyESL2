@@ -164,21 +164,27 @@ void write_svg(const GenePredictionsTable& table,
             gene_indices.push_back(ssq_sorted[k].second);
     }
 
-    // --- 2. Sort rows: neg (asc by pred), then pos (desc by pred) ---
+    // --- 2. Sort rows ---
+    // Normal grid: neg ascending by pred, then pos descending by pred.
+    // M-grid (DrPhylo): only positives, sorted ascending by SCP (= expit(pred),
+    // which is monotonic in pred — so sorting by pred ascending suffices).
     std::vector<size_t> row_order;
     {
         std::vector<std::pair<double, size_t>> neg_rows, pos_rows;
         for (size_t i = 0; i < N; ++i) {
             double resp = table.responses[i];
             double pred = table.predictions[i];
-            if (resp < 0.0) neg_rows.push_back({pred, i});
-            else            pos_rows.push_back({pred, i});
+            if (resp < 0.0)      neg_rows.push_back({pred, i});
+            else if (resp > 0.0) pos_rows.push_back({pred, i});
+            else if (!opts.m_grid) pos_rows.push_back({pred, i}); // resp==0 (alignment-only) excluded from m-grid
         }
-        if (!opts.m_grid) {
+        if (opts.m_grid) {
+            std::sort(pos_rows.begin(), pos_rows.end()); // asc by pred == asc by SCP
+        } else {
             std::sort(neg_rows.begin(), neg_rows.end()); // asc
             for (auto& [_, i] : neg_rows) row_order.push_back(i);
+            std::sort(pos_rows.rbegin(), pos_rows.rend()); // desc
         }
-        std::sort(pos_rows.rbegin(), pos_rows.rend()); // desc
         for (auto& [_, i] : pos_rows) row_order.push_back(i);
     }
 
@@ -232,11 +238,37 @@ void write_svg(const GenePredictionsTable& table,
     for (auto& h : gene_col_headers)
         col_headers.push_back(h);
 
-    // Row labels (compressed)
+    // Row labels: compress the species ID first, then append the per-row SPP
+    // value in parentheses. SPP is the per-class normalized score (matching
+    // write_sps_spp_file in pipeline_evaluate.cpp), not the raw expit. This
+    // keeps the SVG row labels visually aligned with MyESL's m-grid PNG output.
+    // Per-class normalization is computed over ALL species (not just visible
+    // post-truncation rows) to match write_sps_spp_file and MyESL's
+    // gene_contribution_visualizer.py — otherwise the SVG's SPP values drift
+    // when species-limit truncates the row that defines max_ep_pos.
+    auto expit = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
+    double max_ep_pos = 0.5, min_ep_neg = 0.5;
+    for (size_t i = 0; i < table.seq_ids.size(); ++i) {
+        double ep = expit(table.predictions[i]);
+        if (table.responses[i] > 0.0 && ep > max_ep_pos) max_ep_pos = ep;
+        if (table.responses[i] < 0.0 && ep < min_ep_neg) min_ep_neg = ep;
+    }
+    double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
+    double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
     std::vector<std::string> row_labels;
     for (size_t ri = 0; ri < Ndisp; ++ri)
         row_labels.push_back(table.seq_ids[row_order[ri]]);
     compress_labels(row_labels);
+    for (size_t ri = 0; ri < Ndisp; ++ri) {
+        size_t idx = row_order[ri];
+        double ep = expit(table.predictions[idx]);
+        double spp = table.responses[idx] < 0.0 ? (0.5 - ep) / norm_neg
+                                                : (ep - 0.5) / norm_pos;
+        if (spp < 0.0) spp = 0.0;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), " (%.2f)", spp);
+        row_labels[ri] += buf;
+    }
 
     // Dynamic margins: estimate label pixel widths (monospace 9px ≈ 5.4px/char)
     const float CHAR_W = 5.4f;

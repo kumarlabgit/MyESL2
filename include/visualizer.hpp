@@ -9,8 +9,8 @@
 namespace viz {
 
 struct VizOptions {
-    int gene_limit    = 100;
-    int species_limit = 100;
+    int gene_limit    = 20;
+    int species_limit = 20;
     double ssq_threshold = 0.0;
     bool m_grid = false;  // show only positive-class samples (DrPhylo mode)
 };

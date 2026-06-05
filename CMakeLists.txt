@@ -43,6 +43,7 @@ set(SOURCES
     src/pipeline_evaluate.cpp
     src/pipeline_adaptive.cpp
     src/pipeline_psc.cpp
+    src/input_detection.cpp
 )
 
 # Create executable

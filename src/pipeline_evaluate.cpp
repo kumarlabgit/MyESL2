@@ -2,6 +2,7 @@
 #include "pipeline_utils.hpp"
 #include "process_log.hpp"
 #include "fasta_parser.hpp"
+#include "input_detection.hpp"
 #include "numeric_parser.hpp"
 #include "pff_format.hpp"
 #include "visualizer.hpp"
@@ -25,6 +26,25 @@ namespace pipeline {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// Extract sequence IDs from a FASTA file by reading only header lines. Used
+// as a fallback when no PFF metadata is cached for an alignment in list.txt.
+static std::vector<std::string> read_fasta_seq_ids_only(const fs::path& p) {
+    std::vector<std::string> ids;
+    std::ifstream f(p);
+    if (!f) return ids;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] != '>') continue;
+        size_t end = line.find_first_of(" \t\r", 1);
+        std::string id = (end == std::string::npos)
+            ? line.substr(1)
+            : line.substr(1, end - 1);
+        if (!id.empty() && id.back() == '\r') id.pop_back();
+        if (!id.empty()) ids.push_back(id);
+    }
+    return ids;
+}
 
 static void write_sps_spp_file(
     const fs::path& out_path,
@@ -127,14 +147,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // --- Load list.txt ---
         std::vector<fs::path> all_numeric_paths;
         {
-            std::ifstream list_file(list_path);
-            if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
-            fs::path list_dir = list_path.parent_path();
-            std::string line;
-            while (std::getline(list_file, line)) {
-                if (line.empty()) continue;
-                for (char& c : line) if (c == '\\') c = '/';
-                all_numeric_paths.push_back(list_dir / line);
+            std::string detected = input_detection::maybe_warn_single_file(list_path, "numeric");
+            if (!detected.empty()) {
+                all_numeric_paths.push_back(list_path);
+            } else {
+                std::ifstream list_file(list_path);
+                if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                fs::path list_dir = list_path.parent_path();
+                std::string line;
+                while (std::getline(list_file, line)) {
+                    if (line.empty()) continue;
+                    for (char& c : line) if (c == '\\') c = '/';
+                    all_numeric_paths.push_back(list_dir / line);
+                }
             }
         }
         std::map<std::string, fs::path> stem_to_numeric;
@@ -180,6 +205,40 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             }
         }
         std::cout << "All model files present in list.\n";
+
+        // --- Seed species_sums from the full universe of seq_ids in list.txt ---
+        // Mirror of the FASTA branch: every species in any input file gets a
+        // row, even when the current model doesn't reference that file. See
+        // the FASTA-branch comment for the drphylo aggregation rationale.
+        {
+            for (const auto& p : all_numeric_paths) {
+                std::string fstem = p.stem().string();
+                fs::path pnf_path = cache_dir / (fstem + ".pnf");
+                std::vector<std::string> ids;
+                if (fs::exists(pnf_path)) {
+                    try { ids = numeric::read_pnf_metadata(pnf_path).seq_ids; }
+                    catch (...) { ids.clear(); }
+                }
+                if (ids.empty()) {
+                    // Fall back to scanning the .txt file's first column,
+                    // skipping the header row.
+                    std::ifstream nf(p);
+                    std::string nline;
+                    if (std::getline(nf, nline)) { /* discard header */ }
+                    while (std::getline(nf, nline)) {
+                        if (nline.empty()) continue;
+                        size_t end = nline.find_first_of(" \t\r");
+                        std::string id = (end == std::string::npos)
+                            ? nline : nline.substr(0, end);
+                        if (!id.empty()) ids.push_back(id);
+                    }
+                }
+                for (auto& id : ids) species_sums.emplace(id, 0.0);
+            }
+            std::cout << "Species universe: " << species_sums.size()
+                      << " unique seq_id(s) across " << all_numeric_paths.size()
+                      << " file(s)\n";
+        }
 
         // --- Phase 1: Convert to PNF as needed ---
         fs::create_directories(cache_dir);
@@ -422,14 +481,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // --- Load list.txt ---
         std::vector<fs::path> all_fasta_paths;
         {
-            std::ifstream list_file(list_path);
-            if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
-            fs::path list_dir = list_path.parent_path();
-            std::string line;
-            while (std::getline(list_file, line)) {
-                if (line.empty()) continue;
-                for (char& c : line) if (c == '\\') c = '/';
-                all_fasta_paths.push_back(list_dir / line);
+            std::string detected = input_detection::maybe_warn_single_file(list_path, "");
+            if (!detected.empty()) {
+                all_fasta_paths.push_back(list_path);
+            } else {
+                std::ifstream list_file(list_path);
+                if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                fs::path list_dir = list_path.parent_path();
+                std::string line;
+                while (std::getline(list_file, line)) {
+                    if (line.empty()) continue;
+                    for (char& c : line) if (c == '\\') c = '/';
+                    all_fasta_paths.push_back(list_dir / line);
+                }
             }
         }
 
@@ -451,6 +515,31 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             }
         }
         std::cout << "All model alignments present in list.\n";
+
+        // --- Seed species_sums from the full universe of seq_ids in list.txt ---
+        // Every species in any input alignment gets a row in the output, even
+        // when the current model doesn't reference that alignment. Species with
+        // no contribution stay at 0.0 and emit (intercept + 0) = intercept in
+        // the prediction column. This makes the row set invariant across
+        // lambdas of a drphylo grid: each lambda's model picks a different
+        // subset of alignments but every lambda's eval reports the same
+        // species set, so downstream aggregation can key by integer row index.
+        {
+            for (const auto& p : all_fasta_paths) {
+                std::string fstem = p.stem().string();
+                fs::path pff_path = cache_dir / (fstem + ".pff");
+                std::vector<std::string> ids;
+                if (fs::exists(pff_path)) {
+                    try { ids = fasta::read_pff_metadata(pff_path).seq_ids; }
+                    catch (...) { ids.clear(); }
+                }
+                if (ids.empty()) ids = read_fasta_seq_ids_only(p);
+                for (auto& id : ids) species_sums.emplace(id, 0.0);
+            }
+            std::cout << "Species universe: " << species_sums.size()
+                      << " unique seq_id(s) across " << all_fasta_paths.size()
+                      << " alignment(s)\n";
+        }
 
         // --- Load allowed chars ---
         std::unordered_set<char> allowed_chars;
