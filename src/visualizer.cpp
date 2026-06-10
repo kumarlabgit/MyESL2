@@ -195,16 +195,21 @@ void write_svg(const GenePredictionsTable& table,
     size_t Ndisp = row_order.size();
     size_t Gdisp = gene_indices.size();
 
-    // --- 3. Compute scale per gene column (symmetric around 0) ---
-    std::vector<double> gene_scale(Gdisp, 1.0);
-    for (size_t gk = 0; gk < Gdisp; ++gk) {
-        size_t g = gene_indices[gk];
+    // --- 3. Compute one shared scale across all displayed gene cells ---
+    // Matches MyESL's gene_contribution_visualizer.py:207-208, which normalizes
+    // the entire gene-column block by a single max|value| so that between-gene
+    // magnitude differences remain visible in the colors.
+    double gene_scale = 1.0;
+    {
         double maxabs = 0.0;
-        for (size_t i : row_order) {
-            double v = table.gene_scores[g][i];
-            if (!std::isnan(v) && std::abs(v) > maxabs) maxabs = std::abs(v);
+        for (size_t gk = 0; gk < Gdisp; ++gk) {
+            size_t g = gene_indices[gk];
+            for (size_t i : row_order) {
+                double v = table.gene_scores[g][i];
+                if (!std::isnan(v) && std::abs(v) > maxabs) maxabs = std::abs(v);
+            }
         }
-        gene_scale[gk] = (maxabs > 0.0) ? maxabs : 1.0;
+        gene_scale = (maxabs > 0.0) ? maxabs : 1.0;
     }
 
     // Prediction/Response scale
@@ -355,7 +360,7 @@ void write_svg(const GenePredictionsTable& table,
             size_t g = gene_indices[gk];
             double raw = table.gene_scores[g][i];
             double val = std::isnan(raw) ? std::numeric_limits<double>::quiet_NaN()
-                                         : raw / gene_scale[gk];
+                                         : raw / gene_scale;
             std::string color = diverging_color(val);
             int cx = MARGIN_LEFT + static_cast<int>(FIXED_COLS + gk) * CELL_W;
             o << "<rect x='" << cx << "' y='" << row_y
