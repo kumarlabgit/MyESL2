@@ -133,12 +133,21 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--minor-column` | Add a per-gene binary column indicating presence of any non-major allele |
 | `--tiered-minor-col` | Add per-gene tiered minor allele columns at 0%, 0.1%, 1%, and 5% frequency thresholds (mutually exclusive with `--minor-column`) |
 | `--class-bal <mode>` | Class balancing before regression: `up`, `down`, or `weighted` |
+| `--feature-normalize <mode>` | Column-wise transform applied to the feature matrix after class balancing and before the solver sees it (numeric input only): `none`, `center`, `zscore`, or `slep` (default: `none`) |
 | `--dropout <file>` | File listing feature labels to exclude from encoding (one label per line) |
 
 **Class balancing modes:**
 - `up` — Upsample minority class to match majority class size
 - `down` — Downsample majority class to match minority class size
 - `weighted` — Apply inverse class weights; writes `sweights.txt`
+
+**Feature normalization modes (`--feature-normalize`, numeric input only):**
+- `none` — No transform (default); output is byte-identical to omitting the flag
+- `center` — Subtract per-column mean (mean-shifting)
+- `zscore` — Subtract per-column mean and divide by per-column standard deviation, the standard auto-scaling that brings every column to unit variance
+- `slep` — Subtract per-column mean and divide by `sqrt(sum(x²)/N)` per column (RMS denominator computed on the original column before centering); reproduces the SLEP Matlab package's `opts.nFlag=1` normalization from `mcLeastR.m` / `sgLeastR.m` / `overlapping_LeastR.m`
+
+Statistics are computed in `double` for numerical stability and applied after class balancing on the exact matrix the solver sees. Zero-scale columns (`|scale| ≤ 1e-10`) have their scale clamped to `1.0`. The transform parameters are persisted to `<output_dir>/feature_normalization.txt` (TSV: `Label`, `Mean`, `Scale`, with a `# mode=<mode>` header), once per run — `evaluate` auto-loads this file and replays the identical transform on new data. The flag is rejected for `--datatype` other than `numeric` (centering a one-hot FASTA matrix would silently corrupt categorical semantics).
 
 #### Feature matrix output
 
@@ -207,6 +216,7 @@ output_dir/
 ├── missing_sequences.txt             # Samples absent from one or more alignments
 ├── minor_alleles.txt                 # Minor allele labels (only with --minor-column)
 ├── tiered_minor_alleles.txt          # Minor allele labels with frequencies (only with --tiered-minor-col)
+├── feature_normalization.txt        # Per-column Mean+Scale (only with --feature-normalize)
 ├── lambda_0/
 │   ├── weights.txt                   # Feature weights + intercept
 │   ├── gss.txt                       # Gene Significance Scores (sum |w| per gene)
@@ -275,6 +285,8 @@ Optionally compare those predictions to known labels for accuracy assessment.
 | `--gene-limit N` | | Maximum genes displayed in auto-generated SVG (default: 20) |
 | `--species-limit N` | | Maximum species displayed in auto-generated SVG (default: 20) |
 
+If the model was trained with `--feature-normalize`, `evaluate` automatically loads `feature_normalization.txt` (searched first as a sibling of `weights.txt`, then in the parent directory for `lambda_N/weights.txt` layouts) and applies the same column-wise transform to new data before scoring. No CLI flag is required. Models trained without normalization have no such file; the lookup is silently skipped and evaluate runs as before.
+
 **Outputs** (all written next to `<output_file>` in the same directory):
 - `<output_file>` — TSV with columns: `SequenceID`, `PredictedValue`, and (only when `--hypothesis` is supplied) `TrueValue`
 - `eval_gene_predictions.txt` — Per-sample per-gene scores used by `drphylo` and `aim`
@@ -338,7 +350,7 @@ myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 | `--gene-limit N` | Maximum genes displayed in aggregated eval.svg (default: 20) |
 | `--species-limit N` | Maximum species displayed in aggregated eval.svg (default: 20) |
 
-All `--lambda`, `--lambda-grid`, `--lambda-file`, `--use-logspace`, `--param`, `--cache-dir`, `--threads`, group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`), and encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`) from `train` are also accepted. Lambda values must be in `(0,1)`.
+All `--lambda`, `--lambda-grid`, `--lambda-file`, `--use-logspace`, `--param`, `--cache-dir`, `--threads`, group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`), encoding options (`--auto-bit-ct`, `--drop-major-allele`, `--minor-column`, `--tiered-minor-col`, `--max-mem`), and `--feature-normalize` from `train` are also accepted. Lambda values must be in `(0,1)`.
 
 **Outputs:**
 
@@ -365,7 +377,7 @@ myesl2 aim <list.txt> <hypothesis.txt> <output_dir> [options]
 | `--aim-max-ft N` | Maximum features to accumulate in dropout list (default: 1000) |
 | `--aim-window N` | Top-N features considered per iteration for dropout (default: 100) |
 
-All `train` options are accepted, including `--use-logspace` and the group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`). Lambda values must be in `(0,1)`. Defaults applied if not specified:
+All `train` options are accepted, including `--use-logspace`, `--feature-normalize` (numeric input only), and the group-penalty flags (`--group-penalty-type`, `--initial-gp-value`, `--final-gp-value`, `--gp-step`). Lambda values must be in `(0,1)`. Defaults applied if not specified:
 - Method: `sg_lasso_logisticr`
 - Lambdas: `--lambda-grid 0.1,0.9,0.1 0.0001,0.0002,0.0001`
 
@@ -522,6 +534,64 @@ myesl2 info <file.pff>
 ```
 
 Prints metadata from a cached PFF (Parsed FASTA File) binary: number of sequences, alignment length, storage orientation, and sequence IDs.
+
+---
+
+### `taskfile` — Run any task from a YAML control file
+
+```
+myesl2 taskfile <control.yaml> [overrides...]
+```
+
+Drives any MyESL2 subcommand from a YAML control file instead of a long argv. The YAML must declare a `task_type:` key naming one of `train`, `evaluate`, `drphylo`, `aim`, `psc`, `visualize`, `encode-sizes`, or `info`; every other key maps to a CLI flag with the leading `--` stripped and hyphens preserved (so `feature-normalize: zscore` is the YAML form of `--feature-normalize zscore`).
+
+**Key conventions:**
+
+| YAML form | Maps to |
+|-----------|---------|
+| `list_path:`, `hypothesis_path:`, `output_dir:`, `alignments_dir:`, etc. | Positional arguments (named per task) |
+| `feature-normalize: zscore` | `--feature-normalize zscore` |
+| `class-bal: up` | `--class-bal up` |
+| `lambda: [0.3, 0.3]` | `--lambda 0.3 0.3` (YAML sequence — one scalar per CLI token) |
+| `lambda-grid: ["0.1,0.3,0.1", "0.2,0.4,0.1"]` | `--lambda-grid 0.1,0.3,0.1 0.2,0.4,0.1` (sequence of two comma-triple strings; each string is a `min,max,step` spec) |
+| `use-logspace: true` | `--use-logspace` (boolean flag) |
+| `param: { intercept: false, maxIter: 100 }` | Repeated `--param key=value` |
+
+**CLI overrides:** any flag passed after the YAML path overrides the matching YAML value and prints `[Warning] taskfile override: key=yaml -> cli` to stderr so the conflict is visible.
+
+**Per-task-type whitelist:** keys that don't apply to the selected `task_type` are rejected before any work begins (e.g. `feature-normalize: zscore` under `task_type: psc` is an error). Validation, defaults, and error paths are identical to direct CLI invocation — `taskfile` synthesizes argv from the merged keys and dispatches into the same per-command handlers.
+
+**Example (train with numeric input, z-score normalization, and a lambda grid):**
+
+```yaml
+# train.yaml
+task_type: train
+list_path: numeric_files.txt
+hypothesis_path: labels.txt
+output_dir: results/
+datatype: numeric
+method: sg_lasso_logisticr
+
+# --lambda-grid 0.1,0.3,0.1 0.2,0.4,0.1 (a 3 x 3 = 9-cell Cartesian sweep).
+# Each entry is a "min,max,step" comma-triple; quotes keep the comma inside
+# one YAML scalar instead of letting it parse as a nested sequence.
+lambda-grid:
+  - "0.1,0.3,0.1"
+  - "0.2,0.4,0.1"
+
+feature-normalize: zscore
+threads: 1
+cache-dir: pnf_cache/
+```
+
+```bash
+myesl2 taskfile train.yaml
+
+# CLI override (prints [Warning] taskfile override: threads=1 -> 4):
+myesl2 taskfile train.yaml --threads 4
+```
+
+To run a **single** lambda pair instead of a grid, replace the `lambda-grid:` block with `lambda: [0.3, 0.3]` (mapping to `--lambda 0.3 0.3`).
 
 ---
 
