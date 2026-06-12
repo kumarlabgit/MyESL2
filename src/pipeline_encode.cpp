@@ -415,6 +415,75 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
+        // Numeric-only optional column-wise feature normalization. Runs after class
+        // balancing on the exact matrix the solver will see. Modes: center, zscore,
+        // slep (mcLeastR.m opts.nFlag=1: center then divide by sqrt(sum(x^2)/N)).
+        if (opts.feature_normalize != "none") {
+            const std::string& mode = opts.feature_normalize;
+            if (mode != "center" && mode != "zscore" && mode != "slep")
+                throw std::runtime_error("--feature-normalize: unknown mode '"
+                    + mode + "' (expected: none, center, zscore, slep)");
+
+            std::cout << "\nFeature normalization: mode=" << mode
+                      << ", " << total_cols << " column(s)\n";
+
+            std::vector<double> means(total_cols, 0.0);
+            std::vector<double> scales(total_cols, 1.0);
+
+            for (uint64_t j = 0; j < total_cols; ++j) {
+                double s = 0.0;
+                for (uint32_t i = 0; i < N; ++i) s += features(i, j);
+                means[j] = s / static_cast<double>(N);
+            }
+
+            if (mode == "zscore") {
+                for (uint64_t j = 0; j < total_cols; ++j) {
+                    double s2 = 0.0;
+                    for (uint32_t i = 0; i < N; ++i) {
+                        double d = static_cast<double>(features(i, j)) - means[j];
+                        s2 += d * d;
+                    }
+                    double sd = std::sqrt(s2 / static_cast<double>(N));
+                    scales[j] = (std::abs(sd) <= 1e-10) ? 1.0 : sd;
+                }
+            } else if (mode == "slep") {
+                // SLEP nu = sqrt(sum(A.^2)/m) — computed on the original column.
+                for (uint64_t j = 0; j < total_cols; ++j) {
+                    double s2 = 0.0;
+                    for (uint32_t i = 0; i < N; ++i) {
+                        double x = static_cast<double>(features(i, j));
+                        s2 += x * x;
+                    }
+                    double rms = std::sqrt(s2 / static_cast<double>(N));
+                    scales[j] = (std::abs(rms) <= 1e-10) ? 1.0 : rms;
+                }
+            }
+
+            for (uint64_t j = 0; j < total_cols; ++j) {
+                float m = static_cast<float>(means[j]);
+                float s = static_cast<float>(scales[j]);
+                for (uint32_t i = 0; i < N; ++i)
+                    features(i, j) = (features(i, j) - m) / s;
+            }
+
+            {
+                std::ofstream nf(opts.output_dir / "feature_normalization.txt");
+                nf << "# mode=" << mode << "\n";
+                nf << "Label\tMean\tScale\n";
+                nf << std::setprecision(17);
+                uint64_t pos = 0;
+                for (auto& nr : num_results) {
+                    if (nr.failed) continue;
+                    for (auto& feat_name : nr.feature_labels) {
+                        nf << nr.stem << '_' << feat_name << '\t'
+                           << means[pos] << '\t' << scales[pos] << '\n';
+                        ++pos;
+                    }
+                }
+            }
+            std::cout << "  -> " << (opts.output_dir / "feature_normalization.txt").string() << "\n";
+        }
+
         // Write alignment table (per-file, before group_table)
         std::cout << "\nWriting alignment table...\n";
         alg_table.zeros(3, n_aligned);

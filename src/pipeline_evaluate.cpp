@@ -123,6 +123,45 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
     // -------------------------------------------------------------------------
     if (datatype == "numeric") {
 
+        // --- Load optional feature_normalization.txt written by encode (numeric only) ---
+        // Look first as a sibling of weights.txt, then in the parent dir (handles
+        // both flat output dirs and per-lambda layouts like <run>/lambda_N/weights.txt).
+        std::map<std::string, std::pair<double, double>> norm_params;
+        std::string norm_mode;
+        {
+            std::vector<fs::path> candidates = {
+                weights_path.parent_path() / "feature_normalization.txt",
+                weights_path.parent_path().parent_path() / "feature_normalization.txt",
+            };
+            for (const auto& cand : candidates) {
+                if (!fs::exists(cand)) continue;
+                std::ifstream nf(cand);
+                if (!nf) continue;
+                std::string line;
+                while (std::getline(nf, line)) {
+                    if (line.empty()) continue;
+                    if (line[0] == '#') {
+                        auto eq = line.find("mode=");
+                        if (eq != std::string::npos) norm_mode = line.substr(eq + 5);
+                        continue;
+                    }
+                    if (line.rfind("Label", 0) == 0) continue; // header
+                    size_t t1 = line.find('\t');
+                    if (t1 == std::string::npos) continue;
+                    size_t t2 = line.find('\t', t1 + 1);
+                    if (t2 == std::string::npos) continue;
+                    std::string label = line.substr(0, t1);
+                    double mean  = std::stod(line.substr(t1 + 1, t2 - t1 - 1));
+                    double scale = std::stod(line.substr(t2 + 1));
+                    norm_params[label] = {mean, scale};
+                }
+                std::cout << "Feature normalization: mode=" << norm_mode
+                          << ", " << norm_params.size() << " column(s) loaded from "
+                          << cand.string() << "\n";
+                break;
+            }
+        }
+
         // --- Parse raw weights (label → weight) ---
         std::map<std::string, double> raw_weights;
         {
@@ -305,8 +344,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 auto it = feat_idx.find(e.feature);
                 if (it == feat_idx.end()) continue;
                 uint32_t f = it->second;
+                // Apply train-time column normalization if present (numeric only).
+                // Missing labels fall back to identity transform (mean=0, scale=1).
+                double mean = 0.0, scale = 1.0;
+                if (!norm_params.empty()) {
+                    auto nit = norm_params.find(e.stem + "_" + e.feature);
+                    if (nit != norm_params.end()) {
+                        mean = nit->second.first;
+                        scale = nit->second.second;
+                    }
+                }
                 for (uint32_t si = 0; si < meta.num_sequences; ++si) {
-                    double contrib = e.weight * data[si][f];
+                    double x = (static_cast<double>(data[si][f]) - mean) / scale;
+                    double contrib = e.weight * x;
                     species_sums[meta.seq_ids[si]] += contrib;
                     eval_gene_scores[stem][meta.seq_ids[si]] += contrib;
                 }

@@ -53,6 +53,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "class-bal", "dropout", "write-features", "write-features-transposed",
             "max-mem", "adaptive-sparsification", "adaptive-lambda-grid",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
+            "feature-normalize",
         };
     } else if (task_type == "evaluate") {
         s.positionals = {"weights_path", "list_path", "output_file"};
@@ -83,6 +84,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "max-mem",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
+            "feature-normalize",
         };
     } else if (task_type == "aim") {
         s.positionals = {"list_path", "hypothesis_path", "output_dir"};
@@ -101,6 +103,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "class-bal", "drop-major-allele", "minor-column", "tiered-minor-col",
             "auto-bit-ct", "max-mem",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
+            "feature-normalize",
         };
     } else if (task_type == "psc") {
         s.positionals = {"alignments_dir", "output_dir"};

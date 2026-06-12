@@ -102,6 +102,15 @@ void print_usage(const char* prog_name) {
         "    --tiered-minor-col           add per-gene tiered minor allele columns (0%, 0.1%, 1%, 5%)\n"
         "    --class-bal up|down|weighted balance classes before regression\n"
         "    --dropout <file>             exclude features listed in file from encoding\n"
+        "    --feature-normalize <mode>   column-wise transform of the numeric feature matrix\n"
+        "                                 (--datatype numeric only). Modes:\n"
+        "                                   none   (default) no transform\n"
+        "                                   center subtract column mean (mean-shifting)\n"
+        "                                   zscore (x - mean) / stddev (auto-scaling)\n"
+        "                                   slep   (x - mean) / sqrt(sum(x^2)/N), matches\n"
+        "                                          SLEP's opts.nFlag=1 column normalization\n"
+        "                                 Writes feature_normalization.txt to output_dir;\n"
+        "                                 evaluate reads it to apply the same transform.\n"
         "    --write-features <path>      write encoded feature matrix to file\n"
         "    --write-features-transposed <path>  write transposed feature matrix to file\n"
         "    --max-mem <bytes>            abort if estimated feature matrix exceeds this size (default: 8589934592)\n"
@@ -169,7 +178,8 @@ void print_usage(const char* prog_name) {
         "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
-        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
+        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
+        "    --feature-normalize  (numeric input only; see train help)\n\n"
 
         "-------------------------------------------\n"
         "AIM\n"
@@ -184,7 +194,8 @@ void print_usage(const char* prog_name) {
         "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
-        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n\n"
+        "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
+        "    --feature-normalize  (numeric input only; see train help)\n\n"
 
         "-------------------------------------------\n"
         "PSC\n"
@@ -353,10 +364,19 @@ int run_train(int argc, char* argv[]) {
         else if (arg == "--initial-gp-value"   && i+1<argc) train_opts.initial_gp_value = std::stod(argv[++i]);
         else if (arg == "--final-gp-value"     && i+1<argc) train_opts.final_gp_value   = std::stod(argv[++i]);
         else if (arg == "--gp-step"            && i+1<argc) train_opts.gp_step          = std::stod(argv[++i]);
+        else if (arg == "--feature-normalize"  && i+1<argc) enc_opts.feature_normalize = argv[++i];
         else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
     }
     if (train_opts.params.count("disable_mc") && train_opts.params.at("disable_mc") == "1")
         enc_opts.disable_mc = true;
+
+    if (enc_opts.feature_normalize != "none") {
+        if (enc_opts.feature_normalize != "center" && enc_opts.feature_normalize != "zscore" &&
+            enc_opts.feature_normalize != "slep")
+            throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
+        if (pre_opts.datatype != "numeric")
+            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
+    }
 
     {
         std::string gpt = train_opts.group_penalty_type;
@@ -577,7 +597,15 @@ int run_drphylo(int argc, char* argv[]) {
         else if (arg == "--initial-gp-value"   && i+1<argc) train_opts_base.initial_gp_value = std::stod(argv[++i]);
         else if (arg == "--final-gp-value"     && i+1<argc) train_opts_base.final_gp_value   = std::stod(argv[++i]);
         else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
+        else if (arg == "--feature-normalize"  && i+1<argc) enc_opts_base.feature_normalize = argv[++i];
         else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
+    }
+    if (enc_opts_base.feature_normalize != "none") {
+        if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
+            enc_opts_base.feature_normalize != "slep")
+            throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
+        if (pre_opts.datatype != "numeric")
+            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
     }
     // Resolve deprecated method aliases
     {
@@ -775,7 +803,15 @@ int run_aim(int argc, char* argv[]) {
         else if (arg == "--initial-gp-value"   && i+1<argc) train_opts_base.initial_gp_value = std::stod(argv[++i]);
         else if (arg == "--final-gp-value"     && i+1<argc) train_opts_base.final_gp_value   = std::stod(argv[++i]);
         else if (arg == "--gp-step"            && i+1<argc) train_opts_base.gp_step          = std::stod(argv[++i]);
+        else if (arg == "--feature-normalize"  && i+1<argc) enc_opts_base.feature_normalize = argv[++i];
         else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
+    }
+    if (enc_opts_base.feature_normalize != "none") {
+        if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
+            enc_opts_base.feature_normalize != "slep")
+            throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
+        if (pre_opts.datatype != "numeric")
+            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
     }
     // Resolve deprecated method aliases
     {

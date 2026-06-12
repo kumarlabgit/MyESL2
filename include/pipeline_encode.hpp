@@ -47,6 +47,10 @@ struct EncodeOptions {
     uint64_t max_mem    = uint64_t(8) * 1024 * 1024 * 1024;  // abort if estimated matrix exceeds this (bytes); default 8 GB
     bool     disable_mc = false; // if true, warn instead of throwing on max_mem exceeded
     uint32_t lambda_count = 1;   // number of lambda pairs (for peak memory estimate)
+    // Numeric-only column-wise feature transform applied after class balancing,
+    // before the matrix is handed to the solver. Modes: none|center|zscore|slep.
+    // See SLEP mcLeastR.m opts.nFlag for the "slep" mode reference.
+    std::string feature_normalize = "none";
 };
 
 EncodeResult encode(const EncodeOptions& opts);
