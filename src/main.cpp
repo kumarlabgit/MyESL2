@@ -41,13 +41,14 @@ static std::unordered_set<std::string> load_dropout_labels(const char* path) {
     return labels;
 }
 
-void print_usage(const char* prog_name) {
+void print_overview(const char* prog_name) {
     const std::string p = prog_name;
     std::cout <<
         "MyESL2 - My Evolutionary Sparse Learning 2\n"
         "===========================================\n\n"
         "USAGE\n"
-        "  " + p + " <command> [args...]\n\n"
+        "  " + p + " <command> [args...]\n"
+        "  " + p + " --help <command>     show detailed help for <command>\n\n"
         "COMMANDS\n"
         "  train       Full pipeline: preprocess -> encode -> regression\n"
         "  evaluate    Apply a trained model to new data\n"
@@ -56,9 +57,12 @@ void print_usage(const char* prog_name) {
         "  psc         Paired Species Contrast analysis\n"
         "  visualize   SVG heatmap from gene_predictions.txt\n"
         "  info        Display PFF file metadata\n"
-        "  taskfile    Run any task from a YAML control file\n\n"
+        "  taskfile    Run any task from a YAML control file\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_train(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "TRAIN\n"
         "  " + p + " train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]\n\n"
         "  Positional:\n"
@@ -131,9 +135,12 @@ void print_usage(const char* prog_name) {
         "    --dlt                        use direct lookup table encoder\n"
         "    --datatype <type>            universal (default), protein, nucleotide, numeric\n"
         "                                 numeric: list file points to whitespace-delimited tabular files\n"
-        "                                          (first col = sample name, remaining cols = features)\n\n"
+        "                                          (first col = sample name, remaining cols = features)\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_evaluate(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "EVALUATE\n"
         "  " + p + " evaluate <weights.txt> <list.txt> <output_file> [options]\n\n"
         "  Apply a trained model to new data and write per-species predictions.\n\n"
@@ -157,9 +164,12 @@ void print_usage(const char* prog_name) {
         "    --species-limit N       max species displayed in auto-generated SVG (default: 20)\n"
         "    --cache-dir DIR\n"
         "    --threads N\n"
-        "    --datatype <type>\n\n"
+        "    --datatype <type>\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_drphylo(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "DRPHYLO\n"
         "  " + p + " drphylo <list.txt> <hypothesis.txt> <output_dir> [options]  (direct mode)\n"
         "  " + p + " drphylo <list.txt> <output_dir> --tree <tree.nwk> [options] (tree mode)\n\n"
@@ -180,9 +190,12 @@ void print_usage(const char* prog_name) {
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
-        "    --feature-normalize  (numeric input only; see train help)\n\n"
+        "    --feature-normalize  (numeric input only; see train help)\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_aim(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "AIM\n"
         "  " + p + " aim <list.txt> <hypothesis.txt> <output_dir> [options]\n\n"
         "  AIM-specific:\n"
@@ -196,9 +209,12 @@ void print_usage(const char* prog_name) {
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
-        "    --feature-normalize  (numeric input only; see train help)\n\n"
+        "    --feature-normalize  (numeric input only; see train help)\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_psc(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "PSC\n"
         "  " + p + " psc <alignments_dir> <output_dir> [options]\n\n"
         "  Input:\n"
@@ -258,22 +274,32 @@ void print_usage(const char* prog_name) {
         // "  Auto-pairs:\n"
         // "    --auto-pairs-method <method>  (default: simple_deterministic)\n"
         // "    --auto-pairs-num-alternates N (default: 0)\n"
-        // "    --auto-pairs-max-combinations N (default: 1)\n\n"
+        // "    --auto-pairs-max-combinations N (default: 1)\n"
+        ;
+}
 
-        "-------------------------------------------\n"
+void print_help_visualize(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "VISUALIZE\n"
         "  " + p + " visualize <gene_predictions.txt> <output.svg> [options]\n\n"
         "    --gene-limit N        max genes displayed\n"
         "    --species-limit N     max species displayed\n"
         "    --ssq-threshold X     hide genes with sum-squared score below X\n"
-        "    --m-grid              DrPhylo mode: show only positive-class samples\n\n"
+        "    --m-grid              DrPhylo mode: show only positive-class samples\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_info(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "INFO\n"
         "  " + p + " info <file.pff>\n"
-        "    Display metadata for a PFF or PNF cache file.\n\n"
+        "    Display metadata for a PFF or PNF cache file.\n";
+}
 
-        "-------------------------------------------\n"
+void print_help_taskfile(const char* prog_name) {
+    const std::string p = prog_name;
+    std::cout <<
         "TASKFILE\n"
         "  " + p + " taskfile <control.yaml> [overrides...]\n\n"
         "    Run any MyESL2 task from a YAML control file. The YAML must contain\n"
@@ -288,12 +314,25 @@ void print_usage(const char* prog_name) {
         "    selected task_type are rejected.\n";
 }
 
+void print_help(const char* prog_name, const std::string& command) {
+    if      (command == "train")        print_help_train(prog_name);
+    else if (command == "evaluate")     print_help_evaluate(prog_name);
+    else if (command == "drphylo")      print_help_drphylo(prog_name);
+    else if (command == "aim")          print_help_aim(prog_name);
+    else if (command == "psc")          print_help_psc(prog_name);
+    else if (command == "visualize")    print_help_visualize(prog_name);
+    else if (command == "info")         print_help_info(prog_name);
+    else if (command == "taskfile" ||
+             command == "encode-sizes") print_help_taskfile(prog_name);
+    else                                print_overview(prog_name);
+}
+
 int run_taskfile(int argc, char* argv[]);
 
 int run_train(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Error: train requires <list.txt> <hypothesis.txt> <output_dir>\n";
-        print_usage(argv[0]);
+        print_help(argv[0], "train");
         return 1;
     }
 
@@ -459,7 +498,7 @@ int run_train(int argc, char* argv[]) {
 int run_evaluate(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Error: evaluate requires <weights.txt> <list.txt> <output_file>\n";
-        print_usage(argv[0]);
+        print_help(argv[0], "evaluate");
         return 1;
     }
 
@@ -493,7 +532,7 @@ int run_evaluate(int argc, char* argv[]) {
 int run_info(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Error: info requires a PFF file path\n";
-        print_usage(argv[0]);
+        print_help(argv[0], "info");
         return 1;
     }
     fs::path pff_path = argv[2];
@@ -533,6 +572,7 @@ int run_drphylo(int argc, char* argv[]) {
         std::cerr << "Error: drphylo usage:\n"
                   << "  drphylo <list.txt> <hypothesis.txt> <output_dir> [options]  (direct mode)\n"
                   << "  drphylo <list.txt> <output_dir> --tree <tree.nwk> [options] (tree mode)\n";
+        print_help(argv[0], "drphylo");
         return 1;
     }
 
@@ -753,6 +793,7 @@ int run_drphylo(int argc, char* argv[]) {
 int run_aim(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Error: aim requires <list.txt> <hypothesis.txt> <output_dir>\n";
+        print_help(argv[0], "aim");
         return 1;
     }
     fs::path aim_list_path = argv[2];
@@ -1137,7 +1178,7 @@ int run_aim(int argc, char* argv[]) {
 int run_psc(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Error: psc requires <alignments_dir> <output_dir>\n";
-        print_usage(argv[0]);
+        print_help(argv[0], "psc");
         return 1;
     }
 
@@ -1279,7 +1320,11 @@ int run_encode_sizes(int argc, char* argv[]) {
 }
 
 int run_visualize(int argc, char* argv[]) {
-    if (argc < 4) { std::cerr << "Error: visualize requires <gene_predictions.txt> <output.svg>\n"; return 1; }
+    if (argc < 4) {
+        std::cerr << "Error: visualize requires <gene_predictions.txt> <output.svg>\n";
+        print_help(argv[0], "visualize");
+        return 1;
+    }
     fs::path gp_path  = argv[2];
     fs::path svg_path = argv[3];
     viz::VizOptions vopts;
@@ -1298,13 +1343,33 @@ int run_visualize(int argc, char* argv[]) {
     return 0;
 }
 
+static bool is_help_flag(const std::string& s) {
+    return s == "--help" || s == "-h" || s == "-?" || s == "/?";
+}
+
 int main(int argc, char* argv[]) {
     try {
         if (argc < 2) {
-            print_usage(argv[0]);
-            return 1;
+            print_overview(argv[0]);
+            return 0;
         }
         std::string command = argv[1];
+
+        // `myesl2 --help` or `myesl2 --help <command>`
+        if (is_help_flag(command)) {
+            if (argc >= 3) print_help(argv[0], argv[2]);
+            else           print_overview(argv[0]);
+            return 0;
+        }
+
+        // `myesl2 <command> --help` (or -h, anywhere in argv)
+        for (int i = 2; i < argc; ++i) {
+            if (is_help_flag(argv[i])) {
+                print_help(argv[0], command);
+                return 0;
+            }
+        }
+
         if      (command == "train")        return run_train(argc, argv);
         else if (command == "evaluate")     return run_evaluate(argc, argv);
         else if (command == "info")         return run_info(argc, argv);
@@ -1316,7 +1381,7 @@ int main(int argc, char* argv[]) {
         else if (command == "taskfile")     return run_taskfile(argc, argv);
         else {
             std::cerr << "Error: unknown command '" << command << "'\n";
-            print_usage(argv[0]);
+            print_overview(argv[0]);
             return 1;
         }
     } catch (const std::exception& e) {
