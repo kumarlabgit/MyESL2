@@ -104,11 +104,12 @@ void print_usage(const char* prog_name) {
         "    --dropout <file>             exclude features listed in file from encoding\n"
         "    --feature-normalize <mode>   column-wise transform of the numeric feature matrix\n"
         "                                 (--datatype numeric only). Modes:\n"
-        "                                   none   (default) no transform\n"
+        "                                   none   no transform\n"
         "                                   center subtract column mean (mean-shifting)\n"
         "                                   zscore (x - mean) / stddev (auto-scaling)\n"
         "                                   slep   (x - mean) / sqrt(sum(x^2)/N), matches\n"
         "                                          SLEP's opts.nFlag=1 column normalization\n"
+        "                                 Default: slep for --datatype numeric, otherwise none.\n"
         "                                 Writes feature_normalization.txt to output_dir;\n"
         "                                 evaluate reads it to apply the same transform.\n"
         "    --write-features <path>      write encoded feature matrix to file\n"
@@ -370,6 +371,8 @@ int run_train(int argc, char* argv[]) {
     if (train_opts.params.count("disable_mc") && train_opts.params.at("disable_mc") == "1")
         enc_opts.disable_mc = true;
 
+    if (enc_opts.feature_normalize == "auto")
+        enc_opts.feature_normalize = (pre_opts.datatype == "numeric") ? "slep" : "none";
     if (enc_opts.feature_normalize != "none") {
         if (enc_opts.feature_normalize != "center" && enc_opts.feature_normalize != "zscore" &&
             enc_opts.feature_normalize != "slep")
@@ -600,6 +603,8 @@ int run_drphylo(int argc, char* argv[]) {
         else if (arg == "--feature-normalize"  && i+1<argc) enc_opts_base.feature_normalize = argv[++i];
         else std::cerr << "Warning: unknown drphylo argument '" << arg << "', ignoring\n";
     }
+    if (enc_opts_base.feature_normalize == "auto")
+        enc_opts_base.feature_normalize = (pre_opts.datatype == "numeric") ? "slep" : "none";
     if (enc_opts_base.feature_normalize != "none") {
         if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
             enc_opts_base.feature_normalize != "slep")
@@ -806,6 +811,8 @@ int run_aim(int argc, char* argv[]) {
         else if (arg == "--feature-normalize"  && i+1<argc) enc_opts_base.feature_normalize = argv[++i];
         else std::cerr << "Warning: unknown aim argument '" << arg << "', ignoring\n";
     }
+    if (enc_opts_base.feature_normalize == "auto")
+        enc_opts_base.feature_normalize = (pre_opts.datatype == "numeric") ? "slep" : "none";
     if (enc_opts_base.feature_normalize != "none") {
         if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
             enc_opts_base.feature_normalize != "slep")

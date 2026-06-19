@@ -49,8 +49,10 @@ struct EncodeOptions {
     uint32_t lambda_count = 1;   // number of lambda pairs (for peak memory estimate)
     // Numeric-only column-wise feature transform applied after class balancing,
     // before the matrix is handed to the solver. Modes: none|center|zscore|slep.
-    // See SLEP mcLeastR.m opts.nFlag for the "slep" mode reference.
-    std::string feature_normalize = "none";
+    // The "auto" sentinel is resolved by main.cpp after datatype is known:
+    // numeric -> "slep", anything else -> "none". See SLEP mcLeastR.m opts.nFlag
+    // for the "slep" mode reference.
+    std::string feature_normalize = "auto";
 };
 
 EncodeResult encode(const EncodeOptions& opts);

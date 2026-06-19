@@ -133,7 +133,7 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--minor-column` | Add a per-gene binary column indicating presence of any non-major allele |
 | `--tiered-minor-col` | Add per-gene tiered minor allele columns at 0%, 0.1%, 1%, and 5% frequency thresholds (mutually exclusive with `--minor-column`) |
 | `--class-bal <mode>` | Class balancing before regression: `up`, `down`, or `weighted` |
-| `--feature-normalize <mode>` | Column-wise transform applied to the feature matrix after class balancing and before the solver sees it (numeric input only): `none`, `center`, `zscore`, or `slep` (default: `none`) |
+| `--feature-normalize <mode>` | Column-wise transform applied to the feature matrix after class balancing and before the solver sees it (numeric input only): `none`, `center`, `zscore`, or `slep`. Default: `slep` for `--datatype numeric`, otherwise `none` |
 | `--dropout <file>` | File listing feature labels to exclude from encoding (one label per line) |
 
 **Class balancing modes:**
@@ -142,12 +142,14 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 - `weighted` — Apply inverse class weights; writes `sweights.txt`
 
 **Feature normalization modes (`--feature-normalize`, numeric input only):**
-- `none` — No transform (default); output is byte-identical to omitting the flag
+- `none` — No transform; output is byte-identical to disabling normalization
 - `center` — Subtract per-column mean (mean-shifting)
 - `zscore` — Subtract per-column mean and divide by per-column standard deviation, the standard auto-scaling that brings every column to unit variance
 - `slep` — Subtract per-column mean and divide by `sqrt(sum(x²)/N)` per column (RMS denominator computed on the original column before centering); reproduces the SLEP Matlab package's `opts.nFlag=1` normalization from `mcLeastR.m` / `sgLeastR.m` / `overlapping_LeastR.m`
 
-Statistics are computed in `double` for numerical stability and applied after class balancing on the exact matrix the solver sees. Zero-scale columns (`|scale| ≤ 1e-10`) have their scale clamped to `1.0`. The transform parameters are persisted to `<output_dir>/feature_normalization.txt` (TSV: `Label`, `Mean`, `Scale`, with a `# mode=<mode>` header), once per run — `evaluate` auto-loads this file and replays the identical transform on new data. The flag is rejected for `--datatype` other than `numeric` (centering a one-hot FASTA matrix would silently corrupt categorical semantics).
+`slep` is the default for `--datatype numeric` because raw numeric feature columns commonly differ in magnitude by orders of magnitude, and L1/L2 regularization on the un-normalized matrix would implicitly weight large-magnitude columns more heavily; pass `--feature-normalize none` to opt out. For non-numeric datatypes the default is `none` and the flag is rejected if set explicitly (centering a one-hot FASTA matrix would silently corrupt categorical semantics).
+
+Statistics are computed in `double` for numerical stability and applied after class balancing on the exact matrix the solver sees. Zero-scale columns (`|scale| ≤ 1e-10`) have their scale clamped to `1.0`. The transform parameters are persisted to `<output_dir>/feature_normalization.txt` (TSV: `Label`, `Mean`, `Scale`, with a `# mode=<mode>` header), once per run — `evaluate` auto-loads this file and replays the identical transform on new data.
 
 #### Feature matrix output
 
