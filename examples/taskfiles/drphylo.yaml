@@ -1,0 +1,69 @@
+# drphylo.yaml — per-clade DrPhylo analysis using tree mode. Uses a
+# lambda-grid sweep (3×3 = 9 cells) to also demonstrate the grid syntax.
+# Run from the project root: myesl2 taskfile examples/taskfiles/drphylo.yaml
+#
+# Every key with a non-trivial default value is set explicitly so this file
+# also serves as a reference for the drphylo task surface.
+task_type: drphylo
+
+# ── Required positionals (tree mode: list_path + output_dir + tree) ──────────
+list_path: Fungi_data/aln_500.txt
+output_dir: examples/out/drphylo
+tree: Fungi_data/Fungi_T1_with_ID.nwk
+clade-list: Fungi_data/clade_X1.txt
+# Alternative (auto-generate clades from tree depth window):
+# gen-clade-list: "2,4"
+
+# ── Preprocess ───────────────────────────────────────────────────────────────
+datatype: protein              # universal / protein / nucleotide / numeric
+cache-dir: Fungi_data/pff_cache
+min-minor: 2
+dlt: false
+threads: 1
+class-bal: phylo               # phylo / phylo_1 / phylo_2 / up / down / weighted
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: sg_lasso_logisticr
+precision: fp32
+# Default DrPhylo grid is "0.1,0.9,0.1" × "0.1,0.9,0.1" (9×9 = 81 cells).
+# We narrow to a 3×3 = 9-cell sweep here for the exemplar.
+# Each entry is a "min,max,step" comma-triple; the quotes keep YAML from
+# parsing the comma as a nested sequence.
+lambda-grid:
+  - "0.1,0.3,0.1"
+  - "0.1,0.3,0.1"
+# Mutually exclusive alternatives:
+# lambda:
+#   - "0.1"
+#   - "0.1"
+# lambda-file: lambdas.txt
+use-logspace: false            # log-spaced grid (anchored to largest <vmax)
+# nfolds: 5                    # enable k-fold cross-validation (must be >=2)
+cv-seed: -1
+# cv-assignments: cv_predictions.txt
+min-groups: 3                  # DrPhylo default (vs. 0 for plain train)
+prune-skipped-lambda: false
+
+# ── Encode knobs ─────────────────────────────────────────────────────────────
+auto-bit-ct: -1.0
+drop-major-allele: false
+minor-column: false
+tiered-minor-col: false
+max-mem: 8589934592
+feature-normalize: none        # numeric only
+
+# ── Grid filtering / viz ─────────────────────────────────────────────────────
+grid-rmse-cutoff: 100.0        # discard grid cells with input RMSE above this
+grid-acc-cutoff: 0.0           # discard grid cells with accuracy below this
+gene-limit: 20                 # SVG heatmap max gene rows
+species-limit: 20              # SVG heatmap max species cols
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: std
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+
+# ── SLEP solver params ───────────────────────────────────────────────────────
+# param:
+#   maxIter: 100

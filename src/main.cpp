@@ -1337,6 +1337,8 @@ int run_visualize(int argc, char* argv[]) {
         else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
     }
     auto gpt = viz::read_gene_predictions(gp_path);
+    if (svg_path.has_parent_path())
+        fs::create_directories(svg_path.parent_path());
     viz::write_svg(gpt, svg_path, vopts);
     std::cout << "Visualization written -> " << svg_path.string() << "\n";
 

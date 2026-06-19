@@ -1,0 +1,62 @@
+# aim.yaml — iterative AIM feature-selection loop on a small Fungi set.
+# Run from the project root: myesl2 taskfile examples/taskfiles/aim.yaml
+#
+# Every key with a non-trivial default value is set explicitly so this file
+# also serves as a reference for the aim task surface. The exemplar narrows
+# the AIM iteration budget for a quick run; defaults are noted in comments.
+task_type: aim
+
+# ── Required positionals ─────────────────────────────────────────────────────
+list_path: Fungi_data/aln_500.txt
+hypothesis_path: Fungi_data/A_B_Hyp.txt
+output_dir: examples/out/aim
+
+# ── AIM loop controls ────────────────────────────────────────────────────────
+aim-acc-cutoff: 0.9            # per-iter TPR/TNR threshold (default 0.9)
+aim-max-iter: 3                # default 10; capped here for runtime
+aim-max-ft: 50                 # total features cap (default 1000)
+aim-window: 20                 # top-N weights per iter (default 100)
+
+# ── Preprocess ───────────────────────────────────────────────────────────────
+datatype: protein              # universal / protein / nucleotide / numeric
+cache-dir: Fungi_data/pff_cache
+min-minor: 2
+dlt: false
+threads: 1
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: sg_lasso_logisticr
+precision: fp32
+lambda:
+  - "0.1"
+  - "0.1"
+# Default when lambda is omitted is the grid "0.1,0.9,0.1" × "0.0001,0.0002,0.0001".
+# lambda-grid:
+#   - "0.1,0.9,0.1"
+#   - "0.0001,0.0002,0.0001"
+# lambda-file: lambdas.txt
+use-logspace: false
+# nfolds: 5                    # enable k-fold cross-validation (must be >=2)
+cv-seed: -1
+# cv-assignments: cv_predictions.txt
+min-groups: 0
+prune-skipped-lambda: false
+
+# ── Encode knobs ─────────────────────────────────────────────────────────────
+auto-bit-ct: -1.0
+drop-major-allele: false
+minor-column: false
+tiered-minor-col: false
+# class-bal: weighted
+max-mem: 8589934592
+feature-normalize: none        # numeric only
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: std
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+
+# ── SLEP solver params ───────────────────────────────────────────────────────
+# param:
+#   maxIter: 100

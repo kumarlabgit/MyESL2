@@ -1,0 +1,71 @@
+# train.yaml — full pipeline (preprocess -> encode -> regression) on a small
+# Fungi protein-alignment set.
+# Run from the project root: myesl2 taskfile examples/taskfiles/train.yaml
+#
+# Every key with a non-trivial default value is set explicitly so this file
+# also serves as a reference for the train task surface. Options that take a
+# file path or are off-switches are shown as commented hints.
+task_type: train
+
+# ── Required positionals ─────────────────────────────────────────────────────
+list_path: Fungi_data/aln_500.txt
+hypothesis_path: Fungi_data/A_B_Hyp.txt
+output_dir: examples/out/train
+
+# ── Preprocess (FASTA -> PFF) ────────────────────────────────────────────────
+orientation: column            # PFF layout: column (default) or row
+datatype: protein              # universal (auto), protein, nucleotide, numeric
+cache-dir: Fungi_data/pff_cache  # default: <cwd>/pff_cache
+min-minor: 2                   # drop alleles seen in fewer species
+dlt: false                     # drop low-diversity positions
+threads: 1                     # 0 → hardware_concurrency
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: sg_lasso_logisticr     # also: ol_sg_lasso_logisticr, sg_lasso_leastr,
+                               #        ol_sg_lasso_leastr
+precision: fp32                # fp32 or fp64
+lambda:                        # [l1, l2]; default 0.1 0.1
+  - "0.1"
+  - "0.1"
+# Mutually exclusive with `lambda`. Comma-triples must be quoted to keep
+# YAML from parsing the comma as a sequence.
+# lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"
+# lambda-file: path/to/lambdas.txt
+use-logspace: false            # only affects lambda-grid
+# nfolds: 5                    # enable k-fold cross-validation (must be >=2)
+cv-seed: -1                    # -1 legacy round-robin; >=0 shuffles
+# cv-assignments: path/to/cv_predictions.txt  # overrides cv-seed
+min-groups: 0                  # skip-ahead ratchet; 0 disables
+prune-skipped-lambda: false    # post-parallel cleanup of skipped lambdas
+
+# ── Encode knobs ─────────────────────────────────────────────────────────────
+auto-bit-ct: -1.0              # if >=0, min_minor = ceil(X% of minority class)
+drop-major-allele: false       # exclude most frequent allele column
+minor-column: false            # add {stem}_minor binary summary column
+tiered-minor-col: false        # add tiered {stem}_tminor_Xpct columns
+# class-bal: weighted          # up | down | weighted (default: no rebalance)
+# dropout: features_to_drop.txt
+# write-features: features.tsv
+# write-features-transposed: features_t.tsv
+max-mem: 8589934592            # abort if matrix > N bytes; default 8 GB
+feature-normalize: none        # numeric only: none/center/zscore/slep
+                               # (auto sentinel resolves to slep for numeric)
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: std        # std / sqrt / linear / median
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+
+# ── Adaptive sparsification (off by default) ─────────────────────────────────
+adaptive-sparsification: false
+# adaptive-lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"
+
+# ── SLEP solver params (any key=value pair) ──────────────────────────────────
+# param:
+#   maxIter: 100
+#   tol: 1e-4

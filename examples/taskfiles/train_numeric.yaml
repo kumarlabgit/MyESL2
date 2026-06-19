@@ -1,0 +1,65 @@
+# train_numeric.yaml — train on tabular numeric input. Each list entry points
+# to a whitespace-delimited file (header row optional; first column is the
+# sample name, remaining columns are feature values). This exemplar uses 10
+# Fungi protein alignments that have been one-hot encoded individually
+# (per-position × amino-acid binary columns). To regenerate or scale up the
+# numeric inputs, run: python tools/make_numeric_onehot.py <aln_list.txt> <out_dir>
+# Run from the project root: myesl2 taskfile examples/taskfiles/train_numeric.yaml
+#
+# `feature-normalize` defaults to `slep` for numeric input (the SLEP
+# nFlag=1 column transform); set to none/center/zscore to override.
+task_type: train
+
+# ── Required positionals ─────────────────────────────────────────────────────
+list_path: Fungi_data/aln_10_numeric.txt
+hypothesis_path: Fungi_data/A_B_Hyp.txt
+output_dir: examples/out/train_numeric
+
+# ── Preprocess ───────────────────────────────────────────────────────────────
+orientation: column
+datatype: numeric              # critical: routes to PNF (numeric) cache
+cache-dir: Fungi_data/pnf_cache
+min-minor: 2
+dlt: false
+threads: 1
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: sg_lasso_logisticr
+precision: fp32
+lambda:
+  - "0.1"
+  - "0.1"
+# lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"
+# lambda-file: lambdas.txt
+use-logspace: false
+# nfolds: 5                    # enable k-fold cross-validation (must be >=2)
+cv-seed: -1
+# cv-assignments: cv_predictions.txt
+min-groups: 0
+prune-skipped-lambda: false
+
+# ── Encode knobs ─────────────────────────────────────────────────────────────
+auto-bit-ct: -1.0
+drop-major-allele: false
+minor-column: false
+tiered-minor-col: false
+# class-bal: weighted
+# dropout: features_to_drop.txt
+# write-features: features.tsv
+# write-features-transposed: features_t.tsv
+max-mem: 8589934592
+feature-normalize: slep        # numeric default; also accepts none/center/zscore
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: std
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+
+# ── Adaptive sparsification ──────────────────────────────────────────────────
+adaptive-sparsification: false
+# adaptive-lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"

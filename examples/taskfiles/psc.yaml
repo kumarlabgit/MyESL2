@@ -1,0 +1,70 @@
+# psc.yaml — Paired Species Contrast analysis on the photosynthesis demo
+# (chloroplast genes; 67 FASTA alignments, 6 contrast pairs).
+# Run from the project root: myesl2 taskfile examples/taskfiles/psc.yaml
+#
+# Every key with a non-trivial default value is set explicitly so this file
+# also serves as a reference for the psc task surface. Uses the default
+# 20×20 log-spaced lambda sweep.
+task_type: psc
+
+# ── Required positionals ─────────────────────────────────────────────────────
+alignments_dir: Photosynthesis_data/alignments
+output_dir: examples/out/psc
+output-base-name: photo_demo   # required; used as prefix for output files
+
+# ── Species contrast source (exactly one required) ───────────────────────────
+species-groups: Photosynthesis_data/photo_single_LC_matrix_species_groups.txt
+# response-file: response.txt
+# response-dir: response_dir/
+
+# ── Optional input ───────────────────────────────────────────────────────────
+# alignments-list: groups.txt   # one comma-separated group per line
+
+# ── Lambda grid (defaults: 0.01..0.99 step 0.05 → 20×20 sweep) ───────────────
+initial-lambda1: "0.01"
+final-lambda1: "0.99"
+initial-lambda2: "0.01"
+final-lambda2: "0.99"
+lambda-step: "0.05"            # 20×20 = 400 cells (PSC default)
+use-logspace: true             # use log-spaced sweep anchored to the bounds above
+num-log-points: 20             # only used when use-logspace: true
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: median     # PSC default (vs. train/drphylo/aim default "std")
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+use-default-gp: false
+
+# ── Gap cancellation ─────────────────────────────────────────────────────────
+use-uncanceled-alignments: false
+cancel-only-partner: false
+cancel-tri-allelic: false
+nix-full-deletions: false
+# outgroup-species: SpeciesA
+min-pairs: 2
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: sg_lasso_logisticr
+precision: fp32                # fp32 or fp64
+maxiter: 100
+threads: 1                     # 0 → hardware_concurrency
+
+# ── Output / prediction ──────────────────────────────────────────────────────
+# prediction-alignments-dir: prediction_alignments/
+# species-pheno-path: species_pheno.txt
+no-pred-output: false
+no-genes-output: false
+show-selected-sites: false
+dump-weights: false            # if true, writes per-grid-cell weights TSVs
+top-rank-frac: 0.01            # fraction of genes counted as "top ranked"
+# limited-genes-list: genes_of_interest.txt
+
+# ── Null models (off by default) ─────────────────────────────────────────────
+make-null-models: false
+make-pair-randomized-null-models: false
+num-randomized-alignments: 10
+
+# ── SLEP solver params ───────────────────────────────────────────────────────
+# param:
+#   maxIter: 100

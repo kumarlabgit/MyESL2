@@ -1,0 +1,10 @@
+numeric_onehot_10/BUSCOfEOG7008JB.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7008JM.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7008JT.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7008K9.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034RG.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034SB.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034SQ.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034T8.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034T9.domain.aa.aln.trimmed.tsv
+numeric_onehot_10/BUSCOfEOG7034TC.domain.aa.aln.trimmed.tsv

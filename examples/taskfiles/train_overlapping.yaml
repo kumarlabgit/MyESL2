@@ -1,0 +1,64 @@
+# train_overlapping.yaml — train on overlapping FASTA groups. The list file
+# uses one comma-separated group per line; the same alignment may appear in
+# more than one group. Uses the ol_sg_lasso_logisticr solver, which expands
+# the overlapping features internally.
+# Run from the project root: myesl2 taskfile examples/taskfiles/train_overlapping.yaml
+#
+# Every key with a non-trivial default value is set explicitly so this file
+# also serves as a reference for the train task surface with overlapping groups.
+task_type: train
+
+# ── Required positionals ─────────────────────────────────────────────────────
+list_path: Fungi_data/aln_500_overlapping.txt
+hypothesis_path: Fungi_data/A_B_Hyp.txt
+output_dir: examples/out/train_overlapping
+
+# ── Preprocess (FASTA -> PFF) ────────────────────────────────────────────────
+orientation: column
+datatype: protein
+cache-dir: Fungi_data/pff_cache
+min-minor: 2
+dlt: false
+threads: 1
+
+# ── Solver ───────────────────────────────────────────────────────────────────
+method: ol_sg_lasso_logisticr  # overlapping variant; produces an F-length
+                               # parameter vector (one row per feature copy)
+precision: fp32
+lambda:
+  - "0.1"
+  - "0.1"
+# lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"
+# lambda-file: lambdas.txt
+use-logspace: false
+# nfolds: 5                    # enable k-fold cross-validation (must be >=2)
+cv-seed: -1
+# cv-assignments: cv_predictions.txt
+min-groups: 0
+prune-skipped-lambda: false
+
+# ── Encode knobs ─────────────────────────────────────────────────────────────
+auto-bit-ct: -1.0
+drop-major-allele: false
+minor-column: false
+tiered-minor-col: false
+# class-bal: weighted
+# dropout: features_to_drop.txt
+# write-features: features.tsv
+# write-features-transposed: features_t.tsv
+max-mem: 8589934592
+feature-normalize: none
+
+# ── Group penalty ────────────────────────────────────────────────────────────
+group-penalty-type: std
+initial-gp-value: 1.0
+final-gp-value: 1.0
+gp-step: 1.0
+
+# ── Adaptive sparsification ──────────────────────────────────────────────────
+adaptive-sparsification: false
+# adaptive-lambda-grid:
+#   - "0.1,0.3,0.1"
+#   - "0.1,0.3,0.1"

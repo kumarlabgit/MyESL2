@@ -1,0 +1,19 @@
+# encode-sizes.yaml — dry-run the encoder to report per-file column counts
+# without producing the full feature matrix.
+# Run from the project root: myesl2 taskfile examples/taskfiles/encode-sizes.yaml
+#
+# Depends on examples/taskfiles/train.yaml having been run first (encode-sizes
+# reads the cached preprocess_config from output_dir to find the list/cache).
+task_type: encode-sizes
+
+# ── Required positionals ─────────────────────────────────────────────────────
+output_dir: examples/out/train       # reuses train.yaml's output
+hypothesis_path: Fungi_data/A_B_Hyp.txt
+
+# ── Encode knobs (identical surface to train) ────────────────────────────────
+min-minor: 2                         # drop alleles seen in fewer species
+auto-bit-ct: -1.0                    # if >=0, min_minor = ceil(X% of minority)
+drop-major-allele: false             # exclude most frequent allele column
+minor-column: false                  # add {stem}_minor binary summary column
+tiered-minor-col: false              # add tiered {stem}_tminor_Xpct columns
+# dropout: features_to_drop.txt

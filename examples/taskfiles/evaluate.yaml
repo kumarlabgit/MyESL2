@@ -1,0 +1,20 @@
+# evaluate.yaml — apply weights from train.yaml to the same species set.
+# Depends on examples/taskfiles/train.yaml having been run first.
+# Run from the project root: myesl2 taskfile examples/taskfiles/evaluate.yaml
+task_type: evaluate
+
+# ── Required positionals ─────────────────────────────────────────────────────
+weights_path: examples/out/train/lambda_0/weights.txt
+list_path: Fungi_data/aln_500.txt
+output_file: examples/out/evaluate/predictions.txt
+
+# ── Optional ─────────────────────────────────────────────────────────────────
+hypothesis: Fungi_data/A_B_Hyp.txt   # enables prediction-vs-truth columns
+datatype: protein                    # universal / protein / nucleotide / numeric
+cache-dir: Fungi_data/pff_cache      # default: <cwd>/pff_cache
+threads: 1                           # 0 → hardware_concurrency
+no-visualize: false                  # if true, skip auto-generated SVG
+# minor-alleles: minor_alleles.txt          # produced by train --minor-column
+# tiered-minor-alleles: tiered_minor_alleles.txt
+gene-limit: 20                       # SVG heatmap max gene rows
+species-limit: 20                    # SVG heatmap max species cols

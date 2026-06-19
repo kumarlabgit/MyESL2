@@ -1,0 +1,16 @@
+# visualize.yaml — render an SVG heatmap from an existing gene_predictions.txt
+# (the file evaluate writes alongside its predictions output).
+# Run from the project root: myesl2 taskfile examples/taskfiles/visualize.yaml
+#
+# Depends on examples/taskfiles/evaluate.yaml having been run first.
+task_type: visualize
+
+# ── Required positionals ─────────────────────────────────────────────────────
+gene_predictions_path: examples/out/evaluate/predictions_gene_predictions.txt
+svg_path: examples/out/visualize/heatmap.svg
+
+# ── Optional ─────────────────────────────────────────────────────────────────
+gene-limit: 20            # max gene rows in the heatmap
+species-limit: 20         # max species columns in the heatmap
+ssq-threshold: 0.0        # drop genes with sum-of-squares below threshold
+m-grid: false             # DrPhylo-style mode: positive-class only

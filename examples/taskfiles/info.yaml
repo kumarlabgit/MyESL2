@@ -1,0 +1,9 @@
+# info.yaml — print PFF header for one alignment from the train.yaml cache.
+# Run from the project root: myesl2 taskfile examples/taskfiles/info.yaml
+#
+# The info task is a thin viewer over a single .pff file; the only key it
+# accepts is the path to the PFF.
+task_type: info
+
+# ── Required positional ──────────────────────────────────────────────────────
+pff_path: Fungi_data/pff_cache/BUSCOfEOG7008JB.domain.aa.aln.trimmed.pff
