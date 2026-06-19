@@ -147,9 +147,8 @@ EncodeResult encode(const EncodeOptions& opts)
             all_fasta_paths.push_back(p);
             groups.push_back({ p });
         } else {
-            std::ifstream list_file(list_path);
-            if (!list_file)
-                throw std::runtime_error("Cannot open list file: " + list_path.string());
+            std::istringstream list_file(
+                pipeline_utils::read_text_file_utf8(list_path));
             fs::path list_dir = list_path.parent_path();
             std::string line;
             while (std::getline(list_file, line)) {
@@ -1268,9 +1267,8 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
             all_fasta_paths.push_back(list_path);
         } else {
             std::unordered_map<std::string, size_t> stem_to_unique_idx;
-            std::ifstream list_file(list_path);
-            if (!list_file)
-                throw std::runtime_error("Cannot open list file: " + list_path.string());
+            std::istringstream list_file(
+                pipeline_utils::read_text_file_utf8(list_path));
             fs::path list_dir = list_path.parent_path();
             std::string line;
             while (std::getline(list_file, line)) {

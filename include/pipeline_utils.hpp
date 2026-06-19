@@ -2,11 +2,14 @@
 #include <armadillo>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -23,6 +26,85 @@
 namespace fs = std::filesystem;
 
 namespace pipeline_utils {
+
+// Read entire text file contents, transparently decoding UTF-16 LE/BE BOM-prefixed
+// inputs to UTF-8 and stripping a UTF-8 BOM when present. Without a BOM, the file
+// is returned verbatim (assumed already UTF-8/ASCII). Throws on open failure,
+// odd-byte-count UTF-16, or malformed surrogate pairs.
+//
+// Motivation: Windows PowerShell's default redirection (`>`, `Out-File`) writes
+// UTF-16 LE with BOM. When such a file is fed to a byte-oriented `getline` loop,
+// every other byte is `\x00`, which then gets embedded into `fs::path` strings.
+// OS-level path ops then truncate at the first null, producing very confusing
+// errors (e.g. "END_METADATA not found in: <cache_dir>/"). This helper lets
+// callers feed PowerShell-generated list files directly.
+inline std::string read_text_file_utf8(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        throw std::runtime_error("Cannot open file: " + path.string());
+
+    std::vector<char> bytes((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+
+    auto u8 = [&](size_t i) -> unsigned char {
+        return static_cast<unsigned char>(bytes[i]);
+    };
+
+    if (bytes.size() >= 3 && u8(0) == 0xEF && u8(1) == 0xBB && u8(2) == 0xBF)
+        return std::string(bytes.begin() + 3, bytes.end());
+
+    const bool utf16_le = bytes.size() >= 2 && u8(0) == 0xFF && u8(1) == 0xFE;
+    const bool utf16_be = bytes.size() >= 2 && u8(0) == 0xFE && u8(1) == 0xFF;
+    if (!utf16_le && !utf16_be)
+        return std::string(bytes.begin(), bytes.end());
+
+    if ((bytes.size() - 2) % 2 != 0)
+        throw std::runtime_error(
+            "File has UTF-16 BOM but odd byte count: " + path.string());
+
+    auto read_u16 = [&](size_t pos) -> uint16_t {
+        return utf16_le
+            ? static_cast<uint16_t>(u8(pos) | (u8(pos + 1) << 8))
+            : static_cast<uint16_t>((u8(pos) << 8) | u8(pos + 1));
+    };
+
+    std::string out;
+    out.reserve(bytes.size());
+    for (size_t i = 2; i < bytes.size(); i += 2) {
+        uint32_t cp = read_u16(i);
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (i + 4 > bytes.size())
+                throw std::runtime_error(
+                    "Truncated UTF-16 surrogate pair in: " + path.string());
+            uint32_t low = read_u16(i + 2);
+            if (low < 0xDC00 || low > 0xDFFF)
+                throw std::runtime_error(
+                    "Invalid UTF-16 surrogate pair in: " + path.string());
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+            i += 2;
+        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            throw std::runtime_error(
+                "Unpaired UTF-16 low surrogate in: " + path.string());
+        }
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+    return out;
+}
 
 // Read current VmRSS from /proc/self/status (Linux only).
 // Returns RSS in bytes; 0 on failure or non-Linux.

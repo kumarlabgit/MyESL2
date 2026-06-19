@@ -190,11 +190,13 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             if (!detected.empty()) {
                 all_numeric_paths.push_back(list_path);
             } else {
-                std::ifstream list_file(list_path);
-                if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                std::istringstream list_file(
+                    pipeline_utils::read_text_file_utf8(list_path));
                 fs::path list_dir = list_path.parent_path();
                 std::string line;
                 while (std::getline(list_file, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                        line.pop_back();
                     if (line.empty()) continue;
                     for (char& c : line) if (c == '\\') c = '/';
                     all_numeric_paths.push_back(list_dir / line);
@@ -535,11 +537,13 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             if (!detected.empty()) {
                 all_fasta_paths.push_back(list_path);
             } else {
-                std::ifstream list_file(list_path);
-                if (!list_file) throw std::runtime_error("Cannot open list file: " + list_path.string());
+                std::istringstream list_file(
+                    pipeline_utils::read_text_file_utf8(list_path));
                 fs::path list_dir = list_path.parent_path();
                 std::string line;
                 while (std::getline(list_file, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                        line.pop_back();
                     if (line.empty()) continue;
                     for (char& c : line) if (c == '\\') c = '/';
                     all_fasta_paths.push_back(list_dir / line);

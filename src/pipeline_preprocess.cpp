@@ -138,10 +138,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
             all_fasta_paths.push_back(p);
             groups.push_back({ p });
         } else {
-            std::ifstream list_file(resolved.list_path);
-            if (!list_file)
-                throw std::runtime_error(
-                    "Cannot open list file: " + resolved.list_path.string());
+            std::istringstream list_file(
+                pipeline_utils::read_text_file_utf8(resolved.list_path));
             fs::path list_dir = resolved.list_path.parent_path();
             std::string line;
             while (std::getline(list_file, line)) {
