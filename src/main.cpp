@@ -71,7 +71,8 @@ void print_help_train(const char* prog_name) {
         "    output_dir      directory for all output files\n"
         "    column|row      PFF orientation (default: column)\n\n"
         "  Regression:\n"
-        "    --method <name>              regression method (omit to skip regression)\n"
+        "    --method <name>              regression method (default: sg_lasso_logisticr;\n"
+        "                                 use --method none to skip regression)\n"
         "    --precision fp32|fp64        arithmetic precision (default: fp32)\n"
         "    --lambda <l1> <l2>           single lambda pair (default: 0.1 0.1)\n"
         "    --lambda-file <path>         file of lambda pairs, one 'l1 l2' per line\n"
@@ -347,6 +348,7 @@ int run_train(int argc, char* argv[]) {
 
     pipeline::TrainOptions train_opts;
     train_opts.output_dir = argv[4];
+    train_opts.method     = "sg_lasso_logisticr";  // default; --method none skips regression
 
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
@@ -363,7 +365,7 @@ int run_train(int argc, char* argv[]) {
         }
         else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; train_opts.threads = pre_opts.num_threads; }
         else if (arg == "--prune-skipped-lambda") train_opts.prune_skipped_lambda = true;
-        else if (arg == "--method"     && i+1<argc) train_opts.method = argv[++i];
+        else if (arg == "--method"     && i+1<argc) { train_opts.method = argv[++i]; if (train_opts.method == "none") train_opts.method.clear(); }
         else if (arg == "--precision"  && i+1<argc) {
             std::string p = argv[++i];
             if (p == "fp64") enc_opts.precision = train_opts.precision = regression::Precision::FP64;
