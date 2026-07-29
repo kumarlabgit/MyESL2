@@ -4,6 +4,7 @@
 #include "fasta_parser.hpp"
 #include "input_detection.hpp"
 #include "numeric_parser.hpp"
+#include "vcf_parser.hpp"
 #include "pff_format.hpp"
 #include "visualizer.hpp"
 #include <iostream>
@@ -121,7 +122,53 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
     // -------------------------------------------------------------------------
     // Numeric branch
     // -------------------------------------------------------------------------
-    if (datatype == "numeric") {
+    if (datatype == "numeric" || datatype == "vcf") {
+
+        const bool is_vcf = (datatype == "vcf");
+        const std::string cache_ext = is_vcf ? ".vnf" : ".pnf";
+
+        // --- Resolve the VCF genotype encoding used at training time ---
+        // An explicit --het-mode wins; otherwise recover it from the sidecar that
+        // encode() wrote beside the model. Getting this wrong does not fail loudly
+        // (labels still resolve) -- it silently rescales every dosage -- so the
+        // sidecar is what keeps a plain `evaluate` invocation correct.
+        vcf::VcfConvertOptions vopts;
+        if (is_vcf) {
+            std::string mode = opts.het_mode;
+            if (mode.empty()) {
+                for (const auto& cand : {
+                        weights_path.parent_path() / "vcf_encoding.txt",
+                        weights_path.parent_path().parent_path() / "vcf_encoding.txt" }) {
+                    std::ifstream vf(cand);
+                    if (!vf) continue;
+                    std::string line;
+                    while (std::getline(vf, line)) {
+                        auto eq = line.find('=');
+                        if (eq == std::string::npos) continue;
+                        if (line.substr(0, eq) == "het_mode") {
+                            mode = line.substr(eq + 1);
+                            if (!mode.empty() && mode.back() == '\r') mode.pop_back();
+                        }
+                    }
+                    if (!mode.empty()) {
+                        std::cout << "VCF encoding: het_mode=" << mode
+                                  << " (from " << cand.string() << ")\n";
+                        break;
+                    }
+                }
+            } else {
+                std::cout << "VCF encoding: het_mode=" << mode << " (from --het-mode)\n";
+            }
+            if (mode.empty()) {
+                mode = "dosage";
+                std::cerr << "Warning: no vcf_encoding.txt found beside " << weights_path.string()
+                          << " and no --het-mode given; assuming '" << mode
+                          << "'. If training used a different mode, scores will be wrong.\n";
+            }
+            if (!vcf::parse_het_mode(mode, vopts.het_mode))
+                throw std::runtime_error("Unknown --het-mode: " + mode);
+            plog.param("het_mode", mode);
+        }
 
         // --- Load optional feature_normalization.txt written by encode (numeric only) ---
         // Look first as a sibling of weights.txt, then in the parent dir (handles
@@ -186,7 +233,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // --- Load list.txt ---
         std::vector<fs::path> all_numeric_paths;
         {
-            std::string detected = input_detection::maybe_warn_single_file(list_path, "numeric");
+            std::string detected = input_detection::maybe_warn_single_file(list_path, datatype);
             if (!detected.empty()) {
                 all_numeric_paths.push_back(list_path);
             } else {
@@ -205,7 +252,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         }
         std::map<std::string, fs::path> stem_to_numeric;
         for (auto& p : all_numeric_paths)
-            stem_to_numeric[p.stem().string()] = p;
+            stem_to_numeric[pipeline_utils::input_stem(p)] = p;
 
         // --- Match weight labels to stems (longest-prefix first) ---
         struct NumericEntry { std::string stem, feature; double weight; };
@@ -253,14 +300,19 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // the FASTA-branch comment for the drphylo aggregation rationale.
         {
             for (const auto& p : all_numeric_paths) {
-                std::string fstem = p.stem().string();
-                fs::path pnf_path = cache_dir / (fstem + ".pnf");
+                std::string fstem = pipeline_utils::input_stem(p);
+                fs::path pnf_path = cache_dir / (fstem + cache_ext);
                 std::vector<std::string> ids;
                 if (fs::exists(pnf_path)) {
                     try { ids = numeric::read_pnf_metadata(pnf_path).seq_ids; }
                     catch (...) { ids.clear(); }
                 }
-                if (ids.empty()) {
+                if (ids.empty() && is_vcf) {
+                    // VCF sample IDs live in the #CHROM header, not a first column,
+                    // so the tabular fallback below would yield chromosome names.
+                    ids = vcf::read_sample_ids(p);
+                }
+                if (ids.empty() && !is_vcf) {
                     // Fall back to scanning the .txt file's first column,
                     // skipping the header row.
                     std::ifstream nf(p);
@@ -281,11 +333,11 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                       << " file(s)\n";
         }
 
-        // --- Phase 1: Convert to PNF as needed ---
+        // --- Phase 1: Convert to the float-matrix cache as needed ---
         fs::create_directories(cache_dir);
         for (auto& stem : model_stems) {
             fs::path txt_path = stem_to_numeric.at(stem);
-            fs::path pnf_path = cache_dir / (stem + ".pnf");
+            fs::path pnf_path = cache_dir / (stem + cache_ext);
             fs::path err_path = cache_dir / (stem + ".err");
             if (fs::exists(err_path)) {
                 std::cerr << "Warning: " << stem << " has a prior conversion error, skipping\n";
@@ -295,13 +347,17 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             if (fs::exists(pnf_path)) {
                 try {
                     auto meta = numeric::read_pnf_metadata(pnf_path);
-                    if (meta.source_path == fs::absolute(txt_path).string())
+                    // A cache built under a different het_mode holds different
+                    // dosages for the same labels, so it must not be reused.
+                    if (meta.source_path == fs::absolute(txt_path).string() &&
+                        (!is_vcf || meta.het_mode == vcf::het_mode_name(vopts.het_mode)))
                         needs_convert = false;
                 } catch (...) {}
             }
             if (needs_convert) {
                 try {
-                    numeric::tabular_to_pnf(txt_path, pnf_path);
+                    if (is_vcf) vcf::vcf_to_vnf(txt_path, pnf_path, vopts);
+                    else        numeric::tabular_to_pnf(txt_path, pnf_path);
                     std::cout << "Converted: " << stem << "\n";
                 } catch (const std::exception& ex) {
                     std::ofstream ef(err_path);
@@ -324,9 +380,9 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             }
         }
         for (auto& [stem, idxs] : stem_to_idxs) {
-            fs::path pnf_path = cache_dir / (stem + ".pnf");
+            fs::path pnf_path = cache_dir / (stem + cache_ext);
             if (!fs::exists(pnf_path)) {
-                std::cerr << "Warning: no PNF for " << stem << ", skipping\n";
+                std::cerr << "Warning: no " << cache_ext << " for " << stem << ", skipping\n";
                 continue;
             }
             auto meta = numeric::read_pnf_metadata(pnf_path);
@@ -553,7 +609,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
 
         std::map<std::string, fs::path> stem_to_fasta;
         for (auto& p : all_fasta_paths)
-            stem_to_fasta[p.stem().string()] = p;
+            stem_to_fasta[pipeline_utils::input_stem(p)] = p;
 
         // --- Verify all model alignments present in list ---
         {
@@ -580,7 +636,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         // species set, so downstream aggregation can key by integer row index.
         {
             for (const auto& p : all_fasta_paths) {
-                std::string fstem = p.stem().string();
+                std::string fstem = pipeline_utils::input_stem(p);
                 fs::path pff_path = cache_dir / (fstem + ".pff");
                 std::vector<std::string> ids;
                 if (fs::exists(pff_path)) {

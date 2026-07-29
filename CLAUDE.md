@@ -96,6 +96,47 @@ Key files:
 
 PSC reuses the existing solver (`regression::createRegressionAnalysis`) and newick tree parser (`newick.hpp`) without modifications.
 
+### VCF input (`--datatype vcf`)
+
+VCF genotypes are read directly into the feature matrix, skipping any FASTA
+intermediate — which matters because a FASTA character cannot represent a
+heterozygote, while the `arma::fmat` feature matrix holds fractional values.
+
+Architecture: VCF reuses the **numeric** (float-matrix) path, not the FASTA path.
+
+- `src/vcf_parser.cpp` / `include/vcf_parser.hpp` — parses `.vcf`/`.vcf.gz`
+  (zlib `gzopen`, which also reads uncompressed input), applies the het-mode
+  dosage rule, and writes a `.vnf` cache.
+- `.vnf` uses the **PNF on-disk layout** (`include/pnf_format.hpp`) so
+  `numeric::read_pnf_metadata` / `read_pnf_data` are reused verbatim; the
+  distinct extension only prevents cache collisions with `.pnf`. Both formats
+  are written through the shared `numeric::write_pnf()`.
+- `pipeline_encode.cpp` — the numeric branch condition is
+  `datatype == "numeric" || datatype == "vcf"`; VCF adds an allele-column filter
+  (carrier counts, monomorphic sites, `--drop-major-allele`) that runs *after*
+  sample selection, mirroring `encoder.cpp:364-387`.
+- `evaluate` works because its numeric branch resolves features **by label name**
+  (`pipeline_evaluate.cpp:210-228`), unlike the FASTA branch's single-char allele
+  comparison — which is also why multi-character alleles (indels, `<DEL>`) work.
+
+Feature labels are `{stem}_{chrom}:{pos}_{allele}`. **Do not parse these with the
+FASTA `rfind('_')`-twice parser** — chromosome names contain underscores
+(`chr1_KI270706v1_random`) and it would mis-split the stem. Use the
+longest-stem-prefix match plus a split at the final `_` (`split_vcf_label` in
+`pipeline_train.cpp`). Position tokens are sorted via `pss_pos_key()`, since
+`chr1:100` is not parseable by `stoul`.
+
+`--het-mode dosage|presence|alt-dominant` (default `dosage`) controls heterozygote
+weighting. It is persisted in three places, all of which must stay in sync:
+`preprocess_config` (so encode agrees), the `.vnf` header's `het_mode` key (so a
+stale cache is re-converted), and `vcf_encoding.txt` beside the model (so evaluate
+re-encodes identically). `pipeline_utils::input_stem()` strips a trailing `.gz`
+so `sample.vcf.gz` and `sample.vcf` share the gene name `sample`.
+
+Not supported for VCF: `--minor-column` / `--tiered-minor-col` (rejected with an
+error), `psc` mode, and multiallelic sites split across records (rejected;
+merge with `bcftools norm -m+any`).
+
 ### Encoding Options
 
 - `--minor-column`: Adds a per-gene binary summary column (`{stem}_minor`) indicating whether each species has any non-major allele in that gene. Writes `minor_alleles.txt` listing which feature labels are minor alleles, used by evaluate to reconstitute the column for new species.

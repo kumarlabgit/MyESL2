@@ -51,7 +51,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "nfolds", "cv-seed", "cv-assignments", "min-groups",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "class-bal", "dropout", "write-features", "write-features-transposed",
-            "max-mem", "adaptive-sparsification", "adaptive-lambda-grid",
+            "max-mem", "adaptive-sparsification", "adaptive-lambda-grid", "het-mode",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
             "feature-normalize",
         };
@@ -61,7 +61,7 @@ TaskSpec spec_for(const std::string& task_type) {
         s.allowed = {
             "weights_path", "list_path", "output_file",
             "cache-dir", "hypothesis", "datatype", "threads", "no-visualize",
-            "minor-alleles", "tiered-minor-alleles", "gene-limit", "species-limit",
+            "minor-alleles", "tiered-minor-alleles", "gene-limit", "species-limit", "het-mode",
         };
     } else if (task_type == "info") {
         s.positionals = {"pff_path"};
@@ -80,7 +80,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
             "nfolds", "cv-seed", "cv-assignments", "min-groups",
-            "grid-rmse-cutoff", "grid-acc-cutoff", "gene-limit", "species-limit",
+            "grid-rmse-cutoff", "grid-acc-cutoff", "gene-limit", "species-limit", "het-mode",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "max-mem",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
@@ -101,7 +101,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
             "nfolds", "cv-seed", "cv-assignments", "min-groups",
             "class-bal", "drop-major-allele", "minor-column", "tiered-minor-col",
-            "auto-bit-ct", "max-mem",
+            "auto-bit-ct", "max-mem", "het-mode",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
             "feature-normalize",
         };

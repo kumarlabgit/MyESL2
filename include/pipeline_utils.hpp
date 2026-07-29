@@ -27,6 +27,18 @@ namespace fs = std::filesystem;
 
 namespace pipeline_utils {
 
+// Stem of an input file, used as its gene identity everywhere downstream (cache
+// filename, feature-label prefix, GSS keys). Strips a trailing .gz first so
+// "sample.vcf.gz" and "sample.vcf" both yield "sample" -- otherwise compressed
+// input would carry ".vcf" through every gene name and a model trained on one
+// form could not be evaluated against the other. A no-op for .fasta/.txt/.vcf.
+inline std::string input_stem(const std::filesystem::path& p) {
+    std::filesystem::path q = p;
+    if (q.extension() == ".gz") q = q.stem();
+    return q.stem().string();
+}
+
+
 // Read entire text file contents, transparently decoding UTF-16 LE/BE BOM-prefixed
 // inputs to UTF-8 and stripping a UTF-8 BOM when present. Without a BOM, the file
 // is returned verbatim (assumed already UTF-8/ASCII). Throws on open failure,
@@ -183,7 +195,7 @@ template<typename ConvFn>
 inline std::pair<int,int> run_parallel_conversions(
     std::queue<fs::path> queue,       // pass by value (move at call site)
     const fs::path& cache_dir,
-    const std::string& cache_ext,     // ".pff" or ".pnf"
+    const std::string& cache_ext,     // ".pff", ".pnf" or ".vnf"
     unsigned int num_threads,
     ConvFn conv_fn)
 {
@@ -199,8 +211,10 @@ inline std::pair<int,int> run_parallel_conversions(
             { std::lock_guard<std::mutex> lk(queue_mutex);
               if (queue.empty()) break;
               src = queue.front(); queue.pop(); }
-            fs::path dst = cache_dir / (src.stem().string() + cache_ext);
-            fs::path err = cache_dir / (src.stem().string() + ".err");
+            // input_stem, not stem(): callers locate these files by input_stem, so
+            // a .vcf.gz source must land on "sample.vnf", not "sample.vcf.vnf".
+            fs::path dst = cache_dir / (input_stem(src) + cache_ext);
+            fs::path err = cache_dir / (input_stem(src) + ".err");
             try {
                 conv_fn(src, dst);
                 std::lock_guard<std::mutex> lk(print_mutex);

@@ -57,9 +57,19 @@ bool is_single_numeric_table(const fs::path& p) {
     return false;
 }
 
+bool is_single_vcf(const fs::path& p) {
+    // A gzipped VCF is opaque here (read_head does not decompress), so fall back
+    // to the extension for those; an uncompressed VCF must start with the
+    // mandatory ##fileformat=VCF line.
+    std::string s = p.string();
+    if (s.size() >= 7 && s.compare(s.size() - 7, 7, ".vcf.gz") == 0) return true;
+    return read_head(p, 32).rfind("##fileformat=VCF", 0) == 0;
+}
+
 std::string detect_single_file(const fs::path& p, const std::string& datatype) {
     if (is_single_fasta(p)) return "FASTA";
     if (datatype == "numeric" && is_single_numeric_table(p)) return "numeric";
+    if (datatype == "vcf" && is_single_vcf(p)) return "VCF";
     return "";
 }
 

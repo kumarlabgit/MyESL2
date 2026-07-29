@@ -18,6 +18,10 @@ struct PreprocessOptions {
     unsigned int num_threads      = 0;   // 0 → hardware_concurrency
     int          min_minor        = 2;
     bool         use_dlt          = false;
+    // VCF genotype encoding (datatype == "vcf"): "dosage" | "presence" | "alt-dominant".
+    // Persisted in preprocess_config because encode() and evaluate() must agree
+    // with the mode the cache was built under. See vcf_parser.hpp.
+    std::string  het_mode         = "dosage";
     // DrPhylo tree mode (all empty/unset = no tree)
     fs::path     tree_path;
     std::string  clade_list_file;

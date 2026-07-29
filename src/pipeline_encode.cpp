@@ -143,7 +143,7 @@ EncodeResult encode(const EncodeOptions& opts)
         std::string detected = input_detection::maybe_warn_single_file(list_path, pre.datatype);
         if (!detected.empty()) {
             fs::path p = list_path;
-            stem_to_unique_idx[p.stem().string()] = 0;
+            stem_to_unique_idx[pipeline_utils::input_stem(p)] = 0;
             all_fasta_paths.push_back(p);
             groups.push_back({ p });
         } else {
@@ -164,7 +164,7 @@ EncodeResult encode(const EncodeOptions& opts)
                     for (char& c : token) if (c == '\\') c = '/';
                     fs::path p = list_dir / token;
                     group.push_back(p);
-                    std::string stem = p.stem().string();
+                    std::string stem = pipeline_utils::input_stem(p);
                     if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
                         stem_to_unique_idx[stem] = all_fasta_paths.size();
                         all_fasta_paths.push_back(p);
@@ -180,7 +180,7 @@ EncodeResult encode(const EncodeOptions& opts)
         std::unordered_map<std::string, int> stem_group_count;
         for (auto& g : groups) {
             if (g.size() > 1) is_overlapping = true;
-            for (auto& p : g) stem_group_count[p.stem().string()]++;
+            for (auto& p : g) stem_group_count[pipeline_utils::input_stem(p)]++;
         }
         for (auto& [s, c] : stem_group_count) if (c > 1) { is_overlapping = true; break; }
     }
@@ -239,20 +239,26 @@ EncodeResult encode(const EncodeOptions& opts)
              + cols * label_to_col_per_entry + baseline_bytes;
     };
 
-    if (pre.datatype == "numeric") {
-        // ---- Numeric branch ----
+    if (pre.datatype == "numeric" || pre.datatype == "vcf") {
+        // ---- Float-matrix branch: tabular numeric (.pnf) and VCF (.vnf) ----
+        // Both cache formats share the PNF on-disk layout, so assembly is
+        // identical; VCF additionally runs the allele-column filter below.
+        const bool is_vcf = (pre.datatype == "vcf");
+        const char* cache_ext = is_vcf ? ".vnf" : ".pnf";
         std::vector<fs::path> pnf_paths;
         for (auto& tab_path : all_fasta_paths) {
-            fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+            fs::path pnf_path = cache_dir / (pipeline_utils::input_stem(tab_path) + cache_ext);
             if (!fs::exists(pnf_path)) {
-                std::cerr << "Warning: no .pnf for " << tab_path.filename() << ", skipping\n";
+                std::cerr << "Warning: no " << cache_ext << " for " << tab_path.filename()
+                          << ", skipping\n";
                 continue;
             }
             pnf_paths.push_back(pnf_path);
         }
         int total_files = static_cast<int>(pnf_paths.size());
 
-        std::cout << "\n--- Phase 2: Numeric matrix assembly ---\n";
+        std::cout << "\n--- Phase 2: " << (is_vcf ? "VCF" : "Numeric")
+                  << " matrix assembly ---\n";
         std::cout << "  Files to process: " << total_files << "\n";
         std::cout << "  Worker threads:   " << num_threads << "\n\n";
 
@@ -376,6 +382,96 @@ EncodeResult encode(const EncodeOptions& opts)
         }
         if (mem_exceeded.load() && !opts.disable_mc) throw std::runtime_error(mem_err_msg);
         (void)std::chrono::steady_clock::now(); // encode_start used implicitly above
+
+        // ---- VCF allele-column filtering ----
+        // Deliberately runs here rather than in the converter: carrier counts must
+        // be taken over the hypothesis-selected samples (matching how the FASTA
+        // encoder filters after sample mapping), and --auto-bit-ct rewrites
+        // min_minor from class sizes that preprocess never sees. Mirrors the
+        // FASTA filter order in encoder.cpp:364-387.
+        std::unordered_map<std::string, size_t> stem_var_sites;
+        if (is_vcf) {
+            uint64_t kept_cols = 0, dropped_cols = 0;
+            for (auto& nr : num_results) {
+                if (nr.failed) continue;
+
+                const size_t ncols = nr.columns.size();
+                // Group this file's columns by site, preserving first-seen order.
+                // Labels are "{chrom}:{pos}_{allele}" — split at the LAST '_' so
+                // chromosome names containing underscores stay intact.
+                std::vector<std::string> site_order;
+                std::unordered_map<std::string, std::vector<size_t>> site_cols;
+                std::vector<size_t> carriers(ncols, 0);
+                for (size_t j = 0; j < ncols; ++j) {
+                    for (uint32_t i = 0; i < N; ++i)
+                        if (nr.columns[j][i] != 0.0f) ++carriers[j];
+                    const std::string& lab = nr.feature_labels[j];
+                    size_t us = lab.rfind('_');
+                    std::string site = (us == std::string::npos) ? lab : lab.substr(0, us);
+                    auto it = site_cols.find(site);
+                    if (it == site_cols.end()) {
+                        site_order.push_back(site);
+                        site_cols.emplace(site, std::vector<size_t>{j});
+                    } else {
+                        it->second.push_back(j);
+                    }
+                }
+
+                std::vector<bool> keep(ncols, false);
+                size_t var_sites = 0;
+                for (const auto& site : site_order) {
+                    const auto& cols = site_cols[site];
+
+                    // Alleles carried by at least one selected sample.
+                    size_t observed = 0, total_carriers = 0, major = cols.front();
+                    for (size_t j : cols) {
+                        if (carriers[j] > 0) ++observed;
+                        total_carriers += carriers[j];
+                        // Ties resolve to the lexicographically smaller allele label,
+                        // generalising the FASTA encoder's lowest-ASCII tie-break.
+                        if (carriers[j] > carriers[major] ||
+                            (carriers[j] == carriers[major] &&
+                             nr.feature_labels[j] < nr.feature_labels[major]))
+                            major = j;
+                    }
+                    if (observed < 2) continue;                                  // monomorphic
+                    if (total_carriers - carriers[major] <
+                        static_cast<size_t>(min_minor)) continue;                // site-level
+
+                    bool site_kept = false;
+                    for (size_t j : cols) {
+                        if (opts.drop_major && j == major) continue;
+                        if (carriers[j] < static_cast<size_t>(min_minor)) continue;
+                        keep[j] = true;
+                        site_kept = true;
+                    }
+                    if (site_kept) ++var_sites;
+                }
+
+                std::vector<std::string>        kept_labels;
+                std::vector<std::vector<float>> kept_columns;
+                for (size_t j = 0; j < ncols; ++j) {
+                    if (!keep[j]) { ++dropped_cols; continue; }
+                    kept_labels.push_back(std::move(nr.feature_labels[j]));
+                    kept_columns.push_back(std::move(nr.columns[j]));
+                }
+                kept_cols += kept_columns.size();
+                nr.feature_labels = std::move(kept_labels);
+                nr.columns        = std::move(kept_columns);
+                stem_var_sites[nr.stem] = var_sites;
+
+                if (nr.columns.empty()) {
+                    nr.failed = true;
+                    nr.error_msg = "no variant columns survived filtering";
+                    std::cerr << "Warning: " << nr.stem
+                              << " has no variant columns after filtering (min_minor="
+                              << min_minor << "), skipping\n";
+                }
+            }
+            std::cout << "  Allele columns: " << kept_cols << " kept, "
+                      << dropped_cols << " filtered (min_minor=" << min_minor
+                      << (opts.drop_major ? ", drop-major-allele" : "") << ")\n";
+        }
 
         for (auto& nr : num_results) {
             for (auto& m : nr.missing_sequences) all_missing.push_back(m);
@@ -525,7 +621,7 @@ EncodeResult encode(const EncodeOptions& opts)
                 for (size_t gi = 0; gi < groups.size(); ++gi) {
                     uint64_t grp_start = field_pos;
                     for (auto& p : groups[gi]) {
-                        auto it = stem_to_cols.find(p.stem().string());
+                        auto it = stem_to_cols.find(pipeline_utils::input_stem(p));
                         if (it == stem_to_cols.end()) continue;
                         for (uint64_t fi = it->second.first; fi <= it->second.second; ++fi) {
                             field_indices.push_back(fi);
@@ -577,10 +673,22 @@ EncodeResult encode(const EncodeOptions& opts)
                 }
             }
             alg_table = group_table;
-            // For numeric data, use feature_length as var_site_count equivalent.
-            // Numeric input has no alignment positions, so there is no natural
-            // polymorphism count; feature_count is the closest proxy.
-            group_var_site_counts = grp_feature_lengths;
+            if (is_vcf) {
+                // VCF has genuine variant positions, so report the real count of
+                // retained sites per group rather than the feature-count proxy.
+                std::vector<size_t> grp_var_sites(groups.size(), 0);
+                for (size_t gi = 0; gi < groups.size(); ++gi)
+                    for (auto& p : groups[gi]) {
+                        auto it = stem_var_sites.find(pipeline_utils::input_stem(p));
+                        if (it != stem_var_sites.end()) grp_var_sites[gi] += it->second;
+                    }
+                group_var_site_counts = std::move(grp_var_sites);
+            } else {
+                // For numeric data, use feature_length as var_site_count equivalent.
+                // Numeric input has no alignment positions, so there is no natural
+                // polymorphism count; feature_count is the closest proxy.
+                group_var_site_counts = grp_feature_lengths;
+            }
             group_feature_lengths = std::move(grp_feature_lengths);
         }
 
@@ -604,6 +712,14 @@ EncodeResult encode(const EncodeOptions& opts)
             }
         }
 
+        // Record the genotype encoding beside the model so evaluate can re-encode
+        // new VCFs the same way without the user having to restate --het-mode.
+        // Same discovery pattern as feature_normalization.txt.
+        if (is_vcf) {
+            std::ofstream vf(opts.output_dir / "vcf_encoding.txt");
+            vf << "het_mode=" << pre.het_mode << "\n";
+        }
+
         // Sanity check: at least 1 feature position
         if (total_cols < 1)
             throw std::runtime_error("Feature set covers only "
@@ -614,7 +730,7 @@ EncodeResult encode(const EncodeOptions& opts)
         // ---- FASTA branch (two-pass encoding) ----
         std::vector<fs::path> pff_paths;
         for (auto& fasta_path : all_fasta_paths) {
-            fs::path pff_path = cache_dir / (fasta_path.stem().string() + ".pff");
+            fs::path pff_path = cache_dir / (pipeline_utils::input_stem(fasta_path) + ".pff");
             if (!fs::exists(pff_path)) {
                 std::cerr << "Warning: no .pff for " << fasta_path.filename() << ", skipping\n";
                 continue;
@@ -937,7 +1053,7 @@ EncodeResult encode(const EncodeOptions& opts)
                 for (size_t gi = 0; gi < groups.size(); ++gi) {
                     uint64_t grp_start = field_pos;
                     for (auto& p : groups[gi]) {
-                        std::string stem = p.stem().string();
+                        std::string stem = pipeline_utils::input_stem(p);
                         auto it = stem_to_cols.find(stem);
                         if (it == stem_to_cols.end()) continue;
                         for (uint64_t fi = it->second.first; fi <= it->second.second; ++fi) {
@@ -1298,13 +1414,17 @@ std::map<std::string, uint64_t> encode_sizes(const EncodeOptions& opts)
     std::map<std::string, uint64_t> sizes;
     std::mutex queue_mutex, sizes_mutex;
 
-    if (pre.datatype == "numeric") {
-        // ---- Numeric branch: metadata only, no read_pnf_data ----
+    if (pre.datatype == "numeric" || pre.datatype == "vcf") {
+        // ---- Float-matrix branch: metadata only, no read_pnf_data ----
+        // Upper bound for VCF: the allele-column filter in encode() can only
+        // reduce this count, never raise it.
+        const char* cache_ext = (pre.datatype == "vcf") ? ".vnf" : ".pnf";
         std::vector<fs::path> pnf_paths;
         for (auto& tab_path : all_fasta_paths) {
-            fs::path pnf_path = cache_dir / (tab_path.stem().string() + ".pnf");
+            fs::path pnf_path = cache_dir / (tab_path.stem().string() + cache_ext);
             if (!fs::exists(pnf_path)) {
-                std::cerr << "Warning: no .pnf for " << tab_path.filename() << ", skipping\n";
+                std::cerr << "Warning: no " << cache_ext << " for " << tab_path.filename()
+                          << ", skipping\n";
                 continue;
             }
             pnf_paths.push_back(pnf_path);

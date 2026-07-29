@@ -35,6 +35,7 @@ set(SOURCES
     src/gl_logisticr_fp32.cpp
     src/gl_logisticr_fp64.cpp
     src/numeric_parser.cpp
+    src/vcf_parser.cpp
     src/visualizer.cpp
     src/newick.cpp
     src/pipeline_preprocess.cpp
@@ -49,6 +50,23 @@ set(SOURCES
 
 # Create executable
 add_executable(myesl2 ${SOURCES})
+
+# zlib enables reading gzip/bgzip-compressed VCFs (--datatype vcf). Windows has
+# no system zlib, so it is optional there: without it, plain .vcf still works and
+# a .vcf.gz input raises an explicit error instead of failing the build. Drop a
+# zlib.lib/zlib1.dll into deps/windows-x64 and this picks it up automatically.
+if(WIN32)
+    find_package(ZLIB QUIET)
+    if(NOT ZLIB_FOUND)
+        message(STATUS "zlib not found: compressed .vcf.gz input will be unavailable")
+    endif()
+else()
+    find_package(ZLIB REQUIRED)
+endif()
+if(ZLIB_FOUND)
+    target_link_libraries(myesl2 PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(myesl2 PRIVATE MYESL2_HAVE_ZLIB)
+endif()
 
 # RPATH: look for shared libraries next to the binary so bundled
 # libopenblas / libgfortran / etc. are found without LD_LIBRARY_PATH.

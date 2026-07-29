@@ -123,7 +123,8 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 
 | Flag | Description |
 |------|-------------|
-| `--datatype <type>` | Data type: `universal` (default), `protein`, `nucleotide`, or `numeric` |
+| `--datatype <type>` | Data type: `universal` (default), `protein`, `nucleotide`, `numeric`, or `vcf` |
+| `--het-mode <mode>` | How heterozygous genotypes are weighted (`--datatype vcf` only): `dosage` (default), `presence`, or `alt-dominant`. See [VCF input](#vcf-input) |
 | `--cache-dir <dir>` | Cache directory for converted `.pff`/`.pnf` files (default: `pff_cache`) |
 | `--min-minor N` | Minimum count of non-major non-indel characters to keep a position (default: 2) |
 | `--auto-bit-ct <pct>` | Set `--min-minor` as a percentage of minority class size (overrides `--min-minor`) |
@@ -133,7 +134,7 @@ myesl2 train <list.txt> <hypothesis.txt> <output_dir> [column|row] [options]
 | `--minor-column` | Add a per-gene binary column indicating presence of any non-major allele |
 | `--tiered-minor-col` | Add per-gene tiered minor allele columns at 0%, 0.1%, 1%, and 5% frequency thresholds (mutually exclusive with `--minor-column`) |
 | `--class-bal <mode>` | Class balancing before regression: `up`, `down`, or `weighted` |
-| `--feature-normalize <mode>` | Column-wise transform applied to the feature matrix after class balancing and before the solver sees it (numeric input only): `none`, `center`, `zscore`, or `slep`. Default: `slep` for `--datatype numeric`, otherwise `none` |
+| `--feature-normalize <mode>` | Column-wise transform applied to the feature matrix after class balancing and before the solver sees it (numeric and VCF input only): `none`, `center`, `zscore`, or `slep`. Default: `slep` for `--datatype numeric`, otherwise `none` |
 | `--dropout <file>` | File listing feature labels to exclude from encoding (one label per line) |
 
 **Class balancing modes:**
@@ -280,6 +281,7 @@ Optionally compare those predictions to known labels for accuracy assessment.
 | `--hypothesis <file>` | **Input** (optional) | Known class labels for the species in `list.txt`. **Only required if you want accuracy metrics.** When supplied, evaluate also prints TP/TN/FP/FN, TPR/TNR/FPR/FNR, accuracy, and AUC, and writes them to `process_log.txt`. Omit to run prediction-only with no accuracy assessment. |
 | `--cache-dir <dir>` | | Cache directory (default: `pff_cache`) |
 | `--datatype <type>` | | Must match the datatype used during training |
+| `--het-mode <mode>` | | `--datatype vcf` only. Omit to read it from `vcf_encoding.txt` beside `weights.txt`; must match training |
 | `--threads N` | | Worker threads (default: all cores) |
 | `--no-visualize` | | Skip automatic SVG heatmap generation |
 | `--minor-alleles <file>` | Input | Path to `minor_alleles.txt` from training (auto-detected from weights directory if omitted) |
@@ -345,6 +347,7 @@ myesl2 drphylo <list.txt> <output_dir> --tree <tree.nwk> [options]
 | `--gen-clade-list <lower,upper>` | Auto-generate clade list by leaf count range, e.g., `3,10` (tree mode only) |
 | `--class-bal <mode>` | Balancing strategy: `phylo` (default, tree mode only), `up`, `down`, or `weighted` |
 | `--datatype <type>` | Data type (default: `universal`) |
+| `--het-mode <mode>` | Heterozygote weighting for `--datatype vcf` (see train) |
 | `--method <name>` | Regression method (default: `sg_lasso_logisticr`) |
 | `--min-groups N` | Minimum number of genes required in the model |
 | `--grid-rmse-cutoff <value>` | Maximum RMSE threshold for lambda filtering (default: 100.0) |
@@ -635,6 +638,76 @@ species_B  -1.0        -0.75          0.10        -0.40     0.05
 
 ---
 
+## VCF input
+
+`--datatype vcf` reads VCF variant calls directly, without an intermediate FASTA
+conversion. Each file in the list is one group ("gene"); sample IDs come from the
+`#CHROM` header line and are matched against the hypothesis file by name.
+
+Every (site, allele) pair carried by at least one sample becomes a feature column
+labelled `{stem}_{chrom}:{pos}_{allele}`. Multiallelic sites and indels are
+supported -- the allele is the literal REF/ALT string, so `AT` and `<DEL>` are
+valid alleles. Plain `.vcf` and gzip/bgzip `.vcf.gz` are both accepted (the
+latter requires a zlib-enabled build).
+
+### Heterozygote encoding (`--het-mode`)
+
+Because a genotype can carry two different alleles, a heterozygote needs a rule
+for how much weight each observed allele receives. Unlike a FASTA intermediate --
+which must collapse each call to a single character and therefore loses
+heterozygosity entirely -- the feature matrix holds fractional values, so a
+heterozygote can contribute partial evidence to both of its alleles.
+
+For a diploid site with `REF=A`, `ALT=G`:
+
+| Genotype | `dosage` (default) | `presence` | `alt-dominant` |
+|----------|--------------------|------------|----------------|
+| `0/0`    | A=1.0              | A=1.0      | A=1.0          |
+| `0/1`    | A=0.5, G=0.5       | A=1.0, G=1.0 | A=0.0, G=1.0 |
+| `1/1`    | G=1.0              | G=1.0      | G=1.0          |
+| `1/2`    | G=0.5, T=0.5       | G=1.0, T=1.0 | G=1.0, T=1.0 |
+| `./.`    | all 0              | all 0      | all 0          |
+
+- `dosage` weights each allele by *copies / called copies*, generalising to
+  haploid (`0` -> A=1.0) and polyploid calls without special-casing.
+- `presence` gives full weight to every allele present in the genotype.
+- `alt-dominant` treats a heterozygote as homozygous-alternate: the reference
+  allele gets 0.0 and each observed alternate 1.0.
+
+Homozygous calls encode identically under all three modes. Phased (`|`) and
+unphased (`/`) separators are equivalent. Missing calls (`./.`) are all-zero,
+matching the convention used for a sample absent from a gene. A partial call
+(`./1`) counts only its called copies, so it encodes as G=1.0.
+
+The mode is recorded in `vcf_encoding.txt` in the output directory; `evaluate`
+reads it automatically so a model is re-encoded the same way it was trained.
+Passing a different `--het-mode` to `evaluate` silently changes every score, so
+override it only deliberately.
+
+### Filtering and outputs
+
+`--min-minor` and `--drop-major-allele` apply to VCF the same way they do to
+FASTA, using per-allele carrier counts over the samples selected by the
+hypothesis file: monomorphic sites are dropped, a site whose non-major carrier
+total is below `--min-minor` is dropped, and individual allele columns below
+`--min-minor` are dropped. `--minor-column` and `--tiered-minor-col` are
+FASTA-only and are rejected for VCF input rather than silently ignored.
+
+VCF input produces per-site scores (`pss.txt` / `pss_median.txt`) in addition to
+per-gene scores, since variant positions have real genomic meaning.
+
+### Limitations
+
+- Multiallelic sites split across several records (one row per ALT, as produced
+  by `bcftools norm -m-`) are rejected, because the per-record genotypes cannot
+  be recombined unambiguously. Merge them first with `bcftools norm -m+any`.
+- The feature matrix is dense, so a whole-genome VCF expands to a very large
+  column count. Split large VCFs by region and list them as separate files.
+- INFO/QUAL/FILTER-based site filtering is not performed; pre-filter with
+  `bcftools view` if needed.
+
+---
+
 ## Data Types
 
 | Type | Description |
@@ -643,6 +716,7 @@ species_B  -1.0        -0.75          0.10        -0.40     0.05
 | `protein` | IUPAC amino acids (case-insensitive); X, -, ? treated as missing |
 | `nucleotide` | DNA/RNA: A/T/C/G/U (case-insensitive); all other characters treated as missing |
 | `numeric` | Whitespace-delimited tabular data with float features |
+| `vcf` | VCF variant calls (`.vcf` / `.vcf.gz`); genotypes are one-hot encoded per allele with configurable heterozygote weighting (see [VCF input](#vcf-input)) |
 
 ---
 

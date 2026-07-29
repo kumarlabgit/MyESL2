@@ -26,8 +26,31 @@
 #include "newick.hpp"
 #include "regression.hpp"
 #include "pipeline_psc.hpp"
+#include "vcf_parser.hpp"
 
 namespace fs = std::filesystem;
+
+// Shared by every command that accepts --datatype, so the accepted set cannot
+// drift between them (drphylo and aim previously validated nothing and failed
+// later inside the data_defs.ini lookup with a confusing message).
+static void validate_datatype(const std::string& dt) {
+    if (dt != "universal" && dt != "protein" && dt != "nucleotide" &&
+        dt != "numeric" && dt != "vcf")
+        throw std::runtime_error(
+            "Unknown datatype: " + dt +
+            " (expected: universal, protein, nucleotide, numeric, vcf)");
+}
+
+// --het-mode only has meaning for VCF input; validated here so a typo or a
+// misplaced flag surfaces before any conversion work happens.
+static void validate_het_mode(const std::string& mode, const std::string& datatype) {
+    vcf::HetMode parsed;
+    if (!vcf::parse_het_mode(mode, parsed))
+        throw std::runtime_error(
+            "--het-mode must be one of: dosage, presence, alt-dominant (got '" + mode + "')");
+    if (datatype != "vcf")
+        throw std::runtime_error("--het-mode requires --datatype vcf");
+}
 
 static std::unordered_set<std::string> load_dropout_labels(const char* path) {
     std::ifstream df(path);
@@ -107,8 +130,19 @@ void print_help_train(const char* prog_name) {
         "    --tiered-minor-col           add per-gene tiered minor allele columns (0%, 0.1%, 1%, 5%)\n"
         "    --class-bal up|down|weighted balance classes before regression\n"
         "    --dropout <file>             exclude features listed in file from encoding\n"
+        "    --het-mode <mode>            how heterozygous genotypes are weighted during\n"
+        "                                 one-hot encoding (--datatype vcf only). Modes:\n"
+        "                                   dosage       copies/called copies, so a diploid\n"
+        "                                                het gives 0.5 to each observed\n"
+        "                                                allele (default)\n"
+        "                                   presence     1.0 to each observed allele\n"
+        "                                   alt-dominant 0.0 to the reference allele and 1.0\n"
+        "                                                to each observed alternate\n"
+        "                                 Homozygous calls encode identically in all modes;\n"
+        "                                 missing calls (./.) are all-zero. Recorded in\n"
+        "                                 vcf_encoding.txt so evaluate re-encodes to match.\n"
         "    --feature-normalize <mode>   column-wise transform of the numeric feature matrix\n"
-        "                                 (--datatype numeric only). Modes:\n"
+        "                                 (--datatype numeric or vcf only). Modes:\n"
         "                                   none   no transform\n"
         "                                   center subtract column mean (mean-shifting)\n"
         "                                   zscore (x - mean) / stddev (auto-scaling)\n"
@@ -126,7 +160,7 @@ void print_help_train(const char* prog_name) {
         "                                 lambda grid for exploration combos (min,max,step each)\n"
         "                                 (default: \"0.1,0.3,0.1\" \"0.1,0.3,0.1\")\n"
         "  Common:\n"
-        "    --cache-dir DIR              directory for .pff/.pnf cache (default: ./pff_cache)\n"
+        "    --cache-dir DIR              directory for .pff/.pnf/.vnf cache (default: ./pff_cache)\n"
         "    --min-minor N                min non-major non-indel count to keep a position (default: 1)\n"
         "    --threads N                  worker threads for preprocessing and the\n"
         "                                 lambda grid loop (default: all cores). When >1,\n"
@@ -134,9 +168,14 @@ void print_help_train(const char* prog_name) {
         "                                 nested-parallelism oversubscription in the solver.\n"
         "                                 Grid-loop parallelism is disabled when --nfolds > 0.\n"
         "    --dlt                        use direct lookup table encoder\n"
-        "    --datatype <type>            universal (default), protein, nucleotide, numeric\n"
+        "    --datatype <type>            universal (default), protein, nucleotide, numeric, vcf\n"
         "                                 numeric: list file points to whitespace-delimited tabular files\n"
-        "                                          (first col = sample name, remaining cols = features)\n";
+        "                                          (first col = sample name, remaining cols = features)\n"
+        "                                 vcf:     list file points to .vcf/.vcf.gz files, one group each.\n"
+        "                                          Sample IDs come from the #CHROM header; every\n"
+        "                                          (site, allele) pair becomes a feature column named\n"
+        "                                          {stem}_{chrom}:{pos}_{allele}. Multiallelic sites and\n"
+        "                                          indels are supported. See --het-mode.\n";
 }
 
 void print_help_evaluate(const char* prog_name) {
@@ -163,9 +202,13 @@ void print_help_evaluate(const char* prog_name) {
         "    --tiered-minor-alleles <file>  tiered_minor_alleles.txt from training (auto-detected)\n"
         "    --gene-limit N          max genes displayed in auto-generated SVG (default: 20)\n"
         "    --species-limit N       max species displayed in auto-generated SVG (default: 20)\n"
+        "    --het-mode <mode>       (--datatype vcf only) genotype encoding to re-apply to the\n"
+        "                            input VCFs. Omit to read it from vcf_encoding.txt beside\n"
+        "                            weights.txt; it MUST match the mode used for training.\n"
         "    --cache-dir DIR\n"
         "    --threads N\n"
-        "    --datatype <type>\n";
+        "    --datatype <type>       universal (default), protein, nucleotide, numeric, vcf.\n"
+        "                            Must match the datatype the model was trained on.\n";
 }
 
 void print_help_drphylo(const char* prog_name) {
@@ -191,7 +234,8 @@ void print_help_drphylo(const char* prog_name) {
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
-        "    --feature-normalize  (numeric input only; see train help)\n";
+        "    --feature-normalize  (numeric/vcf input only; see train help)\n"
+        "    --het-mode           (--datatype vcf only; see train help)\n";
 }
 
 void print_help_aim(const char* prog_name) {
@@ -210,7 +254,8 @@ void print_help_aim(const char* prog_name) {
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
-        "    --feature-normalize  (numeric input only; see train help)\n";
+        "    --feature-normalize  (numeric/vcf input only; see train help)\n"
+        "    --het-mode           (--datatype vcf only; see train help)\n";
 }
 
 void print_help_psc(const char* prog_name) {
@@ -350,6 +395,8 @@ int run_train(int argc, char* argv[]) {
     train_opts.output_dir = argv[4];
     train_opts.method     = "sg_lasso_logisticr";  // default; --method none skips regression
 
+    bool het_mode_set = false;
+
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "row")         pre_opts.orientation = pff::Orientation::ROW_MAJOR;
@@ -359,10 +406,9 @@ int run_train(int argc, char* argv[]) {
         else if (arg == "--dlt")        pre_opts.use_dlt = true;
         else if (arg == "--datatype"   && i+1<argc) {
             pre_opts.datatype = argv[++i];
-            if (pre_opts.datatype != "universal" && pre_opts.datatype != "protein" &&
-                pre_opts.datatype != "nucleotide" && pre_opts.datatype != "numeric")
-                throw std::runtime_error("Unknown datatype: " + pre_opts.datatype);
+            validate_datatype(pre_opts.datatype);
         }
+        else if (arg == "--het-mode"   && i+1<argc) { pre_opts.het_mode = argv[++i]; het_mode_set = true; }
         else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; train_opts.threads = pre_opts.num_threads; }
         else if (arg == "--prune-skipped-lambda") train_opts.prune_skipped_lambda = true;
         else if (arg == "--method"     && i+1<argc) { train_opts.method = argv[++i]; if (train_opts.method == "none") train_opts.method.clear(); }
@@ -418,8 +464,9 @@ int run_train(int argc, char* argv[]) {
         if (enc_opts.feature_normalize != "center" && enc_opts.feature_normalize != "zscore" &&
             enc_opts.feature_normalize != "slep")
             throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
-        if (pre_opts.datatype != "numeric")
-            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
+        if (pre_opts.datatype != "numeric" && pre_opts.datatype != "vcf")
+            throw std::runtime_error(
+                "--feature-normalize is only supported with --datatype numeric or vcf");
     }
 
     {
@@ -470,6 +517,13 @@ int run_train(int argc, char* argv[]) {
         enc_opts.lambda_count = n ? n : 1;
     }
 
+    if (het_mode_set) validate_het_mode(pre_opts.het_mode, pre_opts.datatype);
+    // The per-gene minor-allele summary columns are produced by the FASTA
+    // encoder only; VCF input goes through the float-matrix path where they
+    // have no implementation. Reject rather than silently ignore.
+    if (pre_opts.datatype == "vcf" && (enc_opts.minor_column || enc_opts.tiered_minor_col))
+        throw std::runtime_error(
+            "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts.minor_column && enc_opts.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
 
@@ -516,7 +570,8 @@ int run_evaluate(int argc, char* argv[]) {
         std::string arg = argv[i];
         if      (arg == "--cache-dir"  && i+1<argc) eval_opts.cache_dir = argv[++i];
         else if (arg == "--hypothesis" && i+1<argc) eval_opts.hyp_path  = argv[++i];
-        else if (arg == "--datatype"   && i+1<argc) { eval_opts.datatype = argv[++i]; if(eval_opts.datatype!="universal"&&eval_opts.datatype!="protein"&&eval_opts.datatype!="nucleotide"&&eval_opts.datatype!="numeric") throw std::runtime_error("Unknown datatype: "+eval_opts.datatype); }
+        else if (arg == "--datatype"   && i+1<argc) { eval_opts.datatype = argv[++i]; validate_datatype(eval_opts.datatype); }
+        else if (arg == "--het-mode"   && i+1<argc) eval_opts.het_mode = argv[++i];
         else if (arg == "--threads"    && i+1<argc) { eval_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!eval_opts.num_threads) eval_opts.num_threads=1; }
         else if (arg == "--no-visualize") eval_opts.no_visualize = true;
         else if (arg == "--minor-alleles" && i+1<argc) eval_opts.minor_alleles_path = argv[++i];
@@ -605,6 +660,7 @@ int run_drphylo(int argc, char* argv[]) {
     int    viz_gene_limit    = 20;
     int    viz_species_limit = 20;
     bool min_groups_set = false;
+    bool het_mode_set = false;
 
     for (int i = extra_start; i < argc; ++i) {
         std::string arg = argv[i];
@@ -612,7 +668,8 @@ int run_drphylo(int argc, char* argv[]) {
         else if (arg == "--gen-clade-list"   && i+1<argc) pre_opts.gen_clade_spec  = argv[++i];
         else if (arg == "--class-bal"        && i+1<argc) pre_opts.class_bal_phylo = argv[++i];
         else if (arg == "--tree"             && i+1<argc) { ++i; /* already captured */ }
-        else if (arg == "--datatype"         && i+1<argc) pre_opts.datatype        = argv[++i];
+        else if (arg == "--datatype"         && i+1<argc) { pre_opts.datatype = argv[++i]; validate_datatype(pre_opts.datatype); }
+        else if (arg == "--het-mode"         && i+1<argc) { pre_opts.het_mode = argv[++i]; het_mode_set = true; }
         else if (arg == "--threads"          && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
         else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
         else if (arg == "--cache-dir"        && i+1<argc) pre_opts.cache_dir       = argv[++i];
@@ -651,8 +708,9 @@ int run_drphylo(int argc, char* argv[]) {
         if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
             enc_opts_base.feature_normalize != "slep")
             throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
-        if (pre_opts.datatype != "numeric")
-            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
+        if (pre_opts.datatype != "numeric" && pre_opts.datatype != "vcf")
+            throw std::runtime_error(
+                "--feature-normalize is only supported with --datatype numeric or vcf");
     }
     // Resolve deprecated method aliases
     {
@@ -671,6 +729,13 @@ int run_drphylo(int argc, char* argv[]) {
         if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
             throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
     }
+    if (het_mode_set) validate_het_mode(pre_opts.het_mode, pre_opts.datatype);
+    // The per-gene minor-allele summary columns are produced by the FASTA
+    // encoder only; VCF input goes through the float-matrix path where they
+    // have no implementation. Reject rather than silently ignore.
+    if (pre_opts.datatype == "vcf" && (enc_opts_base.minor_column || enc_opts_base.tiered_minor_col))
+        throw std::runtime_error(
+            "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
     if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
@@ -746,6 +811,9 @@ int run_drphylo(int argc, char* argv[]) {
             eopts.hyp_path     = hyp_file;
             eopts.no_visualize = true;
             eopts.datatype     = pre_cfg.datatype;
+            // Without this the per-clade evaluate would silently fall back to the
+            // default genotype encoding and rescale every dosage.
+            eopts.het_mode     = pre_cfg.het_mode;
             eopts.num_threads  = pre_cfg.num_threads ? pre_cfg.num_threads : std::thread::hardware_concurrency();
             eopts.cache_dir    = pre_cfg.cache_dir;
             eopts.minor_alleles_path = run_dir / "minor_alleles.txt";
@@ -817,6 +885,7 @@ int run_aim(int argc, char* argv[]) {
     pipeline::TrainOptions train_opts_base;
     train_opts_base.method = "sg_lasso_logisticr";
     bool has_lambda = false, has_method = false;
+    bool het_mode_set = false;
 
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
@@ -825,7 +894,8 @@ int run_aim(int argc, char* argv[]) {
         else if (arg == "--aim-max-ft"     && i+1<argc) aim_max_ft     = std::stoi(argv[++i]);
         else if (arg == "--aim-window"     && i+1<argc) aim_window     = std::stoi(argv[++i]);
         else if (arg == "--cache-dir"      && i+1<argc) pre_opts.cache_dir  = argv[++i];
-        else if (arg == "--datatype"       && i+1<argc) pre_opts.datatype   = argv[++i];
+        else if (arg == "--datatype"       && i+1<argc) { pre_opts.datatype = argv[++i]; validate_datatype(pre_opts.datatype); }
+        else if (arg == "--het-mode"       && i+1<argc) { pre_opts.het_mode = argv[++i]; het_mode_set = true; }
         else if (arg == "--threads"        && i+1<argc) { pre_opts.num_threads=static_cast<unsigned>(std::stoi(argv[++i])); if(!pre_opts.num_threads) pre_opts.num_threads=1; train_opts_base.threads = pre_opts.num_threads; }
         else if (arg == "--prune-skipped-lambda") train_opts_base.prune_skipped_lambda = true;
         else if (arg == "--dlt")            pre_opts.use_dlt = true;
@@ -860,8 +930,9 @@ int run_aim(int argc, char* argv[]) {
         if (enc_opts_base.feature_normalize != "center" && enc_opts_base.feature_normalize != "zscore" &&
             enc_opts_base.feature_normalize != "slep")
             throw std::runtime_error("--feature-normalize must be one of: none, center, zscore, slep");
-        if (pre_opts.datatype != "numeric")
-            throw std::runtime_error("--feature-normalize is only supported with --datatype numeric");
+        if (pre_opts.datatype != "numeric" && pre_opts.datatype != "vcf")
+            throw std::runtime_error(
+                "--feature-normalize is only supported with --datatype numeric or vcf");
     }
     // Resolve deprecated method aliases
     {
@@ -880,6 +951,13 @@ int run_aim(int argc, char* argv[]) {
         if (gpt != "std" && gpt != "sqrt" && gpt != "linear" && gpt != "median")
             throw std::runtime_error("--group-penalty-type must be one of: std, sqrt, linear, median");
     }
+    if (het_mode_set) validate_het_mode(pre_opts.het_mode, pre_opts.datatype);
+    // The per-gene minor-allele summary columns are produced by the FASTA
+    // encoder only; VCF input goes through the float-matrix path where they
+    // have no implementation. Reject rather than silently ignore.
+    if (pre_opts.datatype == "vcf" && (enc_opts_base.minor_column || enc_opts_base.tiered_minor_col))
+        throw std::runtime_error(
+            "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
     if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")

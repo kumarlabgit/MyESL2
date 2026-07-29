@@ -171,6 +171,24 @@ static void write_grouped_weights(const regression::RegressionAnalysis& regr,
     wf << "Intercept\t" << intercept << "\t-1\n";
 }
 
+// Sort key for the position token of a PSS entry. FASTA tokens are bare integers
+// ("137"); VCF tokens are "{chrom}:{pos}" ("chr1:100"), which must order by
+// chromosome and then numerically by coordinate. Parsing a VCF token with stoul
+// would throw, so both forms go through this. Non-numeric tails fall back to a
+// plain lexicographic compare of the whole token.
+std::pair<std::string, unsigned long long> pss_pos_key(const std::string& token) {
+    size_t colon = token.rfind(':');
+    std::string head = (colon == std::string::npos) ? std::string() : token.substr(0, colon);
+    std::string num  = (colon == std::string::npos) ? token : token.substr(colon + 1);
+    unsigned long long pos = 0;
+    if (num.empty()) return {token, 0ULL};
+    for (char c : num) {
+        if (c < '0' || c > '9') return {token, 0ULL};
+        pos = pos * 10ULL + static_cast<unsigned long long>(c - '0');
+    }
+    return {head, pos};
+}
+
 } // anonymous namespace
 
 TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
@@ -439,10 +457,34 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     std::sort(sorted_stems_desc.begin(), sorted_stems_desc.end(),
         [](const std::string& a, const std::string& b){ return a.size() > b.size(); });
 
+    // VCF labels are "{stem}_{chrom}:{pos}_{allele}". Resolve the stem by longest
+    // prefix match rather than walking back from the end as the FASTA parser does:
+    // chromosome names routinely contain underscores (chr1_KI270706v1_random), and
+    // rfind-twice would split inside the chromosome and scatter GSS across phantom
+    // genes. The site key is then everything before the final underscore, which is
+    // safe because the allele is sanitised to contain none.
+    auto split_vcf_label = [&sorted_stems_desc](const std::string& label,
+                                                std::string& stem,
+                                                std::string& pos_str) -> bool {
+        for (const auto& s : sorted_stems_desc) {
+            if (label.size() > s.size() + 1 &&
+                label.compare(0, s.size(), s) == 0 &&
+                label[s.size()] == '_') {
+                stem = s;
+                std::string rest = label.substr(s.size() + 1);
+                size_t us = rest.rfind('_');
+                pos_str = (us == std::string::npos) ? std::string() : rest.substr(0, us);
+                return true;
+            }
+        }
+        return false;
+    };
+
     // Step 8: Helper lambda — compute and write GSS/PSS, return nonzero gene count
     auto compute_sig_scores = [&](const fs::path& wpath, const fs::path& lam_dir,
                                   std::ostringstream& sout, int lam_idx) -> int {
         bool is_numeric_mode = (enc.datatype == "numeric");
+        bool is_vcf_mode     = (enc.datatype == "vcf");
         bool is_olsg = (method == "olsg_lasso_logisticr" || method == "olsg_lasso_leastr");
         std::map<std::string, double> gss; // stem -> sum(|w|)
         // PSS key = "stem\tpos_str" -> sum(|w|)
@@ -495,6 +537,11 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                         break;
                     }
                 }
+            } else if (is_vcf_mode) {
+                std::string stem, pos_str;
+                if (!split_vcf_label(label, stem, pos_str)) continue;
+                gss[stem] += aw;
+                if (!pos_str.empty()) pss[stem + "\t" + pos_str] += aw;
             } else {
                 // Check for {stem}_minor label (gene-level, no position)
                 if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
@@ -533,9 +580,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     auto ta = a.first.find('\t'), tb = b.first.find('\t');
                     std::string sa = a.first.substr(0, ta), sb = b.first.substr(0, tb);
                     if (sa != sb) return sa < sb;
-                    uint32_t pa = static_cast<uint32_t>(std::stoul(a.first.substr(ta + 1)));
-                    uint32_t pb = static_cast<uint32_t>(std::stoul(b.first.substr(tb + 1)));
-                    return pa < pb;
+                    return pss_pos_key(a.first.substr(ta + 1))
+                         < pss_pos_key(b.first.substr(tb + 1));
                 });
             std::ofstream pf(lam_dir / "pss.txt");
             pf << std::fixed << std::setprecision(15);
@@ -560,6 +606,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     auto compute_sig_scores_grouped = [&](const fs::path& wg_path, const fs::path& lam_dir,
                                           std::ostringstream& sout, int lam_idx) -> int {
         bool is_numeric_mode = (enc.datatype == "numeric");
+        bool is_vcf_mode     = (enc.datatype == "vcf");
 
         // Flat aggregates (backward-compat gss.txt / pss.txt)
         std::map<std::string, double> gss;
@@ -595,6 +642,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     }
                 }
                 if (stem.empty()) continue;
+            } else if (is_vcf_mode) {
+                if (!split_vcf_label(label, stem, pos_str)) continue;
             } else {
                 // Check for {stem}_minor label
                 if (label.size() > 6 && label.compare(label.size() - 6, 6, "_minor") == 0) {
@@ -662,9 +711,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     auto ta = a.first.find('\t'), tb = b.first.find('\t');
                     std::string sa = a.first.substr(0, ta), sb = b.first.substr(0, tb);
                     if (sa != sb) return sa < sb;
-                    uint32_t pa = static_cast<uint32_t>(std::stoul(a.first.substr(ta + 1)));
-                    uint32_t pb = static_cast<uint32_t>(std::stoul(b.first.substr(tb + 1)));
-                    return pa < pb;
+                    return pss_pos_key(a.first.substr(ta + 1))
+                         < pss_pos_key(b.first.substr(tb + 1));
                 });
             std::ofstream pf(lam_dir / "pss.txt");
             pf << std::fixed << std::setprecision(15);
@@ -1093,9 +1141,8 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                         auto ua = a.first.rfind('_'), ub = b.first.rfind('_');
                         std::string ga = a.first.substr(0, ua), gb = b.first.substr(0, ub);
                         if (ga != gb) return ga < gb;
-                        uint32_t pa = static_cast<uint32_t>(std::stoul(a.first.substr(ua + 1)));
-                        uint32_t pb = static_cast<uint32_t>(std::stoul(b.first.substr(ub + 1)));
-                        return pa < pb;
+                        return pss_pos_key(a.first.substr(ua + 1))
+                             < pss_pos_key(b.first.substr(ub + 1));
                     });
                 std::ofstream mf(pen_dir / "pss_median.txt");
                 mf << std::fixed << std::setprecision(6);

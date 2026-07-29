@@ -35,6 +35,10 @@ struct EvaluateOptions {
     bool         no_visualize    = false;
     bool         m_grid          = false;
     std::string  datatype        = "universal";
+    // VCF genotype encoding used at training time. Left empty, evaluate recovers
+    // it from the vcf_encoding.txt sidecar beside weights_path; a non-empty value
+    // is an explicit user override. Must match training or scores are wrong.
+    std::string  het_mode;
     unsigned int num_threads     = 0;
     fs::path     cache_dir;
     fs::path     minor_alleles_path;          // optional: path to minor_alleles.txt from training

@@ -2,6 +2,7 @@
 #include "pipeline_utils.hpp"
 #include "fasta_parser.hpp"
 #include "numeric_parser.hpp"
+#include "vcf_parser.hpp"
 #include "newick.hpp"
 #include "process_log.hpp"
 #include "input_detection.hpp"
@@ -37,6 +38,7 @@ void write_preprocess_config(const fs::path& output_dir, const PreprocessOptions
     f << "num_threads=" << opts.num_threads << "\n";
     f << "min_minor=" << opts.min_minor << "\n";
     f << "use_dlt=" << (opts.use_dlt ? "true" : "false") << "\n";
+    f << "het_mode=" << opts.het_mode << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +72,7 @@ PreprocessOptions read_preprocess_config(const fs::path& output_dir)
         else if (key == "num_threads") opts.num_threads = static_cast<unsigned int>(std::stoul(value));
         else if (key == "min_minor")   opts.min_minor   = std::stoi(value);
         else if (key == "use_dlt")     opts.use_dlt     = (value == "true");
+        else if (key == "het_mode")    opts.het_mode    = value;
     }
     return opts;
 }
@@ -96,7 +99,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
 
     // --- Load allowed chars if needed ---
     std::unordered_set<char> allowed_chars;
-    if (resolved.datatype != "universal" && resolved.datatype != "numeric") {
+    if (resolved.datatype != "universal" && resolved.datatype != "numeric" &&
+        resolved.datatype != "vcf") {
         fs::path ini = resolved.binary_dir / "data_defs.ini";
         if (!resolved.binary_dir.empty() && !fs::exists(ini))
             ini = fs::current_path() / "data_defs.ini";
@@ -118,6 +122,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         .param("num_threads", (int)resolved.num_threads)
         .param("min_minor",   resolved.min_minor)
         .param("use_dlt",     resolved.use_dlt);
+    if (resolved.datatype == "vcf") plog.param("het_mode", resolved.het_mode);
     if (!resolved.tree_path.empty()) plog.param("tree_path", resolved.tree_path);
 
     // --- Read list file — supports overlapping groups (comma-separated files per line) ---
@@ -133,7 +138,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
             plog.param("auto_detected_single_input",
                        detected + ": " + resolved.list_path.string());
             fs::path p = resolved.list_path;
-            std::string stem = p.stem().string();
+            std::string stem = pipeline_utils::input_stem(p);
             stem_to_unique_idx[stem] = 0;
             all_fasta_paths.push_back(p);
             groups.push_back({ p });
@@ -157,7 +162,7 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
                     for (char& c : token) if (c == '\\') c = '/';
                     fs::path p = list_dir / token;
                     group.push_back(p);
-                    std::string stem = p.stem().string();
+                    std::string stem = pipeline_utils::input_stem(p);
                     if (stem_to_unique_idx.find(stem) == stem_to_unique_idx.end()) {
                         stem_to_unique_idx[stem] = all_fasta_paths.size();
                         all_fasta_paths.push_back(p);
@@ -174,13 +179,66 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
 
     try {
 
-    if (resolved.datatype == "numeric") {
+    if (resolved.datatype == "vcf") {
+        // VCF branch: list entries are .vcf/.vcf.gz files; cache as .vnf.
+        // Reuse additionally requires a matching het_mode, since the cached
+        // dosages are only valid for the encoding they were built under.
+        vcf::VcfConvertOptions vopts;
+        if (!vcf::parse_het_mode(resolved.het_mode, vopts.het_mode))
+            throw std::runtime_error("Unknown --het-mode: " + resolved.het_mode);
+
+        std::queue<fs::path> convert_queue;
+        skipped_done = 0; skipped_error = 0; skipped_mismatch = 0;
+        for (auto& vcf_path : all_fasta_paths) {
+            fs::path vnf_path = resolved.cache_dir / (pipeline_utils::input_stem(vcf_path) + ".vnf");
+            fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(vcf_path) + ".err");
+            if (fs::exists(err_path)) { ++skipped_error; continue; }
+            if (fs::exists(vnf_path)) {
+                try {
+                    auto meta = numeric::read_pnf_metadata(vnf_path);
+                    if (meta.source_path == fs::absolute(vcf_path).string()) {
+                        if (meta.het_mode == resolved.het_mode)
+                            { ++skipped_done; continue; }
+                        ++skipped_mismatch;
+                    }
+                } catch (...) {}
+            }
+            convert_queue.push(vcf_path);
+        }
+
+        total_to_convert = static_cast<int>(convert_queue.size());
+        std::cout << "\n--- Phase 1: Conversion (vcf) ---\n";
+        std::cout << "  Cache directory:       " << resolved.cache_dir << "\n";
+        std::cout << "  Heterozygote encoding: " << resolved.het_mode << "\n";
+        std::cout << "  To convert:            " << total_to_convert << "\n";
+        std::cout << "  Skipped (done):        " << skipped_done << "\n";
+        std::cout << "  Skipped (prior error): " << skipped_error << "\n";
+        std::cout << "  Re-converting (het-mode mismatch): " << skipped_mismatch << "\n";
+        std::cout << "  Worker threads:        " << resolved.num_threads << "\n\n";
+
+        if (total_to_convert > 0) {
+            auto t0 = std::chrono::steady_clock::now();
+            auto [c, f] = pipeline_utils::run_parallel_conversions(
+                std::move(convert_queue), resolved.cache_dir, ".vnf",
+                resolved.num_threads,
+                [&vopts](const fs::path& src, const fs::path& dst) {
+                    vcf::vcf_to_vnf(src, dst, vopts);
+                });
+            conv_converted += c; conv_failed += f;
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            std::cout << "\nConversion done. Converted: " << conv_converted
+                      << ", Failed: " << conv_failed << " (" << elapsed << "s)\n";
+        } else {
+            std::cout << "Nothing to convert.\n";
+        }
+    } else if (resolved.datatype == "numeric") {
         // Numeric branch: list entries are tabular files; cache as .pnf
         std::queue<fs::path> convert_queue;
         skipped_done = 0; skipped_error = 0;
         for (auto& tab_path : all_fasta_paths) {
-            fs::path pnf_path = resolved.cache_dir / (tab_path.stem().string() + ".pnf");
-            fs::path err_path = resolved.cache_dir / (tab_path.stem().string() + ".err");
+            fs::path pnf_path = resolved.cache_dir / (pipeline_utils::input_stem(tab_path) + ".pnf");
+            fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(tab_path) + ".err");
             if (fs::exists(err_path)) { ++skipped_error; continue; }
             if (fs::exists(pnf_path)) {
                 try {
@@ -221,8 +279,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         std::queue<fs::path> convert_queue;
         skipped_done = 0; skipped_error = 0; skipped_mismatch = 0;
         for (auto& fasta_path : all_fasta_paths) {
-            fs::path pff_path = resolved.cache_dir / (fasta_path.stem().string() + ".pff");
-            fs::path err_path = resolved.cache_dir / (fasta_path.stem().string() + ".err");
+            fs::path pff_path = resolved.cache_dir / (pipeline_utils::input_stem(fasta_path) + ".pff");
+            fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(fasta_path) + ".err");
             if (fs::exists(err_path)) { ++skipped_error; continue; }
             if (fs::exists(pff_path)) {
                 try {

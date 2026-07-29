@@ -19,10 +19,17 @@ namespace pnf {
  *   num_features=<F>
  *   seq_ids=<id0>;<id1>;...;<idN-1>
  *   feature_labels=<lab0>;<lab1>;...;<labF-1>
+ *   het_mode=<mode>            (optional; VCF-derived caches only)
  *   END_METADATA
  *   [binary: N x F x sizeof(float) bytes, row-major]
  *
  * Row-major layout: seq0_feat0, seq0_feat1, ..., seq0_featF-1, seq1_feat0, ...
+ *
+ * The same on-disk layout backs two cache flavours, distinguished by extension:
+ *   .pnf  tabular numeric input (--datatype numeric); het_mode absent
+ *   .vnf  VCF input (--datatype vcf); het_mode records the genotype encoding
+ *         used, so a cache built under a different --het-mode is re-converted
+ *         rather than silently reused.
  */
 struct PNFMetadata {
     std::string source_path;
@@ -30,6 +37,7 @@ struct PNFMetadata {
     uint32_t num_features  = 0;
     std::vector<std::string> seq_ids;
     std::vector<std::string> feature_labels;
+    std::string het_mode;      ///< Empty for numeric caches; set for VCF-derived caches
     uint64_t data_offset = 0;  ///< Byte offset to binary section
 
     uint64_t get_data_size() const {

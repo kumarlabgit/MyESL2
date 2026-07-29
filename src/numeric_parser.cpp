@@ -26,6 +26,60 @@ std::vector<std::string> split_char(const std::string& s, char delim) {
 
 } // anonymous namespace
 
+void write_pnf(
+    const std::filesystem::path& output,
+    const std::vector<std::string>& seq_ids,
+    const std::vector<std::string>& feature_labels,
+    const std::vector<float>& row_major_data,
+    const std::string& source_path,
+    const std::string& het_mode)
+{
+    const uint32_t num_sequences = static_cast<uint32_t>(seq_ids.size());
+    const uint32_t num_features  = static_cast<uint32_t>(feature_labels.size());
+
+    const uint64_t expected =
+        static_cast<uint64_t>(num_sequences) * static_cast<uint64_t>(num_features);
+    if (row_major_data.size() != expected)
+        throw std::runtime_error(
+            "write_pnf: payload has " + std::to_string(row_major_data.size()) +
+            " values but " + std::to_string(num_sequences) + " x " +
+            std::to_string(num_features) + " = " + std::to_string(expected) +
+            " were expected for " + output.string());
+
+    auto join_semicolons = [](const std::vector<std::string>& items) {
+        std::string joined;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i > 0) joined += ';';
+            joined += items[i];
+        }
+        return joined;
+    };
+
+    std::string metadata;
+    metadata += "VERSION=1\n";
+    metadata += "source_path=" + source_path + "\n";
+    metadata += "num_sequences=" + std::to_string(num_sequences) + "\n";
+    metadata += "num_features=" + std::to_string(num_features) + "\n";
+    metadata += "seq_ids=" + join_semicolons(seq_ids) + "\n";
+    metadata += "feature_labels=" + join_semicolons(feature_labels) + "\n";
+    // Written only for VCF-derived caches; absent keys are ignored by the reader,
+    // so .pnf files stay byte-identical to those produced before this field existed.
+    if (!het_mode.empty())
+        metadata += "het_mode=" + het_mode + "\n";
+    metadata += "END_METADATA\n";
+
+    std::ofstream out(output, std::ios::binary);
+    if (!out)
+        throw std::runtime_error("Cannot open output file for writing: " + output.string());
+
+    out.write(metadata.data(), static_cast<std::streamsize>(metadata.size()));
+    out.write(reinterpret_cast<const char*>(row_major_data.data()),
+              static_cast<std::streamsize>(row_major_data.size() * sizeof(float)));
+
+    if (!out)
+        throw std::runtime_error("Write failed for: " + output.string());
+}
+
 void tabular_to_pnf(
     const std::filesystem::path& input,
     const std::filesystem::path& output)
@@ -117,43 +171,17 @@ void tabular_to_pnf(
     if (seq_ids.empty())
         throw std::runtime_error("No data rows found in: " + input.string());
 
-    uint32_t num_sequences = static_cast<uint32_t>(seq_ids.size());
+    // The data rows, not the header, are authoritative for the column count (a
+    // header may carry a stray extra/missing token). Reconcile the label list to
+    // num_features so the emitted header stays self-consistent; for well-formed
+    // input the two already agree and this is a no-op.
+    feature_labels.resize(num_features);
+    for (uint32_t k = 0; k < num_features; ++k)
+        if (feature_labels[k].empty())
+            feature_labels[k] = "col_" + std::to_string(k);
 
-    // Build text metadata
-    std::string source_abs = std::filesystem::absolute(input).string();
-
-    // Build seq_ids and feature_labels semicolon-joined strings
-    std::string seq_ids_str;
-    for (size_t i = 0; i < seq_ids.size(); ++i) {
-        if (i > 0) seq_ids_str += ';';
-        seq_ids_str += seq_ids[i];
-    }
-    std::string feat_labels_str;
-    for (size_t i = 0; i < feature_labels.size(); ++i) {
-        if (i > 0) feat_labels_str += ';';
-        feat_labels_str += feature_labels[i];
-    }
-
-    std::string metadata;
-    metadata += "VERSION=1\n";
-    metadata += "source_path=" + source_abs + "\n";
-    metadata += "num_sequences=" + std::to_string(num_sequences) + "\n";
-    metadata += "num_features=" + std::to_string(num_features) + "\n";
-    metadata += "seq_ids=" + seq_ids_str + "\n";
-    metadata += "feature_labels=" + feat_labels_str + "\n";
-    metadata += "END_METADATA\n";
-
-    // Write output
-    std::ofstream out(output, std::ios::binary);
-    if (!out)
-        throw std::runtime_error("Cannot open output file for writing: " + output.string());
-
-    out.write(metadata.data(), static_cast<std::streamsize>(metadata.size()));
-    out.write(reinterpret_cast<const char*>(flat_data.data()),
-              static_cast<std::streamsize>(flat_data.size() * sizeof(float)));
-
-    if (!out)
-        throw std::runtime_error("Write failed for: " + output.string());
+    write_pnf(output, seq_ids, feature_labels, flat_data,
+              std::filesystem::absolute(input).string());
 }
 
 pnf::PNFMetadata read_pnf_metadata(const std::filesystem::path& pnf_path) {
@@ -190,6 +218,8 @@ pnf::PNFMetadata read_pnf_metadata(const std::filesystem::path& pnf_path) {
             meta.seq_ids = split_char(value, ';');
         } else if (key == "feature_labels") {
             meta.feature_labels = split_char(value, ';');
+        } else if (key == "het_mode") {
+            meta.het_mode = value;
         }
         // VERSION is silently ignored
     }
