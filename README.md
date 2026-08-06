@@ -7,7 +7,7 @@
 MyESL2 uses Sparse Group Lasso regression to identify genomic features (alignment positions, genes) that are predictive of a binary phenotype. It operates on multiple sequence alignments or numeric feature matrices and produces per-feature weights, gene significance scores, and visualizations.
 
 ## Quick Start
-
+ 
 ### 1. Get a binary
 
 Download the latest release binary for your platform into `./bin/` with the
