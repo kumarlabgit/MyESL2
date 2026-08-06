@@ -39,7 +39,7 @@ TaskSpec spec_for(const std::string& task_type) {
         s.positionals = {"list_path", "hypothesis_path", "output_dir"};
         s.bool_flags = {"dlt", "prune-skipped-lambda", "use-logspace",
                         "drop-major-allele", "minor-column", "tiered-minor-col",
-                        "adaptive-sparsification"};
+                        "adaptive-sparsification", "no-evaluate"};
         s.bare_values = {"orientation"};
         s.mapping_flags = {"param"};
         s.multivalue_flags = {"lambda", "lambda-grid", "adaptive-lambda-grid"};
@@ -53,7 +53,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "class-bal", "dropout", "write-features", "write-features-transposed",
             "max-mem", "adaptive-sparsification", "adaptive-lambda-grid", "het-mode",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",
-            "feature-normalize",
+            "feature-normalize", "no-evaluate",
         };
     } else if (task_type == "evaluate") {
         s.positionals = {"weights_path", "list_path", "output_file"};

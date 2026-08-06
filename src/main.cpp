@@ -104,6 +104,12 @@ void print_help_train(const char* prog_name) {
         "                                 [vmin, largest sweep value < vmax and < 1]\n"
         "      Note: every lambda value (single, file, or grid) must lie in the open\n"
         "      interval (0,1); out-of-range values raise an error.\n"
+        "    --no-evaluate                skip the automatic post-training evaluation.\n"
+        "                                 By default each fitted model is scored against the\n"
+        "                                 training data, writing eval.txt, eval_SPS_SPP.txt\n"
+        "                                 (SPS/SPP/SCP per species) and eval_gene_predictions.txt\n"
+        "                                 into every lambda_<N>/ dir. Implicitly skipped when\n"
+        "                                 --method none leaves no model to score.\n"
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --cv-seed N                  shuffle samples with mt19937(N) before fold round-robin\n"
         "                                 (default: -1 = legacy unshuffled i % nfolds assignment)\n"
@@ -396,6 +402,7 @@ int run_train(int argc, char* argv[]) {
     train_opts.method     = "sg_lasso_logisticr";  // default; --method none skips regression
 
     bool het_mode_set = false;
+    bool no_evaluate  = false;
 
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
@@ -411,6 +418,7 @@ int run_train(int argc, char* argv[]) {
         else if (arg == "--het-mode"   && i+1<argc) { pre_opts.het_mode = argv[++i]; het_mode_set = true; }
         else if (arg == "--threads"    && i+1<argc) { pre_opts.num_threads = static_cast<unsigned>(std::stoi(argv[++i])); if (!pre_opts.num_threads) pre_opts.num_threads = 1; train_opts.threads = pre_opts.num_threads; }
         else if (arg == "--prune-skipped-lambda") train_opts.prune_skipped_lambda = true;
+        else if (arg == "--no-evaluate") no_evaluate = true;
         else if (arg == "--method"     && i+1<argc) { train_opts.method = argv[++i]; if (train_opts.method == "none") train_opts.method.clear(); }
         else if (arg == "--precision"  && i+1<argc) {
             std::string p = argv[++i];
@@ -530,7 +538,36 @@ int run_train(int argc, char* argv[]) {
     pipeline::preprocess(pre_opts);
     try {
         auto enc = pipeline::encode(enc_opts);
-        pipeline::train(enc, train_opts);
+        auto train_result = pipeline::train(enc, train_opts);
+
+        // Score every fitted model against the training data, so each lambda dir
+        // gets eval.txt / eval_SPS_SPP.txt / eval_gene_predictions.txt without a
+        // separate evaluate invocation. Mirrors drphylo's per-lambda evaluate.
+        // Skipped when regression was skipped (--method none): there are no
+        // weights to score.
+        if (!no_evaluate && !train_result.weights_paths.empty()) {
+            std::cout << "\n--- Phase 4: Evaluation ---\n";
+            std::cout << "  Models to score: " << train_result.weights_paths.size() << "\n";
+            // Read back the resolved config rather than reusing pre_opts, whose
+            // cache_dir/num_threads may still hold pre-resolution defaults.
+            auto pre_cfg = pipeline::read_preprocess_config(enc_opts.output_dir);
+            for (auto& wp : train_result.weights_paths) {
+                pipeline::EvaluateOptions eopts;
+                eopts.weights_path = wp;
+                eopts.list_path    = pre_cfg.list_path;
+                eopts.output_file  = wp.parent_path() / "eval.txt";
+                eopts.hyp_path     = enc_opts.hyp_path;   // enables accuracy metrics
+                eopts.no_visualize = true;                // one SVG per grid point is rarely wanted
+                eopts.datatype     = pre_cfg.datatype;
+                eopts.het_mode     = pre_cfg.het_mode;
+                eopts.num_threads  = pre_cfg.num_threads;
+                eopts.cache_dir    = pre_cfg.cache_dir;
+                eopts.minor_alleles_path = enc_opts.output_dir / "minor_alleles.txt";
+                eopts.tiered_minor_alleles_path =
+                    enc_opts.output_dir / "tiered_minor_alleles.txt";
+                pipeline::evaluate(eopts);
+            }
+        }
 
         std::cout << "\n--- Summary ---\n";
         std::cout << "  Features matrix: " << enc.features.n_rows << " x " << enc.features.n_cols << "\n";
