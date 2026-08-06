@@ -168,7 +168,6 @@ Statistics are computed in `double` for numerical stability and applied after cl
 | `--lambda-grid <min,max,step> <min,max,step>` | Run Cartesian product of lambda pairs (e.g., `0.1,0.9,0.1 0.0001,0.001,0.0001`) |
 | `--lambda-file <path>` | File of lambda pairs, one `l1 l2` per line |
 | `--use-logspace` | Replace each `--lambda-grid` linear sweep with a log-spaced grid: `λ_i = vmin × (vmax_eff / vmin)^(i/(N-1))`, where `vmax_eff` is the largest sweep value strictly `< vmax` and `< 1`. Applies only to `--lambda-grid` (not `--lambda` or `--lambda-file`). |
-| `--no-evaluate` | Skip the automatic post-training evaluation. By default each fitted model is scored against the training data, writing `eval.txt`, `eval_SPS_SPP.txt`, and `eval_gene_predictions.txt` into every `lambda_N/`. Implicitly skipped when `--method none` leaves no model to score |
 | `--nfolds N` | K-fold cross-validation (N ≥ 2) |
 | `--precision fp32\|fp64` | Solver precision (default: `fp32`); `fp64` doubles memory but may improve numerical stability |
 | `--max-mem <bytes>` | Abort if estimated feature matrix exceeds this size (default: 8 GB) |
@@ -226,8 +225,6 @@ output_dir/
 │   ├── gss.txt                       # Gene Significance Scores (sum |w| per gene)
 │   ├── bss.txt                       # Bit (feature) Significance Scores
 │   ├── pss.txt                       # Position Significance Scores (FASTA only)
-│   ├── eval.txt                      # Per-species predictions (unless --no-evaluate)
-│   ├── eval_SPS_SPP.txt              # Per-species SPS / SPP / SCP (unless --no-evaluate)
 │   └── eval_gene_predictions.txt     # Per-sample per-gene scores on training data
 ├── lambda_1/
 │   └── ...
