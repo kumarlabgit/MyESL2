@@ -30,6 +30,28 @@ namespace pipeline {
 
 // Extract sequence IDs from a FASTA file by reading only header lines. Used
 // as a fallback when no PFF metadata is cached for an alignment in list.txt.
+// Split one list-file line into paths. A line may name several files separated
+// by commas (an overlapping group), exactly as pipeline_preprocess.cpp:150-166
+// parses it. Splitting here keeps evaluate's view of the list identical to the
+// one preprocess/encode built the model from; without it every file after the
+// first comma is invisible and the model's own alignments look "missing".
+static void append_list_line(const std::string& raw, const fs::path& list_dir,
+                             std::vector<fs::path>& out)
+{
+    std::stringstream ss(raw);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+            token.erase(token.begin());
+        while (!token.empty() &&
+               (token.back() == ' ' || token.back() == '\t' || token.back() == '\r'))
+            token.pop_back();
+        if (token.empty()) continue;
+        for (char& c : token) if (c == '\\') c = '/';
+        out.push_back(list_dir / token);
+    }
+}
+
 static std::vector<std::string> read_fasta_seq_ids_only(const fs::path& p) {
     std::vector<std::string> ids;
     std::ifstream f(p);
@@ -245,8 +267,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                     while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
                         line.pop_back();
                     if (line.empty()) continue;
-                    for (char& c : line) if (c == '\\') c = '/';
-                    all_numeric_paths.push_back(list_dir / line);
+                    append_list_line(line, list_dir, all_numeric_paths);
                 }
             }
         }
@@ -459,7 +480,6 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         };
 
         {
-            // Prefer weights_grouped.txt if it exists (ol_sg_lasso methods)
             fs::path grouped_path = weights_path.parent_path() / "weights_grouped.txt";
             fs::path effective_path = fs::exists(grouped_path) ? grouped_path : weights_path;
             has_grouped_weights = (effective_path == grouped_path);
@@ -601,8 +621,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                     while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
                         line.pop_back();
                     if (line.empty()) continue;
-                    for (char& c : line) if (c == '\\') c = '/';
-                    all_fasta_paths.push_back(list_dir / line);
+                    append_list_line(line, list_dir, all_fasta_paths);
                 }
             }
         }
