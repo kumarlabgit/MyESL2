@@ -284,21 +284,40 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             // Anchor logspace endpoints to [vmin, vmax_effective] where vmax_effective is the
             // largest sweep value strictly < vmax AND < 1. Indices map uniformly onto [0,1] so
             // the largest sweep value projects to vmax_effective exactly.
-            auto project = [](std::vector<double>& vals, double vmax) {
-                vals.erase(std::remove_if(vals.begin(), vals.end(),
-                    [vmax](double v) { return !(v < vmax && v < 1.0); }), vals.end());
-                if (vals.size() < 2) return;
-                const double vmin_eff = vals.front();
-                const double vmax_eff = vals.back();
+            auto project = [](std::vector<double>& vals, double vmax, const char* which) {
+                // Collect the anchorable values separately rather than erasing in
+                // place. A single-point spec (min == max) has nothing strictly
+                // below vmax, so an in-place erase would empty the sweep and the
+                // size guard below could no longer put it back -- leaving an empty
+                // Cartesian product and a baffling "no valid pairs" error.
+                std::vector<double> kept;
+                kept.reserve(vals.size());
+                for (double v : vals)
+                    if (v < vmax && v < 1.0) kept.push_back(v);
+
+                if (kept.size() < 2) {
+                    // Nothing to anchor to; leave the linear sweep untouched. A
+                    // deliberately fixed lambda is normal usage and stays quiet;
+                    // a real sweep that could not be projected is worth flagging.
+                    if (vals.size() > 1)
+                        std::cerr << "Note: --use-logspace left the " << which
+                                  << " sweep linear; fewer than two of its values fall"
+                                     " below its max.\n";
+                    return;
+                }
+
+                const double vmin_eff = kept.front();
+                const double vmax_eff = kept.back();
                 const double ratio = vmax_eff / vmin_eff;
-                const size_t N = vals.size();
+                const size_t N = kept.size();
                 for (size_t i = 0; i < N; ++i) {
                     double t = static_cast<double>(i) / static_cast<double>(N - 1);
-                    vals[i] = vmin_eff * std::pow(ratio, t);
+                    kept[i] = vmin_eff * std::pow(ratio, t);
                 }
+                vals = std::move(kept);
             };
-            project(v1, vmax1);
-            project(v2, vmax2);
+            project(v1, vmax1, "lambda1");
+            project(v2, vmax2, "lambda2");
         }
         fs::path gen_path = output_dir / "lambda_list.txt";
         {

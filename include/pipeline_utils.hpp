@@ -188,6 +188,60 @@ inline std::unordered_set<char> load_datatype_chars(
     return {};
 }
 
+// ---------------------------------------------------------------------------
+// Conversion failure sidecars (<cache_dir>/<stem>.err)
+//
+// A failed conversion drops a sidecar so the file is not retried on every run.
+// The sidecar is honoured only while it still describes the CURRENT input: its
+// first line records the absolute source path, and it is ignored when that path
+// differs or the source has been modified since the failure.
+//
+// Without that check a sidecar outlives whatever caused it -- move the inputs,
+// or fix the file it complained about, and the affected gene stays suppressed
+// forever, with no cure but deleting the sidecar by hand.
+// ---------------------------------------------------------------------------
+
+inline void write_err(const fs::path& err_path, const fs::path& src,
+                      const std::string& message)
+{
+    std::ofstream ef(err_path);
+    if (!ef) return;
+    ef << "source_path=" << fs::absolute(src).string() << "\n" << message << "\n";
+}
+
+/// Drop a sidecar judged not to block: it describes an input that no longer
+/// matches, so it has no further purpose and would otherwise be re-read forever.
+inline void clear_err(const fs::path& err_path)
+{
+    std::error_code ec;
+    fs::remove(err_path, ec);
+}
+
+/// True when err_path is a live failure record for src, so src should be skipped.
+inline bool err_blocks(const fs::path& err_path, const fs::path& src)
+{
+    std::error_code ec;
+    if (!fs::exists(err_path, ec)) return false;
+
+    std::ifstream ef(err_path);
+    std::string first;
+    if (!ef || !std::getline(ef, first)) return false;      // unreadable: retry
+    if (!first.empty() && first.back() == '\r') first.pop_back();
+
+    // Sidecars written before this format carry no header. Treat them as stale
+    // so existing ones self-heal on the next run instead of needing cleanup.
+    const std::string key = "source_path=";
+    if (first.rfind(key, 0) != 0) return false;
+    if (first.substr(key.size()) != fs::absolute(src).string()) return false;
+
+    // Source touched since the failure: the user may have fixed it.
+    auto err_t = fs::last_write_time(err_path, ec);
+    if (ec) return true;
+    auto src_t = fs::last_write_time(src, ec);
+    if (ec) return true;
+    return src_t <= err_t;
+}
+
 // ---- Parallel conversion worker ----
 // conv_fn(src_path, dst_path): the actual conversion; may throw.
 // Writes .err sidecar on failure. Prints [N/total] OK/FAIL per item.
@@ -218,13 +272,16 @@ inline std::pair<int,int> run_parallel_conversions(
             fs::path err = cache_dir / (input_stem(src) + ".err");
             try {
                 conv_fn(src, dst);
+                // Clear any sidecar that was ignored as stale, so it does not
+                // block this file again on the next run.
+                std::error_code rm_ec;
+                fs::remove(err, rm_ec);
                 std::lock_guard<std::mutex> lk(print_mutex);
                 ++converted;
                 std::cout << "[" << converted + failed << "/" << total
                           << "] OK: " << src.filename() << "\n";
             } catch (const std::exception& e) {
-                std::ofstream ef(err);
-                if (ef) ef << e.what() << "\n";
+                write_err(err, src, e.what());
                 std::lock_guard<std::mutex> lk(print_mutex);
                 ++failed;
                 std::cerr << "[" << converted + failed << "/" << total

@@ -360,10 +360,6 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
             fs::path txt_path = stem_to_numeric.at(stem);
             fs::path pnf_path = cache_dir / (stem + cache_ext);
             fs::path err_path = cache_dir / (stem + ".err");
-            if (fs::exists(err_path)) {
-                std::cerr << "Warning: " << stem << " has a prior conversion error, skipping\n";
-                continue;
-            }
             bool needs_convert = true;
             if (fs::exists(pnf_path)) {
                 try {
@@ -376,13 +372,22 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 } catch (...) {}
             }
             if (needs_convert) {
+                // Only a live sidecar for this exact input suppresses the retry,
+                // and only then is the gene genuinely unscoreable.
+                if (pipeline_utils::err_blocks(err_path, txt_path)) {
+                    std::cerr << "Warning: " << stem << " failed to convert previously and has"
+                                 " no usable cache entry; it will contribute nothing to the"
+                                 " score.\n";
+                    continue;
+                }
                 try {
                     if (is_vcf) vcf::vcf_to_vnf(txt_path, pnf_path, vopts);
                     else        numeric::tabular_to_pnf(txt_path, pnf_path);
+                    std::error_code rm_ec;
+                    fs::remove(err_path, rm_ec);
                     std::cout << "Converted: " << stem << "\n";
                 } catch (const std::exception& ex) {
-                    std::ofstream ef(err_path);
-                    if (ef) ef << ex.what() << "\n";
+                    pipeline_utils::write_err(err_path, txt_path, ex.what());
                     throw std::runtime_error("Conversion failed for " + stem + ": " + ex.what());
                 }
             }
@@ -704,10 +709,6 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                 fs::path fasta_path = stem_to_fasta.at(stem);
                 fs::path pff_path   = cache_dir / (stem + ".pff");
                 fs::path err_path   = cache_dir / (stem + ".err");
-                if (fs::exists(err_path)) {
-                    std::cerr << "Warning: " << stem << " has a prior conversion error, skipping\n";
-                    continue;
-                }
                 bool needs_convert = true;
                 if (fs::exists(pff_path)) {
                     try {
@@ -717,7 +718,20 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
                             needs_convert = false;
                     } catch (...) {}
                 }
-                if (needs_convert) convert_queue.push(fasta_path);
+                if (!needs_convert) continue;   // usable cache entry; nothing to report
+
+                // Only a live sidecar for this exact input suppresses the retry,
+                // and only then is the gene genuinely unscoreable. Reporting a
+                // "skipped" conversion when a valid cache entry exists -- and the
+                // gene therefore scores fine -- is what made this message
+                // alarming and unactionable.
+                if (pipeline_utils::err_blocks(err_path, fasta_path)) {
+                    std::cerr << "Warning: " << stem << " failed to convert previously and has"
+                                 " no usable cache entry; it will contribute nothing to the"
+                                 " score.\n";
+                    continue;
+                }
+                convert_queue.push(fasta_path);
             }
 
             if (!convert_queue.empty()) {

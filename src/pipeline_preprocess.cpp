@@ -192,7 +192,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         for (auto& vcf_path : all_fasta_paths) {
             fs::path vnf_path = resolved.cache_dir / (pipeline_utils::input_stem(vcf_path) + ".vnf");
             fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(vcf_path) + ".err");
-            if (fs::exists(err_path)) { ++skipped_error; continue; }
+            if (pipeline_utils::err_blocks(err_path, vcf_path)) { ++skipped_error; continue; }
+            pipeline_utils::clear_err(err_path);   // stale or absent: drop it
             if (fs::exists(vnf_path)) {
                 try {
                     auto meta = numeric::read_pnf_metadata(vnf_path);
@@ -239,7 +240,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         for (auto& tab_path : all_fasta_paths) {
             fs::path pnf_path = resolved.cache_dir / (pipeline_utils::input_stem(tab_path) + ".pnf");
             fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(tab_path) + ".err");
-            if (fs::exists(err_path)) { ++skipped_error; continue; }
+            if (pipeline_utils::err_blocks(err_path, tab_path)) { ++skipped_error; continue; }
+            pipeline_utils::clear_err(err_path);   // stale or absent: drop it
             if (fs::exists(pnf_path)) {
                 try {
                     auto meta = numeric::read_pnf_metadata(pnf_path);
@@ -281,7 +283,8 @@ std::vector<fs::path> preprocess(const PreprocessOptions& opts)
         for (auto& fasta_path : all_fasta_paths) {
             fs::path pff_path = resolved.cache_dir / (pipeline_utils::input_stem(fasta_path) + ".pff");
             fs::path err_path = resolved.cache_dir / (pipeline_utils::input_stem(fasta_path) + ".err");
-            if (fs::exists(err_path)) { ++skipped_error; continue; }
+            if (pipeline_utils::err_blocks(err_path, fasta_path)) { ++skipped_error; continue; }
+            pipeline_utils::clear_err(err_path);   // stale or absent: drop it
             if (fs::exists(pff_path)) {
                 try {
                     auto meta = fasta::read_pff_metadata(pff_path);
