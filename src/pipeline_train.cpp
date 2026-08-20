@@ -162,7 +162,7 @@ static void write_grouped_weights(const regression::RegressionAnalysis& regr,
         }
     }
 
-    std::ofstream wf(output_path);
+    pipeline_utils::AtomicOut wf(output_path);
     wf << std::setprecision(17) << std::scientific;
     size_t n = std::min(static_cast<size_t>(params.n_elem), label_group.size());
     for (size_t i = 0; i < n; ++i) {
@@ -587,7 +587,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             sorted_gss.reserve(gss.size());
             for (auto& [g, v] : gss) sorted_gss.push_back({v, g});
             std::sort(sorted_gss.rbegin(), sorted_gss.rend());
-            std::ofstream gf(lam_dir / "gss.txt");
+            pipeline_utils::AtomicOut gf(lam_dir / "gss.txt");
             gf << std::setprecision(15);
             for (auto& [v, g] : sorted_gss) gf << g << '\t' << v << '\n';
         }
@@ -603,7 +603,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     return pss_pos_key(a.first.substr(ta + 1))
                          < pss_pos_key(b.first.substr(tb + 1));
                 });
-            std::ofstream pf(lam_dir / "pss.txt");
+            pipeline_utils::AtomicOut pf(lam_dir / "pss.txt");
             pf << std::fixed << std::setprecision(15);
             for (auto& [key, v] : pss_entries) {
                 auto tp = key.find('\t');
@@ -613,7 +613,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
         // Write oss.txt (olsg_lasso methods): group\tsum(GSS), sorted by group index
         if (!oss.empty()) {
-            std::ofstream of(lam_dir / "oss.txt");
+            pipeline_utils::AtomicOut of(lam_dir / "oss.txt");
             of << std::setprecision(15);
             for (auto& [gi, v] : oss) of << gi << '\t' << v << '\n';
         }
@@ -707,7 +707,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             sorted_gss.reserve(gss.size());
             for (auto& [g, v] : gss) sorted_gss.push_back({v, g});
             std::sort(sorted_gss.rbegin(), sorted_gss.rend());
-            std::ofstream gf(lam_dir / "gss.txt");
+            pipeline_utils::AtomicOut gf(lam_dir / "gss.txt");
             gf << std::setprecision(15);
             for (auto& [v, g] : sorted_gss) gf << g << '\t' << v << '\n';
         }
@@ -718,7 +718,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             sorted_gss_g.reserve(gss_grp.size());
             for (auto& [key, v] : gss_grp) sorted_gss_g.push_back({v, key.first, key.second});
             std::sort(sorted_gss_g.rbegin(), sorted_gss_g.rend());
-            std::ofstream gf(lam_dir / "gss_grouped.txt");
+            pipeline_utils::AtomicOut gf(lam_dir / "gss_grouped.txt");
             gf << std::setprecision(15);
             for (auto& [v, g, gi] : sorted_gss_g) gf << g << '\t' << gi << '\t' << v << '\n';
         }
@@ -734,7 +734,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     return pss_pos_key(a.first.substr(ta + 1))
                          < pss_pos_key(b.first.substr(tb + 1));
                 });
-            std::ofstream pf(lam_dir / "pss.txt");
+            pipeline_utils::AtomicOut pf(lam_dir / "pss.txt");
             pf << std::fixed << std::setprecision(15);
             for (auto& [key, v] : pss_entries) {
                 auto tp = key.find('\t');
@@ -752,7 +752,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 pss_g_entries.push_back({label, key.second, v});
             }
             std::sort(pss_g_entries.begin(), pss_g_entries.end());
-            std::ofstream pf(lam_dir / "pss_grouped.txt");
+            pipeline_utils::AtomicOut pf(lam_dir / "pss_grouped.txt");
             pf << std::fixed << std::setprecision(15);
             for (auto& [label, gi, v] : pss_g_entries) pf << label << '\t' << gi << '\t' << v << '\n';
         }
@@ -763,7 +763,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             sorted_oss.reserve(oss.size());
             for (auto& [gi, v] : oss) sorted_oss.push_back({v, gi});
             std::sort(sorted_oss.rbegin(), sorted_oss.rend());
-            std::ofstream of(lam_dir / "oss.txt");
+            pipeline_utils::AtomicOut of(lam_dir / "oss.txt");
             of << std::setprecision(15);
             for (auto& [v, gi] : sorted_oss) of << gi << '\t' << v << '\n';
         }
@@ -936,12 +936,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 auto regr = regression::createRegressionAnalysis(
                     method, features, responses, alg_table.t(), opts.params, lam, opts.precision);
                 {
-                    std::ofstream wo(lam_dir / "weights.txt");
+                    pipeline_utils::AtomicOut wo(lam_dir / "weights.txt");
                     fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                         ? generate_expanded_map(output_dir, alg_table)
                         : (output_dir / "combined.map");
                     std::ifstream mi(map_path);
-                    regr->writeSparseMappedWeightsToStream(wo, mi);
+                    regr->writeSparseMappedWeightsToStream(wo.stream(), mi);
                 }
                 if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                     write_grouped_weights(*regr, output_dir / "expanded.map", lam_dir / "weights_grouped.txt");
@@ -972,12 +972,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                         xval_idxs, k, opts.precision);
                     fs::path fw = lam_dir / ("weights_fold_" + std::to_string(k) + ".txt");
                     {
-                        std::ofstream wo(fw);
+                        pipeline_utils::AtomicOut wo(fw);
                         fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                             ? generate_expanded_map(output_dir, alg_table)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
-                        regr->writeSparseMappedWeightsToStream(wo, mi);
+                        regr->writeSparseMappedWeightsToStream(wo.stream(), mi);
                     }
                     if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                         write_grouped_weights(*regr, output_dir / "expanded.map",
@@ -1032,7 +1032,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
                 // Write cv_predictions.txt
                 {
-                    std::ofstream cv_out(lam_dir / "cv_predictions.txt");
+                    pipeline_utils::AtomicOut cv_out(lam_dir / "cv_predictions.txt");
                     cv_out << std::fixed << std::setprecision(6);
                     cv_out << "SequenceID\tPredictedValue\tTrueValue\tFold\n";
                     for (uint32_t i = 0; i < N; ++i)
@@ -1130,12 +1130,12 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                         opts.params, lam, opts.precision);
                     fs::path wpath = lam_dir / "weights.txt";
                     {
-                        std::ofstream wo(wpath);
+                        pipeline_utils::AtomicOut wo(wpath);
                         fs::path map_path = (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                             ? generate_expanded_map(output_dir, alg_table)
                             : (output_dir / "combined.map");
                         std::ifstream mi(map_path);
-                        regr->writeSparseMappedWeightsToStream(wo, mi);
+                        regr->writeSparseMappedWeightsToStream(wo.stream(), mi);
                     }
                     if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                         write_grouped_weights(*regr, output_dir / "expanded.map", lam_dir / "weights_grouped.txt");
