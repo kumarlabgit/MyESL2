@@ -227,6 +227,18 @@ pnf::PNFMetadata read_pnf_metadata(const std::filesystem::path& pnf_path) {
     if (meta.data_offset == 0)
         throw std::runtime_error("END_METADATA not found in: " + pnf_path.string());
 
+    // See the matching check in read_pff_metadata: a short payload means the
+    // conversion was interrupted, and silently reusing it corrupts the matrix.
+    {
+        std::error_code ec;
+        auto actual = std::filesystem::file_size(pnf_path, ec);
+        auto needed = meta.data_offset + meta.get_data_size();
+        if (ec || actual < needed)
+            throw std::runtime_error(
+                "Truncated PNF file (need " + std::to_string(needed) +
+                " bytes, found " + std::to_string(ec ? 0 : actual) + "): " + pnf_path.string());
+    }
+
     return meta;
 }
 

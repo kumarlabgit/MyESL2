@@ -235,6 +235,22 @@ pff::PFFMetadata read_pff_metadata(const std::filesystem::path& pff_path) {
     }
 
     metadata.validate();
+
+    // A cache file whose payload is shorter than the header advertises is a
+    // conversion that died partway. Without this check the reuse predicate in
+    // preprocess accepts it and encode reads whatever bytes happen to be there,
+    // producing a silently wrong feature matrix rather than any error.
+    // Throwing turns it into a cache miss: every reuse site already treats a
+    // metadata failure as "re-convert".
+    {
+        std::error_code ec;
+        auto actual = std::filesystem::file_size(pff_path, ec);
+        auto needed = metadata.data_offset + metadata.get_data_size();
+        if (ec || actual < needed)
+            throw std::runtime_error(
+                "Truncated PFF file (need " + std::to_string(needed) +
+                " bytes, found " + std::to_string(ec ? 0 : actual) + "): " + pff_path.string());
+    }
     return metadata;
 }
 
