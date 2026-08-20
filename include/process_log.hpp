@@ -53,6 +53,11 @@ public:
         { return param(k, std::to_string(v)); }
     Section& param(const std::string& k, bool v)
         { return param(k, std::string(v ? "true" : "false")); }
+    // Without this, param(k, cond ? "a" : "b") binds to the bool overload --
+    // pointer-to-bool is a standard conversion and beats const char* to
+    // std::string -- and silently logs "true" for every string literal.
+    Section& param(const std::string& k, const char* v)
+        { return param(k, std::string(v)); }
     Section& param(const std::string& k, double v) {
         std::ostringstream s; s << std::fixed << std::setprecision(6) << v;
         return param(k, s.str());

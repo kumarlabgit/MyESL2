@@ -331,7 +331,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         plog.param("lambda_file", opts.lambda_file_path);
     else
         plog.param("lambda", std::to_string(opts.lambda[0]) + " " + std::to_string(opts.lambda[1]));
-    plog.param("use_logspace", opts.use_logspace ? "true" : "false");
+    plog.param("use_logspace", opts.use_logspace);
     plog.param("lambdas_count", (int)lambdas.size());
     if (opts.nfolds > 0)      plog.param("nfolds",     opts.nfolds);
     if (opts.min_groups > 0)  plog.param("min_groups", opts.min_groups);
