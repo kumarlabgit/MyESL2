@@ -114,6 +114,15 @@ void print_help_train(const char* prog_name) {
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --cv-seed N                  shuffle samples with mt19937(N) before fold round-robin\n"
         "                                 (default: -1 = legacy unshuffled i % nfolds assignment)\n"
+        "    --cv-scores                  (requires --nfolds) additionally score each fold\n"
+        "                                 model against the FULL dataset as if it were an\n"
+        "                                 ordinary model, so every fold gets its own\n"
+        "                                 eval_fold_N.txt / eval_fold_N_SPS_SPP.txt /\n"
+        "                                 eval_fold_N_gene_predictions.txt. Without it a CV\n"
+        "                                 run reports only the pooled held-out prediction in\n"
+        "                                 cv_predictions.txt. Note these are in-sample scores:\n"
+        "                                 each fold model is scored on all species, including\n"
+        "                                 the ones it was trained on.\n"
         "    --cv-assignments <file>      load fold assignments from TSV (cols: SequenceID, Fold;\n"
         "                                 header auto-detected; cv_predictions.txt from a prior\n"
         "                                 run can be passed directly). Overrides --cv-seed.\n"
@@ -399,6 +408,16 @@ void print_help(const char* prog_name, const std::string& command) {
 
 int run_taskfile(int argc, char* argv[]);
 
+// Basename for a model's evaluation outputs, derived from its weights file so
+// per-fold models scored under --cv-scores do not all collide on eval.txt:
+//   weights.txt        -> eval.txt
+//   weights_fold_3.txt -> eval_fold_3.txt   (siblings: eval_fold_3_SPS_SPP.txt, ...)
+fs::path eval_output_for(const fs::path& weights_path) {
+    const std::string stem = weights_path.stem().string();
+    const std::string tag  = stem.rfind("weights", 0) == 0 ? stem.substr(7) : "";
+    return weights_path.parent_path() / ("eval" + tag + ".txt");
+}
+
 int run_train(int argc, char* argv[]) {
     if (argc < 5) {
         std::cerr << "Error: train requires <list.txt> <hypothesis.txt> <output_dir>\n";
@@ -452,6 +471,7 @@ int run_train(int argc, char* argv[]) {
         else if (arg == "--nfolds"     && i+1<argc) { train_opts.nfolds=std::stoi(argv[++i]); if(train_opts.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
         else if (arg == "--cv-seed"    && i+1<argc) train_opts.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments" && i+1<argc) train_opts.cv_assignments_path = argv[++i];
+        else if (arg == "--cv-scores") train_opts.cv_scores = true;
         else if (arg == "--min-groups" && i+1<argc) train_opts.min_groups = std::stoi(argv[++i]);
         else if (arg == "--auto-bit-ct"&& i+1<argc) enc_opts.auto_bit_ct = std::stod(argv[++i]);
         else if (arg == "--drop-major-allele") enc_opts.drop_major = true;
@@ -552,6 +572,8 @@ int run_train(int argc, char* argv[]) {
             "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts.minor_column && enc_opts.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
+    if (train_opts.cv_scores && train_opts.nfolds == 0)
+        throw std::runtime_error("--cv-scores requires --nfolds (there are no fold models to score)");
 
     pipeline::preprocess(pre_opts);
     try {
@@ -573,7 +595,7 @@ int run_train(int argc, char* argv[]) {
                 pipeline::EvaluateOptions eopts;
                 eopts.weights_path = wp;
                 eopts.list_path    = pre_cfg.list_path;
-                eopts.output_file  = wp.parent_path() / "eval.txt";
+                eopts.output_file  = eval_output_for(wp);
                 eopts.hyp_path     = enc_opts.hyp_path;   // enables accuracy metrics
                 eopts.no_visualize = true;                // one SVG per grid point is rarely wanted
                 eopts.datatype     = pre_cfg.datatype;
@@ -724,8 +746,10 @@ int run_evaluate_from_run(const fs::path& run_dir, int argc, char* argv[]) {
             ++missing;
             continue;
         }
-        fs::path lam_dir = wp.parent_path();
-        if (!re_evaluate && fs::exists(lam_dir / "eval_SPS_SPP.txt")) {
+        // This model's own SPS/SPP file, so fold models are tracked separately.
+        fs::path sps = eval_output_for(wp);
+        sps.replace_filename(sps.stem().string() + "_SPS_SPP.txt");
+        if (!re_evaluate && fs::exists(sps)) {
             ++reused;
             continue;
         }
@@ -733,7 +757,7 @@ int run_evaluate_from_run(const fs::path& run_dir, int argc, char* argv[]) {
         pipeline::EvaluateOptions eopts;
         eopts.weights_path = wp;
         eopts.list_path    = pre.list_path;
-        eopts.output_file  = lam_dir / "eval.txt";
+        eopts.output_file  = eval_output_for(wp);
         eopts.hyp_path     = hyp_path;
         eopts.no_visualize = no_visualize;
         eopts.datatype     = datatype_override.empty() ? pre.datatype : datatype_override;
@@ -911,6 +935,7 @@ int run_drphylo(int argc, char* argv[]) {
         else if (arg == "--nfolds"           && i+1<argc) { train_opts_base.nfolds=std::stoi(argv[++i]); if(train_opts_base.nfolds<2) throw std::runtime_error("--nfolds must be >= 2"); }
         else if (arg == "--cv-seed"          && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments"   && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
+        else if (arg == "--cv-scores")       train_opts_base.cv_scores = true;
         else if (arg == "--min-groups"       && i+1<argc) { train_opts_base.min_groups=std::stoi(argv[++i]); min_groups_set=true; }
         else if (arg == "--grid-rmse-cutoff" && i+1<argc) grid_rmse_cutoff = std::stod(argv[++i]);
         else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
@@ -964,6 +989,8 @@ int run_drphylo(int argc, char* argv[]) {
             "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
+    if (train_opts_base.cv_scores && train_opts_base.nfolds == 0)
+        throw std::runtime_error("--cv-scores requires --nfolds (there are no fold models to score)");
     if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
         enc_opts_base.disable_mc = true;
     if (!min_groups_set) train_opts_base.min_groups = 3;
@@ -1033,7 +1060,7 @@ int run_drphylo(int argc, char* argv[]) {
             pipeline::EvaluateOptions eopts;
             eopts.weights_path = wp;
             eopts.list_path    = pre_cfg.list_path;
-            eopts.output_file  = lam_dir / "eval.txt";
+            eopts.output_file  = eval_output_for(wp);
             eopts.hyp_path     = hyp_file;
             eopts.no_visualize = true;
             eopts.datatype     = pre_cfg.datatype;
@@ -1136,6 +1163,7 @@ int run_aim(int argc, char* argv[]) {
         else if (arg == "--nfolds"         && i+1<argc) train_opts_base.nfolds = std::stoi(argv[++i]);
         else if (arg == "--cv-seed"        && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments" && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
+        else if (arg == "--cv-scores") train_opts_base.cv_scores = true;
         else if (arg == "--min-groups"     && i+1<argc) train_opts_base.min_groups = std::stoi(argv[++i]);
         else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
         else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
@@ -1186,6 +1214,8 @@ int run_aim(int argc, char* argv[]) {
             "--minor-column / --tiered-minor-col are not supported with --datatype vcf");
     if (enc_opts_base.minor_column && enc_opts_base.tiered_minor_col)
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
+    if (train_opts_base.cv_scores && train_opts_base.nfolds == 0)
+        throw std::runtime_error("--cv-scores requires --nfolds (there are no fold models to score)");
     if (train_opts_base.params.count("disable_mc") && train_opts_base.params.at("disable_mc") == "1")
         enc_opts_base.disable_mc = true;
     if (!has_lambda) { train_opts_base.lambda_grid_specs[0]="0.1,0.9,0.1"; train_opts_base.lambda_grid_specs[1]="0.0001,0.0002,0.0001"; train_opts_base.lambda_grid_set=true; }

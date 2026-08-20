@@ -32,6 +32,11 @@ struct TrainOptions {
     //                           from a previous run can be passed directly.
     int          cv_seed             = -1;
     std::string  cv_assignments_path;
+    // Score each fold model on the full dataset as if it were a standalone
+    // model, giving every fold its own eval/SPS/SPP/SCP outputs. Requires
+    // nfolds > 0. Off by default: a CV run normally reports only the pooled
+    // held-out prediction in cv_predictions.txt.
+    bool         cv_scores           = false;
     std::map<std::string, std::string> params;  // slep opts, merged with enc.extra_params
     bool        adaptive_sparsification = false;
     std::string adaptive_l1_spec = "0.1,0.3,0.1";    // produces 0.1, 0.2, 0.3

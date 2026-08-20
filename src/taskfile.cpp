@@ -37,7 +37,7 @@ TaskSpec spec_for(const std::string& task_type) {
 
     if (task_type == "train") {
         s.positionals = {"list_path", "hypothesis_path", "output_dir"};
-        s.bool_flags = {"dlt", "prune-skipped-lambda", "use-logspace",
+        s.bool_flags = {"dlt", "prune-skipped-lambda", "use-logspace", "cv-scores",
                         "drop-major-allele", "minor-column", "tiered-minor-col",
                         "adaptive-sparsification", "no-evaluate"};
         s.bare_values = {"orientation"};
@@ -48,7 +48,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "cache-dir", "min-minor", "dlt", "datatype", "threads",
             "prune-skipped-lambda", "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
-            "nfolds", "cv-seed", "cv-assignments", "min-groups",
+            "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "class-bal", "dropout", "write-features", "write-features-transposed",
             "max-mem", "adaptive-sparsification", "adaptive-lambda-grid", "het-mode",
@@ -71,7 +71,7 @@ TaskSpec spec_for(const std::string& task_type) {
     } else if (task_type == "drphylo") {
         // drphylo has two positional layouts (direct/tree). Handled specially below.
         s.positionals = {};
-        s.bool_flags = {"prune-skipped-lambda", "dlt", "use-logspace",
+        s.bool_flags = {"prune-skipped-lambda", "dlt", "use-logspace", "cv-scores",
                         "drop-major-allele", "minor-column", "tiered-minor-col"};
         s.mapping_flags = {"param"};
         s.multivalue_flags = {"lambda", "lambda-grid"};
@@ -81,7 +81,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "prune-skipped-lambda", "cache-dir", "dlt", "min-minor",
             "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
-            "nfolds", "cv-seed", "cv-assignments", "min-groups",
+            "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
             "grid-rmse-cutoff", "grid-acc-cutoff", "gene-limit", "species-limit", "het-mode",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "max-mem",
@@ -90,7 +90,7 @@ TaskSpec spec_for(const std::string& task_type) {
         };
     } else if (task_type == "aim") {
         s.positionals = {"list_path", "hypothesis_path", "output_dir"};
-        s.bool_flags = {"prune-skipped-lambda", "dlt", "use-logspace",
+        s.bool_flags = {"prune-skipped-lambda", "dlt", "use-logspace", "cv-scores",
                         "drop-major-allele", "minor-column", "tiered-minor-col"};
         s.mapping_flags = {"param"};
         s.multivalue_flags = {"lambda", "lambda-grid"};
@@ -101,7 +101,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "prune-skipped-lambda", "dlt", "min-minor",
             "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
-            "nfolds", "cv-seed", "cv-assignments", "min-groups",
+            "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
             "class-bal", "drop-major-allele", "minor-column", "tiered-minor-col",
             "auto-bit-ct", "max-mem", "het-mode",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",

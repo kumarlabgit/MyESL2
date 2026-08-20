@@ -816,19 +816,44 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     // A run cancelled partway through therefore leaves an accurate record of
     // which models finished, which `evaluate --from-run` scores and a future
     // resume can use to pick up the still-pending points.
+    // --cv-scores promotes each fold model to a separately scoreable model, so
+    // a CV lambda contributes nfolds rows instead of one.
+    const bool   cv_scores      = (opts.nfolds > 0 && opts.cv_scores);
+    const size_t rows_per_lambda = cv_scores ? static_cast<size_t>(opts.nfolds) : 1;
+
     model_log::Log mlog(output_dir / "models.tsv");
     for (size_t pi = 0; pi < penalty_terms.size(); ++pi) {
+        const std::string pen_prefix =
+            multi_penalty ? "penalty_" + std::to_string(pi) + "/" : "";
         for (size_t li = 0; li < lambdas.size(); ++li) {
-            // k-fold CV writes weights_fold_N.txt rather than a single
-            // scoreable model, so those rows carry no weights path.
-            std::string rel;
-            if (opts.nfolds == 0)
-                rel = (multi_penalty ? "penalty_" + std::to_string(pi) + "/" : "")
-                    + "lambda_" + std::to_string(li) + "/weights.txt";
-            mlog.add(pi, penalty_terms[pi], li, lambdas[li][0], lambdas[li][1], rel);
+            const std::string lam_prefix = pen_prefix + "lambda_" + std::to_string(li) + "/";
+            if (cv_scores) {
+                for (int k = 0; k < opts.nfolds; ++k)
+                    mlog.add(pi, penalty_terms[pi], li, k, lambdas[li][0], lambdas[li][1],
+                             lam_prefix + "weights_fold_" + std::to_string(k) + ".txt");
+            } else {
+                // Plain k-fold CV writes only weights_fold_N.txt and reports the
+                // pooled held-out prediction, so there is no single scoreable
+                // model and the row carries no weights path.
+                std::string rel;
+                if (opts.nfolds == 0) rel = lam_prefix + "weights.txt";
+                mlog.add(pi, penalty_terms[pi], li, -1, lambdas[li][0], lambdas[li][1], rel);
+            }
         }
     }
     mlog.flush();
+
+    // Row index for one (penalty, lambda, fold). fold < 0 selects the lambda's
+    // first row, which is its only row when --cv-scores is off.
+    auto gid_of = [&](size_t pi, size_t li, int fold) {
+        return (pi * lambdas.size() + li) * rows_per_lambda
+             + (fold < 0 ? 0u : static_cast<size_t>(fold));
+    };
+    // Apply a status to every row belonging to one lambda.
+    auto mark_lambda = [&](size_t pi, size_t li, model_log::Status st, const std::string& d) {
+        for (size_t k = 0; k < rows_per_lambda; ++k)
+            mlog.set(gid_of(pi, li, static_cast<int>(k)), st, d);
+    };
     std::cout << "  Model log: " << mlog.size() << " model(s) -> "
               << (output_dir / "models.tsv").string() << "\n";
 
@@ -870,12 +895,13 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(idx));
             fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
 
-            const size_t gid = pi * lambdas.size() + static_cast<size_t>(idx);
+            const size_t gid = gid_of(pi, static_cast<size_t>(idx), -1);
 
             if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
                 std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
                           << "] Skipping (gene count threshold)\n";
-                mlog.set(gid, model_log::Status::Skipped, "min-groups skip-ahead");
+                mark_lambda(pi, static_cast<size_t>(idx),
+                            model_log::Status::Skipped, "min-groups skip-ahead");
                 continue;
             }
 
@@ -937,6 +963,18 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     if (method == "ol_sg_lasso_logisticr" || method == "ol_sg_lasso_leastr")
                         write_grouped_weights(*regr, output_dir / "expanded.map",
                             lam_dir / ("weights_fold_" + std::to_string(k) + "_grouped.txt"));
+
+                    if (cv_scores) {
+                        // The fold model is fully written, so publish it as a
+                        // scoreable model in its own right. Phase 4 picks it up
+                        // from weights_paths and evaluates it against the full
+                        // dataset, exactly as it would an ordinary model.
+                        result.weights_paths.push_back(fw);
+                        result.lambdas_used.push_back(lam);
+                        result.penalties_used.push_back(penalty);
+                        mlog.set(gid_of(pi, static_cast<size_t>(idx), k),
+                                 model_log::Status::Complete);
+                    }
 
                     // Parse fold weights
                     double fold_intercept = 0.0;
@@ -1007,16 +1045,18 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 out << "    TPR=" << tpr << " TNR=" << tnr
                     << " FPR=" << fpr << " FNR=" << fnr << "\n";
                 std::cout << out.str();
-                mlog.set(gid, model_log::Status::Complete, "cross-validation");
+                if (!cv_scores)
+                    mlog.set(gid, model_log::Status::Complete, "cross-validation");
             }
             } catch (const std::exception& e) {
                 // Record the failure before unwinding so the log survives the
                 // abort; rethrow preserves the existing whole-run-aborts
                 // semantics rather than quietly continuing the grid.
-                mlog.set(gid, model_log::Status::Failed, e.what());
+                mark_lambda(pi, static_cast<size_t>(idx), model_log::Status::Failed, e.what());
                 throw;
             } catch (...) {
-                mlog.set(gid, model_log::Status::Failed, "unknown error");
+                mark_lambda(pi, static_cast<size_t>(idx),
+                            model_log::Status::Failed, "unknown error");
                 throw;
             }
         }
@@ -1091,16 +1131,16 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     per_idx_lambdas[idx] = lam;
                     per_idx_solved[idx]  = 1;
                     gene_counts[idx]     = gene_count;
-                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Complete);
+                    mlog.set(gid_of(pi, idx, -1), model_log::Status::Complete);
 
                     std::lock_guard<std::mutex> lk(log_mutex);
                     std::cout << out.str();
                 } catch (const std::exception& e) {
-                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Failed, e.what());
+                    mlog.set(gid_of(pi, idx, -1), model_log::Status::Failed, e.what());
                     std::lock_guard<std::mutex> lk(err_mutex);
                     if (!first_error) first_error = std::current_exception();
                 } catch (...) {
-                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Failed, "unknown error");
+                    mlog.set(gid_of(pi, idx, -1), model_log::Status::Failed, "unknown error");
                     std::lock_guard<std::mutex> lk(err_mutex);
                     if (!first_error) first_error = std::current_exception();
                 }
@@ -1125,7 +1165,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             // The pruner deleted these lambda dirs' contents, so the models are
             // gone; demote them from complete so evaluate --from-run skips them.
             for (size_t pruned_idx : pruned)
-                mlog.set(pi * lambdas.size() + pruned_idx, model_log::Status::Skipped,
+                mlog.set(gid_of(pi, pruned_idx, -1), model_log::Status::Skipped,
                          "pruned for single-threaded skip-ahead parity");
             std::cout << "  Pruned " << pruned.size() << " of " << lambdas.size()
                       << " lambda point(s) to match single-threaded skip-ahead semantics.\n";

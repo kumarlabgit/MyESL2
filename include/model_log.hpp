@@ -15,15 +15,18 @@
 //
 // Format: tab-separated, one header line, then one row per model.
 //
-//   Index  PenaltyIdx  PenaltyValue  LambdaIdx  Lambda1  Lambda2  WeightsPath  Status  Detail
+//   Index  PenaltyIdx  PenaltyValue  LambdaIdx  FoldIdx  Lambda1  Lambda2  WeightsPath  Status  Detail
 //
 //   Index        global 0-based model index across the whole run (penalty-major)
 //   PenaltyIdx   index into the penalty-term list (0 when there is only one)
 //   LambdaIdx    index into lambda_list.txt
-//   WeightsPath  path to weights.txt RELATIVE to <output_dir>, so a run
+//   FoldIdx      cross-validation fold, or -1 for an ordinary model. Populated
+//                only under --cv-scores, which promotes each fold model to a
+//                separately scoreable model with its own row.
+//   WeightsPath  path to the weights file RELATIVE to <output_dir>, so a run
 //                directory stays valid after being moved. Empty when the run
-//                produces no single scoreable model (k-fold CV writes
-//                weights_fold_N.txt instead).
+//                produces no single scoreable model (k-fold CV without
+//                --cv-scores writes only weights_fold_N.txt).
 //   Status       pending | complete | failed | skipped
 //   Detail       failure message or skip reason; empty otherwise
 //
@@ -71,6 +74,7 @@ struct Row {
     size_t      penalty_idx   = 0;
     double      penalty_value = 0.0;
     size_t      lambda_idx    = 0;
+    int         fold_idx      = -1;   ///< -1 = not a cross-validation fold model
     double      lambda1       = 0.0;
     double      lambda2       = 0.0;
     std::string weights_path;   ///< relative to the run dir; empty when none
@@ -79,7 +83,7 @@ struct Row {
 };
 
 inline const char* kHeader =
-    "Index\tPenaltyIdx\tPenaltyValue\tLambdaIdx\tLambda1\tLambda2\tWeightsPath\tStatus\tDetail";
+    "Index\tPenaltyIdx\tPenaltyValue\tLambdaIdx\tFoldIdx\tLambda1\tLambda2\tWeightsPath\tStatus\tDetail";
 
 // Strip characters that would corrupt a TSV row.
 inline std::string sanitize(const std::string& s) {
@@ -107,7 +111,7 @@ public:
 
     /// Register one intended model. Returns its global index.
     size_t add(size_t penalty_idx, double penalty_value, size_t lambda_idx,
-               double lambda1, double lambda2, std::string rel_weights)
+               int fold_idx, double lambda1, double lambda2, std::string rel_weights)
     {
         std::lock_guard<std::mutex> lk(mu_);
         Row r;
@@ -115,6 +119,7 @@ public:
         r.penalty_idx   = penalty_idx;
         r.penalty_value = penalty_value;
         r.lambda_idx    = lambda_idx;
+        r.fold_idx      = fold_idx;
         r.lambda1       = lambda1;
         r.lambda2       = lambda2;
         r.weights_path  = std::move(rel_weights);
@@ -167,6 +172,7 @@ private:
             for (const auto& r : rows_) {
                 f << r.index << '\t' << r.penalty_idx << '\t'
                   << fmt_num(r.penalty_value) << '\t' << r.lambda_idx << '\t'
+                  << r.fold_idx << '\t'
                   << fmt_num(r.lambda1) << '\t' << fmt_num(r.lambda2) << '\t'
                   << r.weights_path << '\t' << to_string(r.status) << '\t'
                   << sanitize(r.detail) << '\n';
@@ -201,7 +207,7 @@ inline std::vector<Row> read(const fs::path& path) {
         std::string tok;
         std::istringstream ss(line);
         while (std::getline(ss, tok, '\t')) col.push_back(tok);
-        if (col.size() < 8) continue;
+        if (col.size() < 9) continue;
 
         Row r;
         try {
@@ -209,12 +215,13 @@ inline std::vector<Row> read(const fs::path& path) {
             r.penalty_idx   = static_cast<size_t>(std::stoull(col[1]));
             r.penalty_value = std::stod(col[2]);
             r.lambda_idx    = static_cast<size_t>(std::stoull(col[3]));
-            r.lambda1       = std::stod(col[4]);
-            r.lambda2       = std::stod(col[5]);
+            r.fold_idx      = std::stoi(col[4]);
+            r.lambda1       = std::stod(col[5]);
+            r.lambda2       = std::stod(col[6]);
         } catch (...) { continue; }
-        r.weights_path = col[6];
-        r.status       = parse_status(col[7]);
-        r.detail       = col.size() > 8 ? col[8] : "";
+        r.weights_path = col[7];
+        r.status       = parse_status(col[8]);
+        r.detail       = col.size() > 9 ? col[9] : "";
         rows.push_back(std::move(r));
     }
     return rows;

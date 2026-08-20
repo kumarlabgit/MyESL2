@@ -480,7 +480,17 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         };
 
         {
-            fs::path grouped_path = weights_path.parent_path() / "weights_grouped.txt";
+            // Prefer the grouped companion if it exists (ol_sg_lasso methods).
+            // Derived from the weights stem so a fold model picks up its own
+            // weights_fold_N_grouped.txt rather than the non-fold file:
+            //   weights.txt        -> weights_grouped.txt
+            //   weights_fold_3.txt -> weights_fold_3_grouped.txt
+            const std::string wstem = weights_path.stem().string();
+            const bool already_grouped =
+                wstem.size() > 8 && wstem.compare(wstem.size() - 8, 8, "_grouped") == 0;
+            fs::path grouped_path = already_grouped
+                ? weights_path                        // caller passed the grouped file itself
+                : weights_path.parent_path() / (wstem + "_grouped.txt");
             fs::path effective_path = fs::exists(grouped_path) ? grouped_path : weights_path;
             has_grouped_weights = (effective_path == grouped_path);
 
