@@ -56,12 +56,14 @@ TaskSpec spec_for(const std::string& task_type) {
             "feature-normalize", "no-evaluate",
         };
     } else if (task_type == "evaluate") {
-        s.positionals = {"weights_path", "list_path", "output_file"};
-        s.bool_flags = {"no-visualize"};
+        // evaluate has two layouts (single-model / from-run). Handled specially below.
+        s.positionals = {};
+        s.bool_flags = {"no-visualize", "re-evaluate", "visualize"};
         s.allowed = {
             "weights_path", "list_path", "output_file",
             "cache-dir", "hypothesis", "datatype", "threads", "no-visualize",
             "minor-alleles", "tiered-minor-alleles", "gene-limit", "species-limit", "het-mode",
+            "from-run", "re-evaluate", "visualize",
         };
     } else if (task_type == "info") {
         s.positionals = {"pff_path"};
@@ -308,7 +310,21 @@ int run_taskfile(int argc, char* argv[]) {
 
     // Positional emission.
     std::unordered_set<std::string> emitted_positionals;
-    if (task_type == "drphylo") {
+    if (task_type == "evaluate") {
+        // from-run mode reads everything from the run directory, so it takes no
+        // positionals; single-model mode still requires all three.
+        if (!resolved("from-run")) {
+            for (const char* pname : {"weights_path", "list_path", "output_file"}) {
+                const std::vector<std::string>* pv = resolved(pname);
+                if (!pv)
+                    throw std::runtime_error(
+                        std::string("evaluate: missing required key '") + pname +
+                        "' (or use 'from-run' to score a whole run directory)");
+                tokens.push_back((*pv)[0]);
+                emitted_positionals.insert(pname);
+            }
+        }
+    } else if (task_type == "drphylo") {
         // Detect tree mode by presence of `tree` in YAML or CLI.
         const std::vector<std::string>* list_v = resolved("list_path");
         const std::vector<std::string>* tree_v = resolved("tree");

@@ -16,6 +16,7 @@
 #include "pipeline_preprocess.hpp"
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
+#include "model_log.hpp"
 #include "pipeline_evaluate.hpp"
 #include "pipeline_adaptive.hpp"
 #include "pipeline_utils.hpp"
@@ -188,9 +189,26 @@ void print_help_evaluate(const char* prog_name) {
     const std::string p = prog_name;
     std::cout <<
         "EVALUATE\n"
-        "  " + p + " evaluate <weights.txt> <list.txt> <output_file> [options]\n\n"
+        "  " + p + " evaluate <weights.txt> <list.txt> <output_file> [options]\n"
+        "  " + p + " evaluate --from-run <run_dir> [options]\n\n"
         "  Apply a trained model to new data and write per-species predictions.\n\n"
-        "  Positional:\n"
+        "  Batch mode:\n"
+        "    --from-run <run_dir>    Score every model that <run_dir>/models.tsv records\n"
+        "                            as complete, writing eval.txt / eval_SPS_SPP.txt /\n"
+        "                            eval_gene_predictions.txt into each lambda dir.\n"
+        "                            Useful after a training run was cancelled partway:\n"
+        "                            the finished grid points can be scored without\n"
+        "                            re-running the solver. The list file, datatype,\n"
+        "                            cache dir and het-mode are read from the run's\n"
+        "                            preprocess_config, and the hypothesis file from its\n"
+        "                            process_log.txt, so no positionals are needed.\n"
+        "                            Models already carrying eval output are left alone\n"
+        "                            unless --re-evaluate is given.\n"
+        "    --re-evaluate           (--from-run only) re-score models that already have\n"
+        "                            evaluation output instead of skipping them.\n"
+        "    --visualize             (--from-run only) emit an SVG per model; off by\n"
+        "                            default since a 9x9 sweep would produce 81 of them.\n\n"
+        "  Positional (single-model mode):\n"
         "    weights.txt     INPUT: trained model weights (e.g. <train_out>/lambda_N/weights.txt)\n"
         "    list.txt        INPUT: paths to FASTA/numeric files for the species to predict\n"
         "                    (one per line; same format as train's list.txt)\n"
@@ -588,7 +606,176 @@ int run_train(int argc, char* argv[]) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// evaluate --from-run <dir>
+//
+// Scores every model that <dir>/models.tsv records as `complete`. Intended for
+// a training run that was cancelled partway through: the finished grid points
+// can be evaluated without re-running the solver, and without restating the
+// list file, datatype, cache dir or het-mode by hand.
+//
+// Settings come from the run directory itself:
+//   models.tsv          which models exist and which of them finished
+//   preprocess_config   list_path, datatype, cache_dir, het_mode, num_threads
+//   process_log.txt     hyp_path (the only one of these not in preprocess_config;
+//                       needed for the accuracy metrics)
+// ---------------------------------------------------------------------------
+
+// Recover hyp_path from the most recent `encode` section of process_log.txt.
+// Returns an empty path when absent, in which case evaluation still runs but
+// reports predictions only.
+static fs::path find_encode_hyp_path(const fs::path& run_dir) {
+    std::ifstream f(run_dir / "process_log.txt");
+    if (!f) return {};
+    std::string line, found;
+    bool in_encode = false;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("=== ", 0) == 0) {
+            in_encode = line.rfind("=== encode ", 0) == 0;
+            continue;
+        }
+        if (!in_encode) continue;
+        const std::string key = "hyp_path = ";
+        if (line.rfind(key, 0) == 0) found = line.substr(key.size());  // keep the last
+    }
+    if (found.empty()) return {};
+
+    // The path was logged exactly as it was typed, so it may be relative to the
+    // working directory the training run used. Try that first, then relative to
+    // the run directory and its parent.
+    for (const fs::path& cand : {fs::path(found), run_dir / found, run_dir.parent_path() / found})
+        if (fs::exists(cand)) return cand;
+    return fs::path(found);   // let evaluate report the failure with the original text
+}
+
+int run_evaluate_from_run(const fs::path& run_dir, int argc, char* argv[]) {
+    if (!fs::exists(run_dir))
+        throw std::runtime_error("--from-run directory does not exist: " + run_dir.string());
+
+    fs::path log_path = run_dir / "models.tsv";
+    if (!fs::exists(log_path))
+        throw std::runtime_error(
+            "No models.tsv in " + run_dir.string() +
+            " — --from-run needs a run directory produced by train/drphylo/aim.");
+
+    auto rows = model_log::read(log_path);
+    auto pre  = pipeline::read_preprocess_config(run_dir);
+
+    // CLI overrides; anything left unset falls back to the recorded settings.
+    fs::path     hyp_override, cache_override;
+    std::string  datatype_override, het_override;
+    unsigned int threads_override = 0;
+    bool         re_evaluate = false, no_visualize = true;
+    int          gene_limit = -1, species_limit = -1;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if      (arg == "--from-run"    && i+1<argc) ++i;   // already consumed
+        else if (arg == "--re-evaluate")             re_evaluate = true;
+        else if (arg == "--visualize")               no_visualize = false;
+        else if (arg == "--no-visualize")            no_visualize = true;
+        else if (arg == "--hypothesis"  && i+1<argc) hyp_override      = argv[++i];
+        else if (arg == "--cache-dir"   && i+1<argc) cache_override    = argv[++i];
+        else if (arg == "--datatype"    && i+1<argc) { datatype_override = argv[++i]; validate_datatype(datatype_override); }
+        else if (arg == "--het-mode"    && i+1<argc) het_override      = argv[++i];
+        else if (arg == "--threads"     && i+1<argc) { threads_override = static_cast<unsigned>(std::stoi(argv[++i])); if(!threads_override) threads_override = 1; }
+        else if (arg == "--gene-limit"    && i+1<argc) gene_limit    = std::stoi(argv[++i]);
+        else if (arg == "--species-limit" && i+1<argc) species_limit = std::stoi(argv[++i]);
+        else std::cerr << "Warning: unknown argument '" << arg << "', ignoring\n";
+    }
+
+    fs::path hyp_path = !hyp_override.empty() ? hyp_override : find_encode_hyp_path(run_dir);
+
+    size_t n_complete = 0, n_pending = 0, n_failed = 0, n_skipped = 0;
+    for (const auto& r : rows) {
+        switch (r.status) {
+            case model_log::Status::Complete: ++n_complete; break;
+            case model_log::Status::Pending:  ++n_pending;  break;
+            case model_log::Status::Failed:   ++n_failed;   break;
+            case model_log::Status::Skipped:  ++n_skipped;  break;
+        }
+    }
+
+    std::cout << "--- Evaluate from run: " << run_dir.string() << " ---\n";
+    std::cout << "  Models in log:  " << rows.size()
+              << "  (complete=" << n_complete << ", pending=" << n_pending
+              << ", failed=" << n_failed << ", skipped=" << n_skipped << ")\n";
+    std::cout << "  Datatype:       " << (datatype_override.empty() ? pre.datatype : datatype_override) << "\n";
+    std::cout << "  List:           " << pre.list_path.string() << "\n";
+    if (hyp_path.empty())
+        std::cout << "  Hypothesis:     (none found — predictions only, no accuracy metrics)\n";
+    else
+        std::cout << "  Hypothesis:     " << hyp_path.string() << "\n";
+
+    size_t scored = 0, reused = 0, missing = 0, errored = 0, unscoreable = 0;
+    for (const auto& r : rows) {
+        if (r.status != model_log::Status::Complete) continue;
+
+        if (r.weights_path.empty()) {
+            // k-fold CV rows: no single model to score.
+            ++unscoreable;
+            continue;
+        }
+        fs::path wp = run_dir / r.weights_path;
+        if (!fs::exists(wp)) {
+            std::cerr << "Warning: [" << r.index << "] weights missing, skipping: "
+                      << wp.string() << "\n";
+            ++missing;
+            continue;
+        }
+        fs::path lam_dir = wp.parent_path();
+        if (!re_evaluate && fs::exists(lam_dir / "eval_SPS_SPP.txt")) {
+            ++reused;
+            continue;
+        }
+
+        pipeline::EvaluateOptions eopts;
+        eopts.weights_path = wp;
+        eopts.list_path    = pre.list_path;
+        eopts.output_file  = lam_dir / "eval.txt";
+        eopts.hyp_path     = hyp_path;
+        eopts.no_visualize = no_visualize;
+        eopts.datatype     = datatype_override.empty() ? pre.datatype : datatype_override;
+        eopts.het_mode     = het_override.empty()      ? pre.het_mode : het_override;
+        eopts.num_threads  = threads_override ? threads_override : pre.num_threads;
+        eopts.cache_dir    = cache_override.empty()    ? pre.cache_dir : cache_override;
+        eopts.minor_alleles_path        = run_dir / "minor_alleles.txt";
+        eopts.tiered_minor_alleles_path = run_dir / "tiered_minor_alleles.txt";
+        if (gene_limit    >= 0) eopts.gene_limit    = gene_limit;
+        if (species_limit >= 0) eopts.species_limit = species_limit;
+
+        std::cout << "\n[" << r.index << "] lambda=[" << r.lambda1 << "," << r.lambda2
+                  << "] -> " << r.weights_path << "\n";
+        try {
+            pipeline::evaluate(eopts);
+            ++scored;
+        } catch (const std::exception& e) {
+            // Keep going: the point of this mode is salvaging a partial run, so
+            // one bad model must not hide the results of every later one.
+            std::cerr << "Error: [" << r.index << "] evaluate failed: " << e.what() << "\n";
+            ++errored;
+        }
+    }
+
+    std::cout << "\n--- Summary ---\n";
+    std::cout << "  Scored:            " << scored << "\n";
+    if (reused)      std::cout << "  Already evaluated: " << reused << " (use --re-evaluate to redo)\n";
+    if (unscoreable) std::cout << "  No single model:   " << unscoreable << " (cross-validation rows)\n";
+    if (missing)     std::cout << "  Weights missing:   " << missing << "\n";
+    if (errored)     std::cout << "  Failed:            " << errored << "\n";
+    if (n_pending)   std::cout << "  Still pending:     " << n_pending << " (never solved)\n";
+
+    return errored ? 1 : 0;
+}
+
 int run_evaluate(int argc, char* argv[]) {
+    // Detect from-run mode before touching positionals, mirroring how
+    // run_drphylo detects tree mode by pre-scanning for --tree.
+    for (int i = 2; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--from-run")
+            return run_evaluate_from_run(argv[i + 1], argc, argv);
+
     if (argc < 5) {
         std::cerr << "Error: evaluate requires <weights.txt> <list.txt> <output_file>\n";
         print_help(argv[0], "evaluate");

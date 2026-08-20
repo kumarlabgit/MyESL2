@@ -1,6 +1,7 @@
 #include "pipeline_train.hpp"
 #include "group_penalty.hpp"
 #include "pipeline_utils.hpp"
+#include "model_log.hpp"
 #include "process_log.hpp"
 #include "regression.hpp"
 #include <iostream>
@@ -809,6 +810,28 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     }
     pipeline_utils::log_rss("train: before lambda loop");
 
+    // ── Model generation log ────────────────────────────────────────────────────
+    // Enumerate every model this run intends to produce BEFORE solving any of
+    // them, then update each row in place as it completes, is skipped or fails.
+    // A run cancelled partway through therefore leaves an accurate record of
+    // which models finished, which `evaluate --from-run` scores and a future
+    // resume can use to pick up the still-pending points.
+    model_log::Log mlog(output_dir / "models.tsv");
+    for (size_t pi = 0; pi < penalty_terms.size(); ++pi) {
+        for (size_t li = 0; li < lambdas.size(); ++li) {
+            // k-fold CV writes weights_fold_N.txt rather than a single
+            // scoreable model, so those rows carry no weights path.
+            std::string rel;
+            if (opts.nfolds == 0)
+                rel = (multi_penalty ? "penalty_" + std::to_string(pi) + "/" : "")
+                    + "lambda_" + std::to_string(li) + "/weights.txt";
+            mlog.add(pi, penalty_terms[pi], li, lambdas[li][0], lambdas[li][1], rel);
+        }
+    }
+    mlog.flush();
+    std::cout << "  Model log: " << mlog.size() << " model(s) -> "
+              << (output_dir / "models.tsv").string() << "\n";
+
     // ── Penalty loop ────────────────────────────────────────────────────────────
     for (size_t pi = 0; pi < penalty_terms.size(); ++pi) {
         double penalty = penalty_terms[pi];
@@ -847,15 +870,22 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(idx));
             fs::create_directories(lam_dir); // always create dir (sentinel for drphylo)
 
+            const size_t gid = pi * lambdas.size() + static_cast<size_t>(idx);
+
             if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
                 std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
                           << "] Skipping (gene count threshold)\n";
+                mlog.set(gid, model_log::Status::Skipped, "min-groups skip-ahead");
                 continue;
             }
 
             std::ostringstream out;
             out << std::fixed << std::setprecision(4);
 
+            // Wraps both the single-model and CV branches below so a solver
+            // failure lands in models.tsv before it unwinds. Left at this
+            // indentation deliberately to keep the branch bodies unchanged.
+            try {
             if (opts.nfolds == 0) {
                 // Single model
                 auto regr = regression::createRegressionAnalysis(
@@ -882,6 +912,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 result.lambdas_used.push_back(lam);
                 result.penalties_used.push_back(penalty);
                 gene_counts[idx] = gene_count;
+                mlog.set(gid, model_log::Status::Complete);
 
                 if (skip_ahead_valid && opts.min_groups > 0 && gene_count <= opts.min_groups) {
                     if (lam[1] == min_lambda2) break; // even min lambda2 is too sparse
@@ -976,8 +1007,25 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 out << "    TPR=" << tpr << " TNR=" << tnr
                     << " FPR=" << fpr << " FNR=" << fnr << "\n";
                 std::cout << out.str();
+                mlog.set(gid, model_log::Status::Complete, "cross-validation");
+            }
+            } catch (const std::exception& e) {
+                // Record the failure before unwinding so the log survives the
+                // abort; rethrow preserves the existing whole-run-aborts
+                // semantics rather than quietly continuing the grid.
+                mlog.set(gid, model_log::Status::Failed, e.what());
+                throw;
+            } catch (...) {
+                mlog.set(gid, model_log::Status::Failed, "unknown error");
+                throw;
             }
         }
+
+        // The skip-ahead ratchet can break out of the grid early; anything
+        // still pending for this penalty term was deliberately skipped, not
+        // merely unattempted. No-op when the loop ran to completion.
+        mlog.set_pending_in_penalty(pi, model_log::Status::Skipped,
+                                    "min-groups skip-ahead (early break)");
     } else {
         // ---- Parallel path (nfolds==0 only; no skip-ahead during loop) ----
         const bool prune_enabled =
@@ -1043,10 +1091,16 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     per_idx_lambdas[idx] = lam;
                     per_idx_solved[idx]  = 1;
                     gene_counts[idx]     = gene_count;
+                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Complete);
 
                     std::lock_guard<std::mutex> lk(log_mutex);
                     std::cout << out.str();
+                } catch (const std::exception& e) {
+                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Failed, e.what());
+                    std::lock_guard<std::mutex> lk(err_mutex);
+                    if (!first_error) first_error = std::current_exception();
                 } catch (...) {
+                    mlog.set(pi * lambdas.size() + idx, model_log::Status::Failed, "unknown error");
                     std::lock_guard<std::mutex> lk(err_mutex);
                     if (!first_error) first_error = std::current_exception();
                 }
@@ -1068,6 +1122,11 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             auto pruned = prune_skipped_lambdas(
                 lambdas, gene_counts, pen_dir, opts.min_groups, min_lambda2);
             pruned_set.insert(pruned.begin(), pruned.end());
+            // The pruner deleted these lambda dirs' contents, so the models are
+            // gone; demote them from complete so evaluate --from-run skips them.
+            for (size_t pruned_idx : pruned)
+                mlog.set(pi * lambdas.size() + pruned_idx, model_log::Status::Skipped,
+                         "pruned for single-threaded skip-ahead parity");
             std::cout << "  Pruned " << pruned.size() << " of " << lambdas.size()
                       << " lambda point(s) to match single-threaded skip-ahead semantics.\n";
         }
