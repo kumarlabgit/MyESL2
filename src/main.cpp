@@ -764,7 +764,9 @@ int run_evaluate_from_run(const fs::path& run_dir, int argc, char* argv[]) {
     if (unscoreable) std::cout << "  No single model:   " << unscoreable << " (cross-validation rows)\n";
     if (missing)     std::cout << "  Weights missing:   " << missing << "\n";
     if (errored)     std::cout << "  Failed:            " << errored << "\n";
-    if (n_pending)   std::cout << "  Still pending:     " << n_pending << " (never solved)\n";
+    // "not yet solved" rather than "never solved": a pending row may simply
+    // belong to a run that is still in progress, not one that was abandoned.
+    if (n_pending)   std::cout << "  Still pending:     " << n_pending << " (not yet solved)\n";
 
     return errored ? 1 : 0;
 }
