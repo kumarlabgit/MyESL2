@@ -270,8 +270,24 @@ inline std::pair<int,int> run_parallel_conversions(
             // a .vcf.gz source must land on "sample.vnf", not "sample.vcf.vnf".
             fs::path dst = cache_dir / (input_stem(src) + cache_ext);
             fs::path err = cache_dir / (input_stem(src) + ".err");
+            // Convert into a temporary and rename into place, so a crash
+            // mid-conversion leaves no cache file at all rather than a partial
+            // one. read_pff_metadata/read_pnf_metadata reject a short payload,
+            // so a partial file would already be re-converted rather than
+            // trusted -- this just stops it existing in the first place, which
+            // also keeps a concurrent reader from seeing a half-written cache.
+            fs::path tmp = dst;
+            tmp += ".tmp";
             try {
-                conv_fn(src, dst);
+                conv_fn(src, tmp);
+                std::error_code mv_ec;
+                fs::rename(tmp, dst, mv_ec);
+                if (mv_ec) {
+                    fs::copy_file(tmp, dst, fs::copy_options::overwrite_existing, mv_ec);
+                    fs::remove(tmp, mv_ec);
+                    if (mv_ec)
+                        throw std::runtime_error("Cannot publish cache file: " + dst.string());
+                }
                 // Clear any sidecar that was ignored as stale, so it does not
                 // block this file again on the next run.
                 std::error_code rm_ec;
@@ -281,6 +297,8 @@ inline std::pair<int,int> run_parallel_conversions(
                 std::cout << "[" << converted + failed << "/" << total
                           << "] OK: " << src.filename() << "\n";
             } catch (const std::exception& e) {
+                std::error_code rm_ec;
+                fs::remove(tmp, rm_ec);      // never leave the partial behind
                 write_err(err, src, e.what());
                 std::lock_guard<std::mutex> lk(print_mutex);
                 ++failed;
