@@ -1,4 +1,5 @@
 #pragma once
+#include "atomic_out.hpp"
 #include <armadillo>
 #include <algorithm>
 #include <cmath>

@@ -1,4 +1,5 @@
 #include "visualizer.hpp"
+#include "atomic_out.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -140,7 +141,7 @@ void write_svg(const GenePredictionsTable& table,
     size_t N = table.seq_ids.size();
     size_t G = table.gene_names.size();
     if (N == 0 || G == 0) {
-        std::ofstream o(out);
+        pipeline_utils::AtomicOut o(out);
         o << "<svg xmlns='http://www.w3.org/2000/svg'></svg>\n";
         return;
     }
@@ -292,7 +293,7 @@ void write_svg(const GenePredictionsTable& table,
     int svg_h = MARGIN_TOP  + static_cast<int>(Ndisp) * CELL_H + extra_bottom;
 
     // --- 5. Render SVG ---
-    std::ofstream o(out);
+    pipeline_utils::AtomicOut o(out);
     if (!o) throw std::runtime_error("Cannot write SVG: " + out.string());
 
     o << "<?xml version='1.0' encoding='UTF-8'?>\n"
@@ -400,7 +401,7 @@ void write_aim_svg(const AimVizData& data, const std::filesystem::path& out)
     int H = static_cast<int>(pos_rows.size());
 
     if (W == 0 || H == 0 || Kc == 0) {
-        std::ofstream o(out);
+        pipeline_utils::AtomicOut o(out);
         o << "<svg xmlns='http://www.w3.org/2000/svg'></svg>\n";
         return;
     }
@@ -449,7 +450,7 @@ void write_aim_svg(const AimVizData& data, const std::filesystem::path& out)
     int total_w = heat_x0 + heatmap_w + extra_right;
     int total_h = heat_y0 + heatmap_h + PANEL_GAP + CHART_H + 25;
 
-    std::ofstream o(out);
+    pipeline_utils::AtomicOut o(out);
     if (!o) throw std::runtime_error("Cannot write AIM SVG: " + out.string());
 
     o << "<?xml version='1.0' encoding='UTF-8'?>\n"

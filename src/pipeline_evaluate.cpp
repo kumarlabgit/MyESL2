@@ -62,7 +62,7 @@ static void write_sps_spp_file(
     }
     double norm_pos = std::max(max_ep_pos - 0.5, 1e-9);
     double norm_neg = std::max(0.5 - min_ep_neg, 1e-9);
-    std::ofstream sf(out_path);
+    pipeline_utils::AtomicOut sf(out_path);
     sf << std::fixed << std::setprecision(6) << "SeqID\tResponse\tSPS\tSPP\tSCP\n";
     for (size_t i = 0; i < seq_ids.size(); ++i) {
         double ep  = expit(preds[i]);
@@ -928,7 +928,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         fs::path out_dir = output_path.parent_path();
         if (!out_dir.empty()) fs::create_directories(out_dir);
 
-        std::ofstream out(output_path);
+        pipeline_utils::AtomicOut out(output_path);
         if (!out) throw std::runtime_error("Cannot create output file: " + output_path.string());
         out << std::fixed << std::setprecision(6);
         if (!true_values.empty())
@@ -959,7 +959,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
 
         gene_pred_path = out_dir / (stem_base + "_gene_predictions.txt");
         {
-            std::ofstream gp(gene_pred_path);
+            pipeline_utils::AtomicOut gp(gene_pred_path);
             gp << std::fixed << std::setprecision(15);
             gp << "SeqID\tResponse\tPrediction";
             for (auto& g : eval_gene_order) gp << '\t' << g;
@@ -991,7 +991,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         if (has_grouped_weights && eval_max_group >= 0) {
             fs::path gp_grouped = out_dir / (stem_base + "_gene_predictions_grouped.txt");
             {
-                std::ofstream gf(gp_grouped);
+                pipeline_utils::AtomicOut gf(gp_grouped);
                 gf << std::fixed << std::setprecision(15);
                 gf << "SeqID\tResponse\tPrediction";
                 for (int gi = 0; gi <= eval_max_group; ++gi)
@@ -1025,7 +1025,7 @@ EvaluateResult evaluate(const EvaluateOptions& opts)
         if (has_grouped_weights && !eval_gene_group_order.empty()) {
             fs::path gp_bygene = out_dir / (stem_base + "_gene_predictions_by_gene.txt");
             {
-                std::ofstream bf(gp_bygene);
+                pipeline_utils::AtomicOut bf(gp_bygene);
                 bf << std::fixed << std::setprecision(15);
                 bf << "SeqID\tResponse\tPrediction";
                 for (auto& k : eval_gene_group_order) bf << '\t' << k;
@@ -1426,7 +1426,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
     // -------------------------------------------------------------------------
     fs::path gp_out = run_dir / "eval_gene_predictions.txt";
     {
-        std::ofstream gp(gp_out);
+        pipeline_utils::AtomicOut gp(gp_out);
         gp << std::fixed << std::setprecision(6);
         gp << "SeqID\tResponse\tPrediction_mean";
         for (auto& g : all_genes) gp << '\t' << g;
@@ -1508,7 +1508,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
         // Write aggregated file
         fs::path out_file = run_dir / filename;
         {
-            std::ofstream of(out_file);
+            pipeline_utils::AtomicOut of(out_file);
             of << std::fixed << std::setprecision(6);
             of << "SeqID\tResponse\tPrediction_mean";
             for (auto& c : cols) of << '\t' << c;
@@ -1533,7 +1533,7 @@ DrPhyloAggResult evaluate_drphylo_aggregate(
     // Derive eval.txt from aggregated predictions
     // -------------------------------------------------------------------------
     {
-        std::ofstream ef(run_dir / "eval.txt");
+        pipeline_utils::AtomicOut ef(run_dir / "eval.txt");
         ef << std::fixed << std::setprecision(6);
         ef << "SequenceID\tPredictedValue\tTrueValue\n";
         for (size_t i = 0; i < N; ++i)
