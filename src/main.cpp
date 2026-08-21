@@ -276,7 +276,8 @@ void print_help_drphylo(const char* prog_name) {
         "    --lambda-grid 0.1,0.9,0.1 0.1,0.9,0.1   (81-cell sweep)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
-        "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
+        "    --param, --nfolds, --cv-seed, --cv-assignments, --cv-scores, --min-groups\n"
+        "    --prune-skipped-lambda, --resume, --resume-force, --resume-skip-failed\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
@@ -296,7 +297,8 @@ void print_help_aim(const char* prog_name) {
         "    --aim-window N        top-N features considered per iteration (default: 100)\n"
         "  Shared with train (same semantics):\n"
         "    --method, --precision, --lambda, --lambda-file, --lambda-grid, --use-logspace\n"
-        "    --param, --nfolds, --cv-seed, --cv-assignments, --min-groups, --prune-skipped-lambda\n"
+        "    --param, --nfolds, --cv-seed, --cv-assignments, --cv-scores, --min-groups\n"
+        "    --prune-skipped-lambda, --resume, --resume-force, --resume-skip-failed\n"
         "    --group-penalty-type, --initial-gp-value, --final-gp-value, --gp-step\n"
         "    --auto-bit-ct, --drop-major-allele, --minor-column\n"
         "    --class-bal, --cache-dir, --min-minor, --threads, --dlt, --datatype\n"
@@ -425,6 +427,31 @@ int run_taskfile(int argc, char* argv[]);
 // per-fold models scored under --cv-scores do not all collide on eval.txt:
 //   weights.txt        -> eval.txt
 //   weights_fold_3.txt -> eval_fold_3.txt   (siblings: eval_fold_3_SPS_SPP.txt, ...)
+// True when every model a run directory planned has reached a terminal state,
+// so there is nothing left to solve there. Used by drphylo and aim to skip whole
+// clades and iterations on --resume without descending into train().
+bool grid_is_settled(const fs::path& run_dir) {
+    fs::path log = run_dir / "models.tsv";
+    if (!fs::exists(log)) return false;
+    std::vector<model_log::Row> rows;
+    try { rows = model_log::read(log); } catch (...) { return false; }
+    if (rows.empty()) return false;
+    for (const auto& r : rows)
+        if (r.status == model_log::Status::Pending) return false;
+    return true;
+}
+
+/// Models a settled run directory produced, in grid order.
+std::vector<fs::path> settled_weights(const fs::path& run_dir) {
+    std::vector<fs::path> out;
+    try {
+        for (const auto& r : model_log::read(run_dir / "models.tsv"))
+            if (r.status == model_log::Status::Complete && !r.weights_path.empty())
+                out.push_back(run_dir / r.weights_path);
+    } catch (...) {}
+    return out;
+}
+
 fs::path eval_output_for(const fs::path& weights_path) {
     const std::string stem = weights_path.stem().string();
     const std::string tag  = stem.rfind("weights", 0) == 0 ? stem.substr(7) : "";
@@ -972,6 +999,9 @@ int run_drphylo(int argc, char* argv[]) {
         else if (arg == "--cv-seed"          && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments"   && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
         else if (arg == "--cv-scores")       train_opts_base.cv_scores = true;
+        else if (arg == "--resume")          train_opts_base.resume = true;
+        else if (arg == "--resume-force")    { train_opts_base.resume = true; train_opts_base.resume_force = true; }
+        else if (arg == "--resume-skip-failed") train_opts_base.resume_skip_failed = true;
         else if (arg == "--min-groups"       && i+1<argc) { train_opts_base.min_groups=std::stoi(argv[++i]); min_groups_set=true; }
         else if (arg == "--grid-rmse-cutoff" && i+1<argc) grid_rmse_cutoff = std::stod(argv[++i]);
         else if (arg == "--grid-acc-cutoff"  && i+1<argc) grid_acc_cutoff  = std::stod(argv[++i]);
@@ -1083,16 +1113,23 @@ int run_drphylo(int argc, char* argv[]) {
         enc_opts.output_dir = run_dir;
         enc_opts.hyp_path   = hyp_file;
 
-        auto enc = pipeline::encode(enc_opts);
-
         pipeline::TrainOptions t_opts = train_opts_base;
         t_opts.output_dir = run_dir;
-        auto train_result = pipeline::train(enc, t_opts);
 
-        // Per-lambda evaluate (no visualization)
+        // Per-lambda evaluate (no visualization). `only_missing` is set when the
+        // clade was skipped as already-solved: a crash between the grid finishing
+        // and the evaluation loop completing leaves a settled models.tsv with no
+        // eval output, and evaluate_drphylo_aggregate below reads those files to
+        // compute HSS -- so they must exist before it runs.
         auto pre_cfg = pipeline::read_preprocess_config(output_dir);
-        for (auto& wp : train_result.weights_paths) {
+        auto eval_models = [&](const std::vector<fs::path>& wps, bool only_missing) {
+        for (auto& wp : wps) {
             fs::path lam_dir = wp.parent_path();
+            if (only_missing) {
+                fs::path sps = eval_output_for(wp);
+                sps.replace_filename(sps.stem().string() + "_SPS_SPP.txt");
+                if (fs::exists(sps)) continue;
+            }
             pipeline::EvaluateOptions eopts;
             eopts.weights_path = wp;
             eopts.list_path    = pre_cfg.list_path;
@@ -1108,6 +1145,35 @@ int run_drphylo(int argc, char* argv[]) {
             eopts.minor_alleles_path = run_dir / "minor_alleles.txt";
             eopts.tiered_minor_alleles_path = run_dir / "tiered_minor_alleles.txt";
             pipeline::evaluate(eopts);
+        }
+        };
+
+        // A clade with nothing left to solve is skipped wholesale; its HSS is
+        // still recovered below from the files already on disk, so hss_summary
+        // lists every clade whether or not this run touched it.
+        // A clade the interrupted run never reached has no models.tsv, so there is
+        // nothing to resume there -- run it fresh rather than refusing for want of
+        // a manifest, which would abort the whole tree at the first unstarted clade.
+        if (t_opts.resume && !fs::exists(run_dir / "models.tsv")) t_opts.resume = false;
+
+        // Verified BEFORE the settled check: a clade that finished under different
+        // settings must still be refused, not silently reused for having nothing
+        // left to solve.
+        auto manifest = run_manifest::build(pre_for_run, enc_opts, t_opts);
+        if (t_opts.resume)
+            run_manifest::enforce(run_dir, manifest, t_opts.resume_force, false);
+
+        if (t_opts.resume && grid_is_settled(run_dir)) {
+            std::cout << label << ": already complete, reusing\n";
+            eval_models(settled_weights(run_dir), /*only_missing=*/true);
+        } else {
+            auto enc = pipeline::encode(enc_opts);
+            run_manifest::add_layout(manifest, enc);
+            if (t_opts.resume)
+                run_manifest::enforce(run_dir, manifest, t_opts.resume_force, true);
+            run_manifest::write(run_dir, manifest);
+            auto train_result = pipeline::train(enc, t_opts);
+            eval_models(train_result.weights_paths, /*only_missing=*/false);
         }
 
         auto agg = pipeline::evaluate_drphylo_aggregate(run_dir, grid_rmse_cutoff, grid_acc_cutoff,
@@ -1200,6 +1266,9 @@ int run_aim(int argc, char* argv[]) {
         else if (arg == "--cv-seed"        && i+1<argc) train_opts_base.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments" && i+1<argc) train_opts_base.cv_assignments_path = argv[++i];
         else if (arg == "--cv-scores") train_opts_base.cv_scores = true;
+        else if (arg == "--resume") train_opts_base.resume = true;
+        else if (arg == "--resume-force") { train_opts_base.resume = true; train_opts_base.resume_force = true; }
+        else if (arg == "--resume-skip-failed") train_opts_base.resume_skip_failed = true;
         else if (arg == "--min-groups"     && i+1<argc) train_opts_base.min_groups = std::stoi(argv[++i]);
         else if (arg == "--class-bal"      && i+1<argc) enc_opts_base.class_bal = argv[++i];
         else if (arg == "--drop-major-allele") enc_opts_base.drop_major = true;
@@ -1328,11 +1397,34 @@ int run_aim(int argc, char* argv[]) {
         enc_opts.output_dir    = iter_dir;
         enc_opts.hyp_path      = aim_hyp_path;
         enc_opts.dropout_labels = accumulated_set;
-        auto enc = pipeline::encode(enc_opts);
 
         pipeline::TrainOptions t_opts = train_opts_base;
         t_opts.output_dir = iter_dir;
-        pipeline::train(enc, t_opts);
+
+        // AIM carries no state between iterations: the next round's feature
+        // ranking is re-derived from this directory's files below. A settled
+        // iteration can therefore be skipped outright and the loop still
+        // continues from the right place with the right ranking.
+        // Same as drphylo: an iteration the interrupted run never reached has
+        // nothing to resume, so run it fresh.
+        if (t_opts.resume && !fs::exists(iter_dir / "models.tsv")) t_opts.resume = false;
+
+        // As in drphylo: verified before the settled check, so an iteration that
+        // finished under different settings is refused rather than reused.
+        auto manifest = run_manifest::build(pre_cfg, enc_opts, t_opts);
+        if (t_opts.resume)
+            run_manifest::enforce(iter_dir, manifest, t_opts.resume_force, false);
+
+        if (t_opts.resume && grid_is_settled(iter_dir)) {
+            std::cout << "[AIM] iter " << iter << " already complete, reusing\n";
+        } else {
+            auto enc = pipeline::encode(enc_opts);
+            run_manifest::add_layout(manifest, enc);
+            if (t_opts.resume)
+                run_manifest::enforce(iter_dir, manifest, t_opts.resume_force, true);
+            run_manifest::write(iter_dir, manifest);
+            pipeline::train(enc, t_opts);
+        }
 
         // Read feature weights — check penalty subdirs when multi-penalty output exists
         std::vector<std::pair<double,std::string>> feature_rank;
