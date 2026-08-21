@@ -189,6 +189,50 @@ inline std::unordered_set<char> load_datatype_chars(
 }
 
 // ---------------------------------------------------------------------------
+// Content fingerprints (FNV-1a, 64-bit)
+//
+// Used by run_manifest to decide whether a resumed run is continuing the same
+// work. Not a security hash -- it only has to notice that a file or an input
+// set changed between two runs on the same machine.
+// ---------------------------------------------------------------------------
+
+inline uint64_t fnv1a(const void* data, size_t len, uint64_t h = 1469598103934665603ULL)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < len; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+inline uint64_t fnv1a_str(const std::string& s, uint64_t h = 1469598103934665603ULL)
+{
+    return fnv1a(s.data(), s.size(), h);
+}
+
+/// Hash a file's contents. Returns 0 when the file cannot be read, so a missing
+/// file compares unequal to a present one rather than silently matching.
+inline uint64_t hash_file(const fs::path& p)
+{
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return 0;
+    uint64_t h = 1469598103934665603ULL;
+    char buf[64 * 1024];
+    while (f.read(buf, sizeof(buf)) || f.gcount() > 0)
+        h = fnv1a(buf, static_cast<size_t>(f.gcount()), h);
+    return h;
+}
+
+inline std::string hex64(uint64_t v)
+{
+    static const char* d = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i) { out[i] = d[v & 0xF]; v >>= 4; }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Conversion failure sidecars (<cache_dir>/<stem>.err)
 //
 // A failed conversion drops a sidecar so the file is not retried on every run.

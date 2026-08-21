@@ -15,7 +15,7 @@
 //
 // Format: tab-separated, one header line, then one row per model.
 //
-//   Index  PenaltyIdx  PenaltyValue  LambdaIdx  FoldIdx  Lambda1  Lambda2  WeightsPath  Status  Detail
+//   Index  PenaltyIdx  PenaltyValue  LambdaIdx  FoldIdx  Lambda1  Lambda2  WeightsPath  Status  GeneCount  Detail
 //
 //   Index        global 0-based model index across the whole run (penalty-major)
 //   PenaltyIdx   index into the penalty-term list (0 when there is only one)
@@ -28,6 +28,10 @@
 //                produces no single scoreable model (k-fold CV without
 //                --cv-scores writes only weights_fold_N.txt).
 //   Status       pending | complete | failed | skipped
+//   GeneCount    non-zero gene count the solver reported, or -1 when unknown.
+//                Recorded so a resumed run can replay the --min-groups
+//                skip-ahead ratchet without re-solving the earlier points it
+//                depends on.
 //   Detail       failure message or skip reason; empty otherwise
 //
 // Durability: every status change rewrites the whole file to a sibling .tmp and
@@ -79,11 +83,12 @@ struct Row {
     double      lambda2       = 0.0;
     std::string weights_path;   ///< relative to the run dir; empty when none
     Status      status        = Status::Pending;
+    int         gene_count    = -1;   ///< -1 = unknown / not solved
     std::string detail;
 };
 
 inline const char* kHeader =
-    "Index\tPenaltyIdx\tPenaltyValue\tLambdaIdx\tFoldIdx\tLambda1\tLambda2\tWeightsPath\tStatus\tDetail";
+    "Index\tPenaltyIdx\tPenaltyValue\tLambdaIdx\tFoldIdx\tLambda1\tLambda2\tWeightsPath\tStatus\tGeneCount\tDetail";
 
 // Strip characters that would corrupt a TSV row.
 inline std::string sanitize(const std::string& s) {
@@ -127,12 +132,30 @@ public:
         return rows_.size() - 1;
     }
 
-    void set(size_t index, Status st, const std::string& detail = "") {
+    void set(size_t index, Status st, const std::string& detail = "", int gene_count = -1) {
         std::lock_guard<std::mutex> lk(mu_);
         if (index >= rows_.size()) return;
-        rows_[index].status = st;
-        rows_[index].detail = detail;
+        rows_[index].status     = st;
+        rows_[index].detail     = detail;
+        rows_[index].gene_count = gene_count;
         write_locked();
+    }
+
+    /// Seed a row from a previous run's record without touching the file.
+    /// Used when resuming: every row is adopted first, then one flush() writes
+    /// the merged table, instead of one rewrite per adopted row.
+    void adopt(size_t index, const Row& prior) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (index >= rows_.size()) return;
+        rows_[index].status     = prior.status;
+        rows_[index].detail     = prior.detail;
+        rows_[index].gene_count = prior.gene_count;
+    }
+
+    /// Snapshot of the current rows (for resume classification).
+    std::vector<Row> rows() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return rows_;
     }
 
     /// Reclassify every still-pending row of one penalty term. Used when the
@@ -175,7 +198,7 @@ private:
                   << r.fold_idx << '\t'
                   << fmt_num(r.lambda1) << '\t' << fmt_num(r.lambda2) << '\t'
                   << r.weights_path << '\t' << to_string(r.status) << '\t'
-                  << sanitize(r.detail) << '\n';
+                  << r.gene_count << '\t' << sanitize(r.detail) << '\n';
             }
         }
         std::error_code ec;
@@ -207,7 +230,7 @@ inline std::vector<Row> read(const fs::path& path) {
         std::string tok;
         std::istringstream ss(line);
         while (std::getline(ss, tok, '\t')) col.push_back(tok);
-        if (col.size() < 9) continue;
+        if (col.size() < 10) continue;
 
         Row r;
         try {
@@ -221,7 +244,8 @@ inline std::vector<Row> read(const fs::path& path) {
         } catch (...) { continue; }
         r.weights_path = col[7];
         r.status       = parse_status(col[8]);
-        r.detail       = col.size() > 9 ? col[9] : "";
+        try { r.gene_count = std::stoi(col[9]); } catch (...) { r.gene_count = -1; }
+        r.detail       = col.size() > 10 ? col[10] : "";
         rows.push_back(std::move(r));
     }
     return rows;

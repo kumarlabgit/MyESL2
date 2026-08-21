@@ -17,6 +17,7 @@
 #include "pipeline_encode.hpp"
 #include "pipeline_train.hpp"
 #include "model_log.hpp"
+#include "run_manifest.hpp"
 #include "pipeline_evaluate.hpp"
 #include "pipeline_adaptive.hpp"
 #include "pipeline_utils.hpp"
@@ -114,6 +115,18 @@ void print_help_train(const char* prog_name) {
         "    --nfolds N                   K-fold cross-validation (N >= 2, requires --method)\n"
         "    --cv-seed N                  shuffle samples with mt19937(N) before fold round-robin\n"
         "                                 (default: -1 = legacy unshuffled i % nfolds assignment)\n"
+        "    --resume                     reuse the models this output directory already\n"
+        "                                 completed (per models.tsv) and solve only the rest.\n"
+        "                                 Requires a run_manifest recording the same\n"
+        "                                 settings; a mismatch is refused and names what\n"
+        "                                 changed. A resumed run reproduces an\n"
+        "                                 uninterrupted one exactly.\n"
+        "    --resume-force               resume despite differing settings (implies\n"
+        "                                 --resume). Cannot override a feature-matrix\n"
+        "                                 layout change, which would make old and new\n"
+        "                                 models index different features.\n"
+        "    --resume-skip-failed         leave previously-failed models alone instead of\n"
+        "                                 retrying them.\n"
         "    --cv-scores                  (requires --nfolds) additionally score each fold\n"
         "                                 model against the FULL dataset as if it were an\n"
         "                                 ordinary model, so every fold gets its own\n"
@@ -472,6 +485,9 @@ int run_train(int argc, char* argv[]) {
         else if (arg == "--cv-seed"    && i+1<argc) train_opts.cv_seed = std::stoi(argv[++i]);
         else if (arg == "--cv-assignments" && i+1<argc) train_opts.cv_assignments_path = argv[++i];
         else if (arg == "--cv-scores") train_opts.cv_scores = true;
+        else if (arg == "--resume") train_opts.resume = true;
+        else if (arg == "--resume-force") { train_opts.resume = true; train_opts.resume_force = true; }
+        else if (arg == "--resume-skip-failed") train_opts.resume_skip_failed = true;
         else if (arg == "--min-groups" && i+1<argc) train_opts.min_groups = std::stoi(argv[++i]);
         else if (arg == "--auto-bit-ct"&& i+1<argc) enc_opts.auto_bit_ct = std::stod(argv[++i]);
         else if (arg == "--drop-major-allele") enc_opts.drop_major = true;
@@ -574,10 +590,30 @@ int run_train(int argc, char* argv[]) {
         throw std::runtime_error("--minor-column and --tiered-minor-col are mutually exclusive");
     if (train_opts.cv_scores && train_opts.nfolds == 0)
         throw std::runtime_error("--cv-scores requires --nfolds (there are no fold models to score)");
+    if (train_opts.resume_skip_failed && !train_opts.resume)
+        throw std::runtime_error("--resume-skip-failed requires --resume");
 
     pipeline::preprocess(pre_opts);
+
+    // Settings that determine which models a run produces. Checked BEFORE encode
+    // so a mismatched resume is refused while the output directory is still
+    // internally consistent -- encode would otherwise overwrite combined.map and
+    // leave it disagreeing with the models already on disk.
+    auto manifest = run_manifest::build(pre_opts, enc_opts, train_opts);
+    if (train_opts.resume)
+        run_manifest::enforce(enc_opts.output_dir, manifest, train_opts.resume_force,
+                              /*include_layout=*/false);
     try {
         auto enc = pipeline::encode(enc_opts);
+
+        // Layout fingerprints exist only once the matrix is assembled. If these
+        // disagree the columns moved despite matching settings, so existing
+        // models index different features; that is never resumable.
+        run_manifest::add_layout(manifest, enc);
+        if (train_opts.resume)
+            run_manifest::enforce(enc_opts.output_dir, manifest, train_opts.resume_force,
+                                  /*include_layout=*/true);
+        run_manifest::write(enc_opts.output_dir, manifest);
         auto train_result = pipeline::train(enc, train_opts);
 
         // Score every fitted model against the training data, so each lambda dir

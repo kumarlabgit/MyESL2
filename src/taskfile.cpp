@@ -38,6 +38,7 @@ TaskSpec spec_for(const std::string& task_type) {
     if (task_type == "train") {
         s.positionals = {"list_path", "hypothesis_path", "output_dir"};
         s.bool_flags = {"dlt", "prune-skipped-lambda", "use-logspace", "cv-scores",
+                        "resume", "resume-force", "resume-skip-failed",
                         "drop-major-allele", "minor-column", "tiered-minor-col",
                         "adaptive-sparsification", "no-evaluate"};
         s.bare_values = {"orientation"};
@@ -49,6 +50,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "prune-skipped-lambda", "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
             "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
+            "resume", "resume-force", "resume-skip-failed",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "class-bal", "dropout", "write-features", "write-features-transposed",
             "max-mem", "adaptive-sparsification", "adaptive-lambda-grid", "het-mode",
@@ -82,6 +84,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
             "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
+            "resume", "resume-force", "resume-skip-failed",
             "grid-rmse-cutoff", "grid-acc-cutoff", "gene-limit", "species-limit", "het-mode",
             "auto-bit-ct", "drop-major-allele", "minor-column", "tiered-minor-col",
             "max-mem",
@@ -102,6 +105,7 @@ TaskSpec spec_for(const std::string& task_type) {
             "method", "precision",
             "lambda", "lambda-file", "lambda-grid", "use-logspace", "param",
             "nfolds", "cv-seed", "cv-assignments", "cv-scores", "min-groups",
+            "resume", "resume-force", "resume-skip-failed",
             "class-bal", "drop-major-allele", "minor-column", "tiered-minor-col",
             "auto-bit-ct", "max-mem", "het-mode",
             "group-penalty-type", "initial-gp-value", "final-gp-value", "gp-step",

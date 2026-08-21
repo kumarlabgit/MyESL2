@@ -860,6 +860,66 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
             }
         }
     }
+    // ── Resume: adopt the previous run's outcomes ───────────────────────────────
+    // `reuse[i]` marks a model that survives from the earlier run and must not be
+    // re-solved. Everything else stays pending and goes through the grid loop as
+    // usual, so the two kinds of model are indistinguishable downstream.
+    std::vector<char> reuse(mlog.size(), 0);
+    std::vector<int>  resumed_gene_counts(mlog.size(), -1);
+    std::vector<model_log::Row> prior_rows;
+    size_t n_reused = 0, n_requeued = 0, n_kept_skipped = 0;
+    if (opts.resume) {
+        auto prior = model_log::read(output_dir / "models.tsv");
+        prior_rows = prior;
+        if (prior.size() != mlog.size())
+            throw std::runtime_error(
+                "--resume: models.tsv lists " + std::to_string(prior.size()) +
+                " model(s) but this run plans " + std::to_string(mlog.size()) +
+                ". The grid shape changed; train into a fresh output directory.");
+
+        for (size_t i = 0; i < prior.size(); ++i) {
+            const auto& r = prior[i];
+            switch (r.status) {
+                case model_log::Status::Complete: {
+                    // A complete row promises a whole weights file (they are
+                    // published by rename, and the status is only set after the
+                    // stream closes). If it is gone anyway, re-solve rather than
+                    // trust the record.
+                    fs::path wp = r.weights_path.empty() ? fs::path()
+                                                         : output_dir / r.weights_path;
+                    bool usable = r.weights_path.empty()      // CV rows carry no model
+                               || (fs::exists(wp) && fs::file_size(wp) > 0);
+                    if (usable) {
+                        mlog.adopt(i, r);
+                        reuse[i] = 1;
+                        resumed_gene_counts[i] = r.gene_count;
+                        ++n_reused;
+                    } else {
+                        ++n_requeued;
+                    }
+                    break;
+                }
+                case model_log::Status::Skipped:
+                    // Deliberately not solved last time; leave it that way so a
+                    // resumed run reaches the same shape as an uninterrupted one.
+                    mlog.adopt(i, r);
+                    reuse[i] = 1;
+                    resumed_gene_counts[i] = r.gene_count;
+                    ++n_kept_skipped;
+                    break;
+                case model_log::Status::Failed:
+                    if (opts.resume_skip_failed) { mlog.adopt(i, r); reuse[i] = 1; }
+                    else                         { ++n_requeued; }
+                    break;
+                case model_log::Status::Pending:
+                    ++n_requeued;
+                    break;
+            }
+        }
+        std::cout << "  Resume: " << n_reused << " model(s) reused, "
+                  << n_kept_skipped << " kept skipped, "
+                  << n_requeued << " to solve\n";
+    }
     mlog.flush();
 
     // Row index for one (penalty, lambda, fold). fold < 0 selects the lambda's
@@ -872,6 +932,28 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
     auto mark_lambda = [&](size_t pi, size_t li, model_log::Status st, const std::string& d) {
         for (size_t k = 0; k < rows_per_lambda; ++k)
             mlog.set(gid_of(pi, li, static_cast<int>(k)), st, d);
+    };
+    // A lambda is only reused wholesale. Under --cv-scores its folds are solved
+    // in a single pass, so a lambda interrupted between folds is re-solved
+    // entirely; the already-finished folds are simply rewritten with identical
+    // content, encode being deterministic.
+    auto lambda_reused = [&](size_t pi, size_t li) {
+        if (!opts.resume) return false;
+        for (size_t k = 0; k < rows_per_lambda; ++k)
+            if (!reuse[gid_of(pi, li, static_cast<int>(k))]) return false;
+        return true;
+    };
+    // Record a reused lambda's models exactly as a fresh solve would.
+    auto adopt_lambda = [&](size_t pi, size_t li, const std::array<double,2>& lam, double penalty) {
+        for (size_t k = 0; k < rows_per_lambda; ++k) {
+            size_t g = gid_of(pi, li, static_cast<int>(k));
+            if (g >= prior_rows.size()) continue;
+            const auto& r = prior_rows[g];
+            if (r.status != model_log::Status::Complete || r.weights_path.empty()) continue;
+            result.weights_paths.push_back(output_dir / r.weights_path);
+            result.lambdas_used.push_back(lam);
+            result.penalties_used.push_back(penalty);
+        }
     };
     std::cout << "  Model log: " << mlog.size() << " model(s) -> "
               << (output_dir / "models.tsv").string() << "\n";
@@ -916,6 +998,26 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
 
             const size_t gid = gid_of(pi, static_cast<size_t>(idx), -1);
 
+            // Advance the --min-groups ratchet from a gene count, whether it was
+            // just solved or restored from a previous run. Returns true when the
+            // grid should stop.
+            auto apply_ratchet = [&](int gc) -> bool {
+                if (!(skip_ahead_valid && opts.min_groups > 0)) return false;
+                if (gc < 0 || gc > opts.min_groups) return false;
+                if (lam[1] == min_lambda2) return true;
+                max_lambda2 = std::min(max_lambda2, lam[1]);
+                return false;
+            };
+
+            if (lambda_reused(pi, static_cast<size_t>(idx))) {
+                adopt_lambda(pi, static_cast<size_t>(idx), lam, penalty);
+                gene_counts[idx] = resumed_gene_counts[gid];
+                std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
+                          << "] reused from previous run\n";
+                if (apply_ratchet(gene_counts[idx])) break;
+                continue;
+            }
+
             if (skip_ahead_valid && opts.min_groups > 0 && lam[1] > max_lambda2) {
                 std::cout << "  [" << idx << "] lambda=[" << lam[0] << "," << lam[1]
                           << "] Skipping (gene count threshold)\n";
@@ -957,12 +1059,9 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 result.lambdas_used.push_back(lam);
                 result.penalties_used.push_back(penalty);
                 gene_counts[idx] = gene_count;
-                mlog.set(gid, model_log::Status::Complete);
+                mlog.set(gid, model_log::Status::Complete, "", gene_count);
 
-                if (skip_ahead_valid && opts.min_groups > 0 && gene_count <= opts.min_groups) {
-                    if (lam[1] == min_lambda2) break; // even min lambda2 is too sparse
-                    max_lambda2 = std::min(max_lambda2, lam[1]);
-                }
+                if (apply_ratchet(gene_count)) break; // even min lambda2 is too sparse
             } else {
                 // K-fold CV
                 std::vector<double> cv_preds(N, 0.0);
@@ -1105,6 +1204,22 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
         std::vector<std::array<double, 2>> per_idx_lambdas(lambdas.size());
         std::vector<char> per_idx_solved(lambdas.size(), 0);
 
+        // Reused models never enter the worker queue; seed their result slots and
+        // gene counts up front so the merge and the post-hoc pruner see the same
+        // picture an uninterrupted run would.
+        for (size_t idx = 0; opts.resume && idx < lambdas.size(); ++idx) {
+            size_t g = gid_of(pi, idx, -1);
+            if (!reuse[g]) continue;
+            gene_counts[idx] = resumed_gene_counts[g];
+            if (g < prior_rows.size()
+                && prior_rows[g].status == model_log::Status::Complete
+                && !prior_rows[g].weights_path.empty()) {
+                per_idx_weights[idx] = output_dir / prior_rows[g].weights_path;
+                per_idx_lambdas[idx] = lambdas[idx];
+                per_idx_solved[idx]  = 1;
+            }
+        }
+
         std::atomic<size_t> next_lambda{0};
         std::mutex log_mutex;
         std::mutex err_mutex;
@@ -1118,6 +1233,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                 }
                 size_t idx = next_lambda.fetch_add(1);
                 if (idx >= lambdas.size()) break;
+                if (opts.resume && reuse[gid_of(pi, idx, -1)]) continue;
                 try {
                     const auto& lam = lambdas[idx];
                     fs::path lam_dir = pen_dir / ("lambda_" + std::to_string(idx));
@@ -1150,7 +1266,7 @@ TrainResult train(const EncodeResult& enc, const TrainOptions& opts_in) {
                     per_idx_lambdas[idx] = lam;
                     per_idx_solved[idx]  = 1;
                     gene_counts[idx]     = gene_count;
-                    mlog.set(gid_of(pi, idx, -1), model_log::Status::Complete);
+                    mlog.set(gid_of(pi, idx, -1), model_log::Status::Complete, "", gene_count);
 
                     std::lock_guard<std::mutex> lk(log_mutex);
                     std::cout << out.str();

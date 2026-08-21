@@ -37,6 +37,12 @@ struct TrainOptions {
     // nfolds > 0. Off by default: a CV run normally reports only the pooled
     // held-out prediction in cv_predictions.txt.
     bool         cv_scores           = false;
+    // Resume: reuse the models a previous run of this output directory already
+    // completed (per models.tsv) and solve only the rest. Requires a matching
+    // run_manifest; see include/run_manifest.hpp for what "matching" means.
+    bool         resume              = false;
+    bool         resume_force        = false;   ///< proceed despite identity mismatches
+    bool         resume_skip_failed  = false;   ///< leave previously-failed points alone
     std::map<std::string, std::string> params;  // slep opts, merged with enc.extra_params
     bool        adaptive_sparsification = false;
     std::string adaptive_l1_spec = "0.1,0.3,0.1";    // produces 0.1, 0.2, 0.3
